@@ -1,2 +1,7 @@
 .env
 utils/
+
+https://github.com/Zodiac-Engineering/fluidra_ai_pool-assistant_mvp.git
+
+git config --global user.name "Javier Hernandez"
+git config --global user.email "jhernandez@partner.fluidra.com"
