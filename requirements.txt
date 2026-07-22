@@ -1,0 +1,24 @@
+# Core
+python-dotenv>=1.2.2
+streamlit>=1.57.0
+
+# LangChain / LangGraph
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
+langchain-qdrant>=0.2.0
+langgraph>=0.2.0
+langgraph-supervisor>=0.0.31
+
+# Vector Store
+qdrant-client>=1.11.0
+fastembed>=0.4.0
+
+# Graph DB
+neo4j>=5.0.0
+
+# Observability
+langfuse>=2.0.0
+
+# Data
+pandas>=2.0.0
