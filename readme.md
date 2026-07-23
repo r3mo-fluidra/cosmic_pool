@@ -25,7 +25,7 @@ START → build_context_node → [summarize_memory_node] → planner → orchest
 | `equipment` | Evaluates corrosion/scaling/degradation effects on hardware | Neo4j hardware impact, equipment manual search |
 | `maintenance` | Routine/seasonal maintenance and LSI water-balance analysis | Maintenance procedure search, LSI calculator/interpreter/recommender |
 | `general` | Free-form pool knowledge fallback | LLM knowledge only |
-| `ooo` | Politely declines out-of-scope requests | none |
+| `ooo` | Politely declines out-of-scope requests  | none |
 
 A `langgraph_supervisor`-based supervisor is also available for ad hoc agent routing outside the main graph.
 
@@ -43,7 +43,7 @@ A `langgraph_supervisor`-based supervisor is also available for ad hoc agent rou
 - A Google Gemini API key
 - (Optional) A Langfuse project for tracing/feedback
 
-## Setup
+## Setup virtual environment
 
 ```bash
 poetry install
