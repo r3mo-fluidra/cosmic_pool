@@ -16,9 +16,19 @@ load_dotenv()
 
 _neo4j_driver = None
 
+
+
 def _get_secret(key: str, default: str = None) -> Optional[str]:
     """Lee un secret desde env vars o st.secrets, en ese orden."""
     return os.getenv(key) or secrets.get(key) or default
+
+def _reset_cached_clients():
+    """Used only by unit tests."""
+    global _neo4j_driver
+    global GLOBAL_VECTOR_STORE
+
+    _neo4j_driver = None
+    GLOBAL_VECTOR_STORE = None
 
 def get_neo4j_driver():
     global _neo4j_driver
@@ -27,9 +37,7 @@ def get_neo4j_driver():
         user     = _get_secret("NEO4J_USER", "neo4j")
         password = _get_secret("NEO4J_PASSWORD")
 
-        import streamlit as st
-        st.write("DEBUG secrets keys:", list(st.secrets.keys()))
-        st.write("NEO4J_URI:", uri)
+        
         
         if not uri:
             raise ValueError(
