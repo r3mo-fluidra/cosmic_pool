@@ -188,12 +188,22 @@ if prompt := st.chat_input("E.g., My pool is cloudy and the pH is 8.2..."):
             # 4. Render Feedback Buttons
             col1, col2, _ = st.columns([1, 1, 8])
             with col1:
-                if st.button("👍 Good", key=f"good_{current_trace_id}"):
+                if st.button("👍 Me ayudó", key=f"good_{current_trace_id}"):
                     if lf:
-                        lf.score(trace_id=current_trace_id, name="user_feedback", value=1.0)
-                        st.toast("Feedback recorded! Thank you.")
+                        lf.score(
+                            trace_id=current_trace_id,
+                            name="user_feedback",
+                            value=1,  # 1 = positivo
+                            comment="Respuesta útil"
+                        )
+                        st.toast("¡Gracias por tu feedback!")
             with col2:
-                if st.button("👎 Bad", key=f"bad_{current_trace_id}"):
+                if st.button("👎 No me ayudó", key=f"bad_{current_trace_id}"):
                     if lf:
-                        lf.score(trace_id=current_trace_id, name="user_feedback", value=0.0)
-                        st.toast("Feedback recorded! Thank you.")
+                        lf.score(
+                            trace_id=current_trace_id,
+                            name="user_feedback",
+                            value=0,  # 0 = negativo
+                            comment="Respuesta no útil"
+                        )
+                        st.toast("¡Gracias por tu feedback!")

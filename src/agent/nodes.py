@@ -196,7 +196,7 @@ def summarize_memory_node(state: PoolAgentState) -> Command[Literal["planner"]]:
 # PLANNER NODE
 # ================================================================
 
-@observe(as_type='trace', name="Planner Node")
+@observe(as_type='agent', name="Planner Node")
 def planner(state: PoolAgentState):
     user_input = state["messages"][-1].content
 
@@ -240,7 +240,7 @@ def planner(state: PoolAgentState):
 # ORCHESTRATOR NODE
 # ================================================================
 
-@observe(as_type="trace", name="Orchestrator Node")
+@observe(as_type="agent", name="Orchestrator Node")
 def orchestrator(state: PoolAgentState) -> Command:
     execution_plan = state.get("execution_plan", [])
     agent_results  = dict(state.get("agent_results") or {})
