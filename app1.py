@@ -9,16 +9,6 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 # Import your compiled LangGraph workflow
 from src.agent.graph import graph
-from src.ui.theme import (
-    SCREEN_HEIGHT_PX,
-    assistant_label,
-    inject_theme,
-    page_footer,
-    page_header,
-    phone_header,
-    role_marker,
-    theme_slider,
-)
 
 # ==========================================
 # CONFIGURATION & LANGFUSE SETUP
@@ -26,23 +16,9 @@ from src.ui.theme import (
 st.set_page_config(
     page_title="Pool Chemistry Assistant",
     page_icon="🌊",
-    layout="centered",
-    initial_sidebar_state="expanded",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
-
-# Deep Water (dark) / Sunlit Lagoon (light). Must run before any other widget:
-# it reads the slider's session-state value and paints every surface below.
-inject_theme()
-
-# --- page copy -------------------------------------------------------------
-PAGE_TITLE = "Pool Chemistry & Maintenance Assistant"
-PAGE_SUBTITLE = (
-    "Describe your pool symptoms, maintenance needs, or equipment issues. "
-    "Grounded in product documentation and a curated pool knowledge graph."
-)
-PHONE_BRAND = "Pool Assistant"
-FOOTER_TEAM = "AI/ML Team — Bogotá, Colombia"
-FOOTER_PHASE = "UX/UI first test phase"
 
 # --- Score naming (kept in constants so score_id stays stable across reruns) ---
 SCORE_FEEDBACK = "user_feedback"
@@ -184,33 +160,31 @@ def get_neo4j_driver():
     return GraphDatabase.driver(uri, auth=(user, password))
 
 
-def check_and_handle_neo4j() -> tuple[bool, str]:
+def check_and_handle_neo4j():
     """
-    Checks Neo4j connectivity. Returns (online, message).
-
-    The message is returned rather than rendered, so the caller can show it
-    inside the phone screen. Rendering it here would paint a full-width alert
-    above the page title and break the framed layout.
-
+    Checks Neo4j connectivity.
     Note: If using Neo4j Aura Free Tier, it pauses automatically.
     Standard Python drivers cannot "unpause" Aura. You must use the Aura API
     to programmatically resume it, or resume it via the Neo4j Console.
     """
     driver = get_neo4j_driver()
     if not driver:
-        return False, "Neo4j environment variables are missing."
+        st.error("Neo4j environment variables are missing.")
+        return False
 
     try:
         driver.verify_connectivity()
-        return True, ""
+        return True
     except Exception as e:
         if "getaddrinfo failed" in str(e) or "Timeout" in str(e):
-            return False, (
-                "**Neo4j Database is currently unreachable or paused.**\n\n"
+            st.error(
+                "🚨 **Neo4j Database is currently unreachable or paused.**\n\n"
                 "If you are using Neo4j Aura Free Tier, it may have been paused due to inactivity. "
                 "Please log into the [Neo4j Aura Console](https://console.neo4j.io/) to resume your instance."
             )
-        return False, f"Neo4j Connection Error: {e}"
+        else:
+            st.error(f"Neo4j Connection Error: {e}")
+        return False
 
 
 # ==========================================
@@ -229,11 +203,11 @@ if "turn_counter" not in st.session_state:
     # unchanged, and the next prompt would reuse the same deterministic id.
     st.session_state.turn_counter = 0
 if "db_online" not in st.session_state:
-    st.session_state.db_online, st.session_state.db_message = check_and_handle_neo4j()
+    st.session_state.db_online = check_and_handle_neo4j()
 
 
 # ==========================================
-# UI: SIDEBAR (STATISTICS) — same functionality as original app.py
+# UI: SIDEBAR (STATISTICS)
 # ==========================================
 with st.sidebar:
     st.title("📊 Agent Diagnostics")
@@ -361,55 +335,21 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
 
 
 # ==========================================
-# UI: MAIN CHAT INTERFACE (app2 phone style)
+# UI: MAIN CHAT INTERFACE
 # ==========================================
-online = st.session_state.db_online
+st.title("🌊 Pool Chemistry & Maintenance Assistant")
+st.markdown("Describe your pool symptoms, maintenance needs, or equipment issues.")
 
-# Mode slider first: it sits in the top-right corner, above the title block.
-theme_slider()
+if not st.session_state.db_online:
+    st.stop()
 
-page_header(PAGE_TITLE, PAGE_SUBTITLE)
-
-# ── The phone ─────────────────────────────────────────────────────────────
-# Bezel -> screen -> scrollable chat area + inline composer. `screen_scroll` is
-# captured so the live turn below can render into it after the composer has
-# already been laid out inside the phone.
-with st.container(key="pa-phone"):
-    with st.container(key="pa-screen"):
-        phone_header(
-            PHONE_BRAND,
-            "Online" if online else "Unavailable",
-            online=online,
-        )
-
-        screen_scroll = st.container(height=SCREEN_HEIGHT_PX, key="pa-scroll")
-
-        with screen_scroll:
-            if not online:
-                # Same guidance the page used to show as a full-width error,
-                # now inside the screen so the shell stays intact.
-                st.error(st.session_state.get("db_message", "Service unavailable."))
-
-            # Chat history. Trace ref + feedback ride on every assistant turn
-            # that has a trace_id (same behaviour as original app.py).
-            for msg in st.session_state.messages:
-                with st.chat_message(msg["role"]):
-                    role_marker(msg["role"])
-                    if msg["role"] == "assistant":
-                        assistant_label()
-                    st.markdown(msg["content"])
-                    if msg["role"] == "assistant" and msg.get("trace_id"):
-                        render_trace_ref(msg["trace_id"])
-                        render_feedback(msg["trace_id"], turn_index=msg.get("turn_index"))
-
-        # Nested inside a container, so it renders inline in the phone rather
-        # than pinned to the bottom of the viewport.
-        prompt = st.chat_input(
-            "E.g., My pool is cloudy and the pH is 8.2..." if online else "Unavailable — the knowledge graph is offline",
-            disabled=not online,
-        )
-
-page_footer(FOOTER_TEAM, FOOTER_PHASE)
+# Display chat history (+ trace ref and feedback widget per assistant turn)
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg["role"] == "assistant" and msg.get("trace_id"):
+            render_trace_ref(msg["trace_id"])
+            render_feedback(msg["trace_id"], turn_index=msg.get("turn_index"))
 
 
 def run_turn(prompt: str, trace_id: str, turn_index: int) -> str:
@@ -466,10 +406,8 @@ def run_turn(prompt: str, trace_id: str, turn_index: int) -> str:
     return final_response
 
 
-# User Input — the composer lives inside the phone, above.
-# Rendering through `screen_scroll` keeps the live turn inside the phone's
-# scroll area, which was laid out before the composer.
-if prompt:
+# User Input
+if prompt := st.chat_input("E.g., My pool is cloudy and the pH is 8.2..."):
     # Monotonic turn index -> the seed is unique even if a previous turn failed.
     st.session_state.turn_counter += 1
     turn_index = st.session_state.turn_counter
@@ -480,13 +418,10 @@ if prompt:
     )
 
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with screen_scroll.chat_message("user"):
-        role_marker("user")
+    with st.chat_message("user"):
         st.markdown(prompt)
 
-    with screen_scroll.chat_message("assistant"):
-        role_marker("assistant")
-        assistant_label()
+    with st.chat_message("assistant"):
         with st.status("🧠 Agent Thinking Process...", expanded=True) as status:
             final_response = ""
             turn_error: Exception | None = None
