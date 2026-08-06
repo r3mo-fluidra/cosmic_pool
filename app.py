@@ -338,7 +338,7 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
     # --- Phase 1: no feedback yet ---
     c1, c2, _ = st.columns([1, 1, 8])
     with c1:
-        if st.button("👍 Me ayudó", key=f"good_{trace_id}"):
+        if st.button("👍", key=f"good_{trace_id}"):
             if submit_feedback(trace_id, 1, "Respuesta útil", turn_index=turn_index):
                 st.session_state.feedback[trace_id] = {
                     "value": 1,
@@ -348,7 +348,7 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
                 st.toast("¡Gracias por tu feedback!")
                 st.rerun()
     with c2:
-        if st.button("👎 No me ayudó", key=f"bad_{trace_id}"):
+        if st.button("👎", key=f"bad_{trace_id}"):
             # Persist the negative signal immediately: if the user abandons the
             # detail form, we still keep the 0. Safe because score_id is fixed.
             if submit_feedback(trace_id, 0, "Respuesta no útil (pendiente de detalle)", turn_index=turn_index):
@@ -399,7 +399,7 @@ with st.container(key="pa-phone"):
                         assistant_label()
                     st.markdown(msg["content"])
                     if msg["role"] == "assistant" and msg.get("trace_id"):
-                        render_trace_ref(msg["trace_id"])
+                        #render_trace_ref(msg["trace_id"])
                         render_feedback(msg["trace_id"], turn_index=msg.get("turn_index"))
 
         # Nested inside a container, so it renders inline in the phone rather
@@ -497,47 +497,39 @@ if prompt:
                     as_type="span",
                     name=TRACE_NAME,
                     trace_context={"trace_id": current_trace_id},
-                    input={"prompt": prompt},
-                ) as span:
+                        ) as span:
 
-                    propagate_attributes(
-                        user_id=st.session_state.thread_id,
-                        session_id=st.session_state.thread_id,
-                        tags=["streamlit", "pool-chemistry"],
-                        metadata={
-                            "turn_index": turn_index,
-                        },
-                    )
+                            propagate_attributes(
+                                user_id=st.session_state.thread_id,
+                                session_id=st.session_state.thread_id,
+                                tags=["streamlit", "pool-chemistry"],
+                                metadata={
+                                    "turn_index": turn_index,
+                                },
+                            )
 
-                    try:
-                        final_response = run_turn(
-                            prompt,
-                            current_trace_id,
-                            turn_index,
-                        )
+                            span.update(
+                                input={"prompt": prompt},
+                            )
 
-                        span.update(
-                            output={"response": final_response}
-                        )
+                            try:
+                                final_response = run_turn(
+                                    prompt,
+                                    current_trace_id,
+                                    turn_index,
+                                )
 
-                        span.set_trace_io(
-                            input={"prompt": prompt},
-                            output={"response": final_response},
-                        )
+                                span.update(
+                                    output={"response": final_response},
+                                )
 
-                    except Exception as e:
-                        turn_error = e
-
-                        span.update(
-                            level="ERROR",
-                            status_message=str(e),
-                            output={"error": str(e)},
-                        )
-
-                        span.set_trace_io(
-                            input={"prompt": prompt},
-                            output={"error": str(e)},
-                        )
+                            except Exception as e:
+                                span.update(
+                                    level="ERROR",
+                                    status_message=str(e),
+                                    output={"error": str(e)},
+                                )
+                                raise
 
                 lf.flush()
             else:
