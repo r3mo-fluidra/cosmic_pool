@@ -11,21 +11,21 @@ def _get_secret(key: str, default: str = None):
 
 def create_llm():
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         temperature=0.2
     )
 
 def create_routing_llm():
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         temperature=0.0
     )
 
 def create_synthesizer_llm():
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         temperature=0.4
     )
