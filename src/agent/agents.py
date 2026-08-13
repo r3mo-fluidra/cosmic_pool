@@ -10,17 +10,22 @@ from langgraph_supervisor import create_supervisor
 
 from .state import AgentName
 from ..config.llm import create_llm, create_routing_llm, create_synthesizer_llm
-from ..prompts.prompts_old import (
-    GENERAL_PROMPT, OOS_PROMPT, SUPERVISOR_PROMPT,
-    DIAGNOSIS_PROMPT, DOSAGE_PROMPT, EQUIPMENT_PROMPT, MAINTENANCE_PROMPT,
+from ..prompts.prompts import (
+    GENERAL_PROMPT, 
+    OOS_PROMPT, 
+    SUPERVISOR_PROMPT,
+    build_agent_prompt
 )
+from ..prompts.prompts_sub_agents import (
+    AGENT_REGISTRY,
+    tool_instructions_AA,
+    )   
 from .tools import (
-    query_symptom_graph, search_troubleshooting_kb,
-    query_chemical_actions, get_dosing_formulas,
-    query_hardware_impact, search_equipment_manuals,
-    search_maintenance_procedures, query_maintenance_dependencies,
-    calculate_lsi, interpret_lsi, recommend_lsi_correction, analyze_pool_lsi,
-)
+    vector_search,
+    search_seed_nodes,
+    expand_subgraph,
+    )
+
 
 # ================================================================
 # TOOLS
@@ -75,46 +80,83 @@ def _initialize():
         system_prompt=OOS_PROMPT,
     )
 
-    diagnosis_agent = create_agent(
-        model=_llm,
-        tools=[query_symptom_graph, search_troubleshooting_kb],
-        name="diagnosis",
-        system_prompt=DIAGNOSIS_PROMPT,
-    )
-
-    dosage_agent = create_agent(
-        model=_routing_llm,
-        tools=[query_chemical_actions, get_dosing_formulas],
-        name="dosage",
-        system_prompt=DOSAGE_PROMPT,
+    chemistry_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="chemistry",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[CHEMISTRY]),
     )
 
     equipment_agent = create_agent(
-        model=_llm,
-        tools=[query_hardware_impact, search_equipment_manuals],
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],  
         name="equipment",
-        system_prompt=EQUIPMENT_PROMPT,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[EQUIPMENT]),
     )
 
-    maintenance_agent = create_agent(
-        model=_llm,
-        tools=[
-            search_maintenance_procedures, query_maintenance_dependencies,
-            calculate_lsi, interpret_lsi, recommend_lsi_correction, analyze_pool_lsi,
-        ],
-        name="maintenance",
-        system_prompt=MAINTENANCE_PROMPT,
+    hydraulics_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="hydraulics",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[HYDRAULICS]),
     )
 
-    _agents = {
-        "general":     general_agent,
-        "ooo":         oos_agent,
-        "diagnosis":   diagnosis_agent,
-        "dosage":      dosage_agent,
-        "equipment":   equipment_agent,
-        "maintenance": maintenance_agent,
-    }
+    operations_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="operations",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[OPERATIONS]),
+    )
 
+    compliance_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="compliance",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[COMPLIANCE]),
+    )
+
+    contamination_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="contamination",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[CONTAMINATION]),
+    )
+
+    facility_design_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="facility_design",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[FACILITY_DESIGN]),
+    )
+
+    safety_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="safety",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[SAFETY]),
+    )
+
+    recovery_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="recovery",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[RECOVERY]),
+    )
+
+    records_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],  
+        name="records",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[RECORDS]),
+    )
+
+    math_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
+        name="math",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[MATH]),
+    )
+    
     pool_supervisor = create_supervisor(
         agents=list(_agents.values()),
         model=_routing_llm,

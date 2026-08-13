@@ -198,7 +198,7 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([NEO4J_HINT, QDRANT_HINT, NO_CALCULATOR_HINT]),
+    tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
         "test_interpretation (per-parameter: parameter, measured, target_range, status)",
         "chemical_actions (ordered list: action, chemical, rationale)",
@@ -241,7 +241,7 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([NEO4J_HINT, QDRANT_HINT, NO_CALCULATOR_HINT]),
+    tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
         "suspected_components (ordered by likelihood)",
         "diagnostic_steps",
@@ -285,12 +285,7 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([
-        "Use Neo4j for hydraulic relationships, equipment dependencies, flow "
-        "requirements, and venue-type flow constraints.",
-        QDRANT_HINT,
-        NO_CALCULATOR_HINT,
-    ]),
+    tool_instructions=tool_instructions_AA,
     output_contract=_contract(
         "hydraulic_assessment",
         "required_flow_basis (venue type, turnover requirement, source)",
@@ -333,13 +328,7 @@ MATH_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "calculator",
     ),
-    tool_instructions=(
-        "Use Neo4j to retrieve the authoritative formula, its variables, units, and "
-        "source citation before computing; do not recall formulas from memory. "
-        "Use the calculator for every arithmetic operation, including ones that seem "
-        "trivial. If Neo4j has no formula for the request, return "
-        "status='formula_not_found' rather than improvising one."
-    ),
+    tool_instructions=tool_instructions_AA,
     output_contract=_contract(
         "formula_name",
         "formula_expression",
@@ -387,7 +376,7 @@ OPERATIONS_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([NEO4J_HINT, QDRANT_HINT, NO_CALCULATOR_HINT]),
+    tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
         "operational_guidance",
         "schedule (task, frequency, responsible_role)",
@@ -437,13 +426,7 @@ COMPLIANCE_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([
-        "Use Neo4j for structured regulatory relationships, requirement-to-venue "
-        "mappings, and inspection dependencies.",
-        "Use Qdrant for code text, annex rationale, permits, and inspection manuals. "
-        "Quote normative text rather than paraphrasing it.",
-        NO_CALCULATOR_HINT,
-    ]),
+    tool_instructions=tool_instructions_AA,
     output_contract=_contract(
         "requirements (requirement, source_id, authority, venue_applicability)",
         "compliance_determination (compliant | non_compliant | indeterminate)",
@@ -494,14 +477,8 @@ CONTAMINATION_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([
-        "Use Neo4j for contamination-type to response-procedure relationships and "
-        "closure dependencies.",
-        "Use Qdrant for outbreak reports, standard operating procedures, and "
-        "disinfection protocols. Follow the published protocol exactly; do not "
-        "interpolate between procedures.",
-        NO_CALCULATOR_HINT,
-    ]),
+    tool_instructions=tool_instructions_AA,
+
     output_contract=_contract(
         "incident_classification",
         "closure_required (bool) and closure_duration_basis",
@@ -550,12 +527,7 @@ FACILITY_DESIGN_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([
-        "Use Neo4j for design relationships, equipment dependencies, venue-type "
-        "design requirements, and hydraulic constraints.",
-        "Use Qdrant for design manuals, construction guidelines, and best practices.",
-        NO_CALCULATOR_HINT,
-    ]),
+    tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
         "design_assessment",
         "equipment_recommendations (component, specification, basis)",
@@ -602,13 +574,7 @@ SAFETY_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([
-        "Use Neo4j for safety requirement relationships, venue-type dependencies, "
-        "and equipment-to-hazard mappings.",
-        "Use Qdrant for safety manuals, lifeguard training material, and illness "
-        "prevention guidance.",
-        NO_CALCULATOR_HINT,
-    ]),
+    tool_instructions=tool_instructions_AA,
     output_contract=_contract(
         "safety_assessment",
         "hazards (hazard, exposure, mitigation)",
@@ -650,13 +616,7 @@ RECORDS_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([
-        "Use Neo4j for record-to-requirement relationships and documentation "
-        "dependencies.",
-        "Use Qdrant for recordkeeping manuals, log templates, and inspection "
-        "report formats.",
-        NO_CALCULATOR_HINT,
-    ]),
+    tool_instructions=tool_instructions_AA,
     output_contract=_contract(
         "records_required (record_name, fields, frequency, retention)",
         "log_structure",
@@ -701,13 +661,7 @@ RECOVERY_AGENT_CONFIG = AgentConfig(
         "neo4j",
         "qdrant",
     ),
-    tool_instructions=" ".join([
-        "Use Neo4j for event-type to recovery-procedure relationships and system "
-        "dependencies.",
-        "Use Qdrant for disaster recovery guidance, flood remediation procedures, "
-        "and environmental incident protocols.",
-        NO_CALCULATOR_HINT,
-    ]),
+    tool_instructions=tool_instructions_AA,
     output_contract=_contract(
         "event_classification",
         "damage_assessment",
