@@ -1,4 +1,5 @@
 # BASE_POOL_AGENT_PROMPT_V1
+from .prompts_sub_agents import AgentConfig
 """
 Planner and boundary prompts for the Pool Chemistry & Maintenance Assistant.
 
