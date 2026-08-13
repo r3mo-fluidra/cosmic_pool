@@ -156,7 +156,21 @@ def _initialize():
         name="math",
         system_prompt=build_agent_prompt(AGENT_REGISTRY[MATH]),
     )
-    
+    _agents = {
+        "general":     general_agent,
+        "ooo":         oos_agent,
+        "chemistry":   chemistry_agent,
+        "equipment":   equipment_agent,
+        "hydraulics":  hydraulics_agent,
+        "operations":  operations_agent,
+        "compliance":  compliance_agent,
+        "contamination": contamination_agent,
+        "facility_design": facility_design_agent,
+        "safety": safety_agent,
+        "recovery": recovery_agent,
+        "records": records_agent,
+        "math": math_agent,
+    }
     pool_supervisor = create_supervisor(
         agents=list(_agents.values()),
         model=_routing_llm,

@@ -24,10 +24,9 @@ from src.ui.theme import (
 # CONFIGURATION & LANGFUSE SETUP
 # ==========================================
 st.set_page_config(
-    page_title="Pool Chemistry Assistant",
-    page_icon="🌊",
+    page_title="IA Pool Assistant V1",
     layout="centered",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed"
 )
 
 # Deep Water (dark) / Sunlit Lagoon (light). Must run before any other widget:
@@ -35,14 +34,45 @@ st.set_page_config(
 inject_theme()
 
 # --- page copy -------------------------------------------------------------
-PAGE_TITLE = "Pool Chemistry & Maintenance Assistant"
+PAGE_TITLE = "IA Pool Assistant V1"
 PAGE_SUBTITLE = (
-    "Describe your pool symptoms, maintenance needs, or equipment issues. "
-    "Grounded in product documentation and a curated pool knowledge graph."
+    "Conversational assistant for pool water chemistry, equipment and "
+    "maintenance, grounded in the product documentation and a curated pool "
+    "knowledge graph. Ask in English or Spanish — it answers in the language "
+    "you write in."
 )
 PHONE_BRAND = "Pool Assistant"
 FOOTER_TEAM = "AI/ML Team — Bogotá, Colombia"
 FOOTER_PHASE = "UX/UI first test phase"
+
+# --- opening turn ----------------------------------------------------------
+# The assistant speaks first. Copy is the prototypes' greeting verbatim; it is
+# rendered locally and never sent to the graph, so it costs no tokens and adds
+# no turn to the checkpointer. English opens the conversation because nothing
+# has been detected yet — the assistant then answers in whatever language the
+# user writes in, and never announces the switch.
+GREETING = (
+    "Good evening. I'm your pool assistant — tell me what's going on and "
+    "we'll figure it out together."
+)
+
+# Openers, from the prototypes' first screen. Clicking one sends it as if it
+# had been typed.
+SUGGESTIONS = [
+    "My water looks cloudy",
+    "I saw a warning in the app",
+    "I have a maintenance question",
+]
+
+
+def initial_messages() -> list[dict]:
+    """The conversation as it looks before the user has said anything."""
+    return [{"role": "assistant", "content": GREETING, "opening": True}]
+
+# Per-answer feedback ("Me ayudó" / "No me ayudó") is hidden for now — the spec
+# moved feedback to the end-of-chat survey (option-c-deep-water.html, v0.3). The
+# widget and its Langfuse plumbing stay intact; flip this back to True to show it.
+SHOW_PER_ANSWER_FEEDBACK = False
 
 # --- Score naming (kept in constants so score_id stays stable across reruns) ---
 SCORE_FEEDBACK = "user_feedback"
@@ -88,19 +118,6 @@ if lf is None:
     st.sidebar.warning("Langfuse credentials not found or invalid. Tracking disabled.")
 
 
-def trace_url(trace_id: str) -> str | None:
-    """
-    Best-effort deep link to the trace in the Langfuse console. The helper name
-    has changed across SDK versions, so failure is non-fatal: we fall back to
-    showing the raw id, which is enough to paste into the console search.
-    """
-    if lf is None:
-        return None
-    try:
-        return lf.get_trace_url(trace_id=trace_id)
-    except Exception:
-        return None
-
 
 # ==========================================
 # IDEMPOTENT SCORING HELPERS
@@ -109,7 +126,7 @@ def build_score_id(trace_id: str, score_name: str) -> str:
     """
     Deterministic score id. Langfuse upserts by score id, so re-sending the same
     id overwrites instead of appending. This is the actual idempotency guarantee:
-    N clicks -> exactly 1 score row, and flipping 👍 -> 👎 mutates the value.
+    N clicks -> exactly 1 score row, and flipping the verdict mutates the value.
     """
     return f"{trace_id}-{score_name}"
 
@@ -130,7 +147,7 @@ def submit_feedback(
     in isolation from its trace.
     """
     if lf is None:
-        st.toast("Langfuse deshabilitado: el feedback no se registró.", icon="⚠️")
+        st.toast("Langfuse deshabilitado: el feedback no se registró.")
         return False
 
     score_metadata = {
@@ -219,7 +236,7 @@ def check_and_handle_neo4j() -> tuple[bool, str]:
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = initial_messages()
 if "feedback" not in st.session_state:
     # trace_id -> {"value": int, "reason": str|None, "awaiting_detail": bool}
     st.session_state.feedback = {}
@@ -231,46 +248,35 @@ if "turn_counter" not in st.session_state:
 if "db_online" not in st.session_state:
     st.session_state.db_online, st.session_state.db_message = check_and_handle_neo4j()
 
+# The diagnostics that used to occupy the sidebar (session id, interaction and
+# score counts, graph status) are intentionally not displayed: they are control
+# and tracking data for us, not for the user. Nothing is lost — thread_id ships
+# to Langfuse as both user_id and session_id, turn_index rides on every trace
+# and score, and each score carries the same coordinates in its metadata.
+
 
 # ==========================================
-# UI: SIDEBAR (STATISTICS) — same functionality as original app.py
+# OPENING SUGGESTIONS
 # ==========================================
-with st.sidebar:
-    st.title("📊 Agent Diagnostics")
-    st.markdown("---")
-
-    status_color = "🟢 Online" if st.session_state.db_online else "🔴 Offline"
-    st.metric(label="Knowledge Graph Status", value=status_color)
-
-    st.metric(label="Current Session ID", value=st.session_state.thread_id[:8].upper())
-    st.metric(label="Interactions", value=len(st.session_state.messages) // 2)
-    st.metric(label="Scored Responses", value=len(st.session_state.feedback))
-
-    st.markdown("---")
-    st.caption("Tracking powered by **Langfuse**")
-    st.caption(f"Session (user_id): `{st.session_state.thread_id}`")
-    if st.button("Reset Conversation"):
-        st.session_state.messages = []
-        st.session_state.thread_id = str(uuid.uuid4())
-        st.session_state.feedback = {}
-        st.session_state.turn_counter = 0
-        st.rerun()
+def render_suggestions(options: list[str], disabled: bool = False):
+    """
+    The openers under the greeting. A click stashes the text and reruns; the
+    composer picks it up below and the turn runs exactly as if it were typed —
+    so they follow the composer and go dead while the graph is unreachable.
+    """
+    with st.container(key="pa-chips"):
+        for i, text in enumerate(options):
+            if st.button(text, key=f"sug_{i}", disabled=disabled):
+                st.session_state.pending_prompt = text
+                st.rerun()
 
 
 # ==========================================
 # FEEDBACK WIDGET
 # ==========================================
-def render_trace_ref(trace_id: str):
-    """
-    Surfaces the trace id (and a deep link when available) next to the answer.
-    This is what makes a score findable: copy the id, paste it in the console
-    search, and the trace with its score is right there.
-    """
-    url = trace_url(trace_id)
-    with st.expander("🔍 Trace", expanded=False):
-        st.code(trace_id, language=None)
-        if url:
-            st.markdown(f"[Abrir en Langfuse]({url})")
+# The trace id is deliberately not surfaced here. It still rides on every
+# message dict and on every score sent to Langfuse — it is tracking data for
+# us, so it belongs in the console, not on the user's screen.
 
 
 def render_feedback(trace_id: str, turn_index: int | None = None):
@@ -278,11 +284,14 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
     Rendered from the history loop (NOT from inside the chat_input block), so it
     survives the rerun that a button click triggers.
     """
+    if not SHOW_PER_ANSWER_FEEDBACK:
+        return
+
     state = st.session_state.feedback.get(trace_id)
 
     # --- Phase 3: thumbs-down detail form ---
     if state and state.get("awaiting_detail"):
-        st.caption("👎 registrado. ¿Nos contás qué falló? (opcional)")
+        st.caption("Registrado. ¿Nos contás qué falló? (opcional)")
         label = st.selectbox(
             "Motivo principal",
             options=list(FEEDBACK_REASONS.keys()),
@@ -299,7 +308,7 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
             if st.button("Enviar", key=f"send_{trace_id}", type="primary"):
                 reason = FEEDBACK_REASONS[label]
                 comment = detail.strip() or f"({reason}) sin detalle"
-                # Same score_id as the initial 👎 -> upsert, not a duplicate.
+                # Same score_id as the initial negative click -> upsert, not a duplicate.
                 if submit_feedback(trace_id, 0, comment, reason=reason, turn_index=turn_index):
                     st.session_state.feedback[trace_id] = {
                         "value": 0,
@@ -321,11 +330,11 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
 
     # --- Already scored: show status, allow changing it ---
     if state:
-        icon = "👍" if state["value"] == 1 else "👎"
+        verdict = "útil" if state["value"] == 1 else "no útil"
         extra = f" · `{state['reason']}`" if state.get("reason") else ""
         c1, c2 = st.columns([3, 7])
         with c1:
-            st.caption(f"{icon} Feedback enviado{extra}")
+            st.caption(f"Feedback enviado · {verdict}{extra}")
         with c2:
             if st.button("Cambiar", key=f"change_{trace_id}"):
                 # NOTE: this only clears local state. The score row in Langfuse
@@ -338,7 +347,7 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
     # --- Phase 1: no feedback yet ---
     c1, c2, _ = st.columns([1, 1, 8])
     with c1:
-        if st.button("👍", key=f"good_{trace_id}"):
+        if st.button("Me ayudó", key=f"good_{trace_id}"):
             if submit_feedback(trace_id, 1, "Respuesta útil", turn_index=turn_index):
                 st.session_state.feedback[trace_id] = {
                     "value": 1,
@@ -348,7 +357,7 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
                 st.toast("¡Gracias por tu feedback!")
                 st.rerun()
     with c2:
-        if st.button("👎", key=f"bad_{trace_id}"):
+        if st.button("No me ayudó", key=f"bad_{trace_id}"):
             # Persist the negative signal immediately: if the user abandons the
             # detail form, we still keep the 0. Safe because score_id is fixed.
             if submit_feedback(trace_id, 0, "Respuesta no útil (pendiente de detalle)", turn_index=turn_index):
@@ -361,7 +370,7 @@ def render_feedback(trace_id: str, turn_index: int | None = None):
 
 
 # ==========================================
-# UI: MAIN CHAT INTERFACE (app2 phone style)
+# UI: MAIN CHAT INTERFACE
 # ==========================================
 online = st.session_state.db_online
 
@@ -390,32 +399,93 @@ with st.container(key="pa-phone"):
                 # now inside the screen so the shell stays intact.
                 st.error(st.session_state.get("db_message", "Service unavailable."))
 
-            # Chat history. Trace ref + feedback ride on every assistant turn
-            # that has a trace_id (same behaviour as original app.py).
+            # Chat history. Feedback rides on answers the assistant has
+            # actually settled — see `is_definitive_answer`.
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     role_marker(msg["role"])
                     if msg["role"] == "assistant":
                         assistant_label()
                     st.markdown(msg["content"])
-                    if msg["role"] == "assistant" and msg.get("trace_id"):
-                        #render_trace_ref(msg["trace_id"])
+                    if msg["role"] == "assistant" and msg.get("can_rate"):
                         render_feedback(msg["trace_id"], turn_index=msg.get("turn_index"))
+
+                # Openers sit outside the greeting card, as in the prototypes,
+                # and only while the greeting is still the whole conversation.
+                if msg.get("opening") and len(st.session_state.messages) == 1:
+                    render_suggestions(SUGGESTIONS, disabled=not online)
 
         # Nested inside a container, so it renders inline in the phone rather
         # than pinned to the bottom of the viewport.
         prompt = st.chat_input(
-            "E.g., My pool is cloudy and the pH is 8.2..." if online else "Unavailable — the knowledge graph is offline",
+            "Ask anything…" if online else "Unavailable — the knowledge graph is offline",
             disabled=not online,
         )
 
+# A clicked opener behaves like a typed message. Popped unconditionally so a
+# stale value can never fire a turn on a later rerun.
+suggested = st.session_state.pop("pending_prompt", None)
+if suggested and not prompt:
+    prompt = suggested
+
 page_footer(FOOTER_TEAM, FOOTER_PHASE)
 
+# Reset stays available, kept quiet and off the phone.
+with st.container(key="pa-reset", horizontal=True, horizontal_alignment="center"):
+    if st.button("Reset conversation"):
+        st.session_state.messages = initial_messages()
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.feedback = {}
+        st.session_state.turn_counter = 0
+        st.rerun()
 
-def run_turn(prompt: str, trace_id: str, turn_index: int) -> str:
+
+# Answers shorter than this that end in a question mark are read as the
+# assistant still working the problem rather than closing it.
+CLARIFYING_LENGTH = 320
+
+
+def is_definitive_answer(plan, runs, text: str) -> bool:
+    """
+    Whether this turn settled the question, which is what decides if the
+    feedback chips appear. Troubleshooting turns — the assistant asking for a
+    reading, a symptom, a model number — get no chips: there is nothing to rate
+    yet.
+
+    The graph exposes no such flag, so it is derived from what the stream
+    already carries:
+
+      * a refusal (`oos`) is not an answer about the pool;
+      * an answer nobody grounded — every step failed, or the only agents that
+        ran were `general`/`ooo` — is conversation, not a documented answer;
+      * a short reply ending in a question mark is the assistant asking back.
+
+    `plan` is the planner's ExecutionStep list, `runs` the (agent, error) pairs
+    the orchestrator emitted. The durable version of this is a flag set by the
+    synthesizer, which would remove the length heuristic — worth raising with
+    the backend before this leaves the test phase.
+    """
+    text = (text or "").strip()
+    if not text:
+        return False
+    if any(getattr(step, "oos", False) for step in plan):
+        return False
+    grounded = any(
+        agent not in ("ooo", "general") and not error for agent, error in runs
+    )
+    if not grounded:
+        return False
+    if len(text) < CLARIFYING_LENGTH and text.endswith("?"):
+        return False
+    return True
+
+
+def run_turn(prompt: str, trace_id: str, turn_index: int) -> tuple[str, bool]:
     """
     Executes the graph and streams intermediate state into the UI.
     Separated from the trace plumbing so the span wrapper stays readable.
+
+    Returns the final response and whether it is a definitive answer.
     """
     config = {
         "configurable": {"thread_id": st.session_state.thread_id},
@@ -430,6 +500,8 @@ def run_turn(prompt: str, trace_id: str, turn_index: int) -> str:
     }
 
     final_response = ""
+    plan_steps: list = []
+    agent_runs: list[tuple[str, str | None]] = []
 
     for event in graph.stream(
         {"messages": [HumanMessage(content=prompt)]},
@@ -438,7 +510,8 @@ def run_turn(prompt: str, trace_id: str, turn_index: int) -> str:
     ):
         if "planner" in event:
             plan = event["planner"].get("execution_plan", [])
-            st.markdown("**📝 Planner Output:**")
+            plan_steps = list(plan)
+            st.markdown("**Planner Output:**")
             for step in plan:
                 st.markdown(f"- Step {step.step} `[{step.assigned_agent}]`: {step.task}")
 
@@ -452,18 +525,19 @@ def run_turn(prompt: str, trace_id: str, turn_index: int) -> str:
 
                     agent_name = getattr(latest_res, "agent", "unknown")
                     error_msg = getattr(latest_res, "error", None)
+                    agent_runs.append((agent_name, error_msg))
 
                     if error_msg:
-                        st.error(f"**🛠️ {agent_name.upper()} Agent Error:** {error_msg}")
+                        st.error(f"**{agent_name.upper()} Agent Error:** {error_msg}")
                     else:
-                        st.info(f"**✅ {agent_name.upper()} Agent executed successfully.**")
+                        st.info(f"**{agent_name.upper()} Agent executed successfully.**")
 
         elif "synthesizer" in event:
             messages = event["synthesizer"].get("messages", [])
             if messages:
                 final_response = messages[-1].content
 
-    return final_response
+    return final_response, is_definitive_answer(plan_steps, agent_runs, final_response)
 
 
 # User Input — the composer lives inside the phone, above.
@@ -487,8 +561,9 @@ if prompt:
     with screen_scroll.chat_message("assistant"):
         role_marker("assistant")
         assistant_label()
-        with st.status("🧠 Agent Thinking Process...", expanded=True) as status:
+        with st.status("Agent Thinking Process...", expanded=True) as status:
             final_response = ""
+            definitive = False
             turn_error: Exception | None = None
 
             if lf is not None:
@@ -497,51 +572,60 @@ if prompt:
                     as_type="span",
                     name=TRACE_NAME,
                     trace_context={"trace_id": current_trace_id},
-                        ) as span:
+                    input={"prompt": prompt},
+                ) as span:
 
-                            propagate_attributes(
-                                user_id=st.session_state.thread_id,
-                                session_id=st.session_state.thread_id,
-                                tags=["streamlit", "pool-chemistry"],
-                                metadata={
-                                    "turn_index": turn_index,
-                                },
-                            )
+                    propagate_attributes(
+                        user_id=st.session_state.thread_id,
+                        session_id=st.session_state.thread_id,
+                        tags=["streamlit", "pool-chemistry"],
+                        metadata={
+                            "turn_index": turn_index,
+                        },
+                    )
 
-                            span.update(
-                                input={"prompt": prompt},
-                            )
+                    try:
+                        final_response, definitive = run_turn(
+                            prompt,
+                            current_trace_id,
+                            turn_index,
+                        )
 
-                            try:
-                                final_response = run_turn(
-                                    prompt,
-                                    current_trace_id,
-                                    turn_index,
-                                )
+                        span.update(
+                            output={"response": final_response}
+                        )
 
-                                span.update(
-                                    output={"response": final_response},
-                                )
+                        span.set_trace_io(
+                            input={"prompt": prompt},
+                            output={"response": final_response},
+                        )
 
-                            except Exception as e:
-                                span.update(
-                                    level="ERROR",
-                                    status_message=str(e),
-                                    output={"error": str(e)},
-                                )
-                                raise
+                    except Exception as e:
+                        turn_error = e
+
+                        span.update(
+                            level="ERROR",
+                            status_message=str(e),
+                            output={"error": str(e)},
+                        )
+
+                        span.set_trace_io(
+                            input={"prompt": prompt},
+                            output={"error": str(e)},
+                        )
 
                 lf.flush()
             else:
                 try:
-                    final_response = run_turn(prompt, current_trace_id, turn_index)
+                    final_response, definitive = run_turn(
+                        prompt, current_trace_id, turn_index
+                    )
                 except Exception as e:
                     turn_error = e
 
             if turn_error is not None:
                 status.update(label="Turn failed", state="error", expanded=True)
                 st.error(f"El agente falló: {turn_error}")
-                st.caption(f"Trace: `{current_trace_id}`")
                 st.stop()
 
             status.update(label="Response Generated", state="complete", expanded=False)
@@ -550,11 +634,15 @@ if prompt:
             st.markdown(final_response)
             # trace_id + turn_index travel with the message so any past turn
             # stays scorable and its score keeps its conversation coordinates.
+            # `can_rate` is decided once, here: a turn cannot become rateable
+            # later, and re-deriving it on every rerun would be guesswork from
+            # the text alone.
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": final_response,
                 "trace_id": current_trace_id,
                 "turn_index": turn_index,
+                "can_rate": definitive,
             })
             # Rerun so the feedback widget renders from the history loop, where
             # it survives the reruns that its own buttons trigger.
