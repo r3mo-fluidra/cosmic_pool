@@ -14,11 +14,19 @@ from langgraph.types import Command
 # =====================================================================
 
 AgentName = Literal[
-    "diagnosis",      # Symptom → causal parameter
-    "dosage",         # P_* → C_* with RAISES/LOWERS edges
-    "equipment",      # P_* → E_* with CORRODES/SCALES/DEGRADES
-    "maintenance",    # Routines and seasonal maintenance
-    "ooo",            # Out of Scope handler (triggers OOS response)
+    "general",
+    "ooo",
+    "chemistry",
+    "equipment",
+    "hydraulics",
+    "operations",
+    "compliance",
+    "contamination",
+    "facility_design",
+    "safety",
+    "recovery",
+    "records",
+    "math",
 ]
 
 
@@ -34,25 +42,73 @@ class ExecutionStep(BaseModel):
     )
 
     task: str = Field(
-        description=(
-            "Actionable, technical task description written exclusively in English. "
-            "Must explicitly state the inputs required and expected edge operations. "
-            "Example: 'Map green water symptom to causal chemical parameters' or "
-            "'Calculate calcium chloride dosage using RAISES edge to correct low CH'."
-        )
+    description=(
+        "Actionable and technically precise task description written exclusively "
+        "in English. The task must be specific enough for the assigned sub-agent "
+        "to execute independently without inferring the planner's intent. "
+        "It must identify the relevant pool-system context, the information "
+        "or inputs to analyze, the expected operation or reasoning, and the "
+        "desired outcome. "
+        "When knowledge-graph retrieval is relevant, explicitly describe the "
+        "entities, relationships, properties, or graph traversal that should "
+        "be investigated. When calculations are required, explicitly identify "
+        "the required variables, units, formula or quantitative objective. "
+        "When procedural guidance is required, explicitly state the condition "
+        "or problem and the expected procedure or recommendation. "
+        "Do not include the final answer; describe only the task that the "
+        "assigned agent must perform.\n"
+        "Examples:\n"
+        "- 'Analyze the reported green-water symptom and identify the most "
+        "relevant pool chemistry parameters and possible causal relationships.'\n"
+        "- 'Evaluate the circulation system for a reported low-flow condition "
+        "and identify the hydraulic components and relationships that should "
+        "be investigated.'\n"
+        "- 'Determine the required chemical treatment quantity from the provided "
+        "pool volume and measured water parameters, including all variables, "
+        "units, and assumptions required for the calculation.'\n"
+        "- 'Identify the applicable safety risks associated with storing and "
+        "handling the reported pool chemical and provide the relevant preventive "
+        "controls to investigate.'\n"
+        "- 'Retrieve the relevant maintenance records and identify recurring "
+        "equipment failures associated with the reported pump issue.'"
     )
+)
 
     assigned_agent: AgentName = Field(
-        description=(
-            "The specific target sub-agent designated to run this step. "
-            "Rules:\n"
-            "- 'diagnosis': Mapping symptoms to P_* parameters.\n"
-            "- 'dosage': Running metric balance calculations via RAISES/LOWERS.\n"
-            "- 'equipment': Evaluating CORRODES/SCALES/DEGRADES structural/hardware effects.\n"
-            "- 'maintenance': Routine, calendar, or seasonal tasks.\n"
-            "- 'ooo': Mandatory choice if the query contains unsafe or irrelevant content."
-        )
+    description=(
+        "The specific target sub-agent designated to execute this step. "
+        "Select the agent whose domain expertise best matches the task. "
+        "Rules:\n"
+        "- 'general': General pool knowledge, basic guidance, and questions "
+        "that do not require a specialized domain agent.\n"
+        "- 'chemistry': Pool water chemistry, chemical parameters, water balance, "
+        "treatment relationships, and chemical corrective actions.\n"
+        "- 'equipment': Pool equipment, components, operation, performance, "
+        "degradation, scaling, corrosion, and equipment-related failures.\n"
+        "- 'hydraulics': Hydraulic circuits, circulation, flow, pressure, "
+        "piping, valves, pumps, and hydraulic performance.\n"
+        "- 'operations': Pool operation, routine procedures, maintenance "
+        "activities, cleaning, inspections, and operational workflows.\n"
+        "- 'compliance': Regulations, standards, requirements, documentation, "
+        "and compliance-related guidance.\n"
+        "- 'contamination': Water contamination, biological contamination, "
+        "foreign substances, water-quality incidents, and contamination response.\n"
+        "- 'facility_design': Pool facility design, layout, infrastructure, "
+        "equipment-room configuration, and system-level design considerations.\n"
+        "- 'safety': Pool, equipment, chemical, electrical, and operational "
+        "safety risks and preventive measures.\n"
+        "- 'recovery': Recovery procedures following failures, incidents, "
+        "abnormal conditions, or system disruptions.\n"
+        "- 'records': Logs, maintenance records, inspection records, "
+        "historical data, documentation, and record-management tasks.\n"
+        "- 'math': Numerical calculations, formulas, measurements, conversions, "
+        "dosage calculations, hydraulic calculations, and quantitative reasoning.\n"
+        "- 'ooo': Mandatory choice for unsafe, prohibited, irrelevant, "
+        "or out-of-scope requests.\n"
+        "The planner may assign multiple steps to the same agent when "
+        "multiple independent tasks require the same specialization."
     )
+)
 
     oos: bool = Field(
         default=False,

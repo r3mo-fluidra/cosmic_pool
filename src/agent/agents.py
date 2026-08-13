@@ -18,8 +18,18 @@ from ..prompts.prompts import (
 )
 from ..prompts.prompts_sub_agents import (
     AGENT_REGISTRY,
-    tool_instructions_AA,
-    )   
+    CHEMISTRY,
+    EQUIPMENT,
+    HYDRAULICS,
+    OPERATIONS,
+    COMPLIANCE,
+    CONTAMINATION,
+    FACILITY_DESIGN,
+    SAFETY,
+    RECOVERY,
+    RECORDS,
+    MATH,
+)  
 from .tools import (
     vector_search,
     search_seed_nodes,
