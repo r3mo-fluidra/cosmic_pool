@@ -3,7 +3,7 @@ from langgraph.types import Command
 from langfuse import observe
 from typing import List, Literal
 from .state import PoolAgentState, ExecutionStep, AgentResult
-from .prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT
+from ..prompts.prompts_old import PLANNER_PROMPT, SYNTHESIZER_PROMPT
 from .chains import create_planner_chain
 from ..config.llm import create_llm
 from .agents import get_agent_by_name

@@ -1,7 +1,7 @@
 .env
 utils/
 old/
-
+.utils/
 
 https://github.com/Zodiac-Engineering/fluidra_ai_pool-assistant_mvp.git
 

@@ -10,7 +10,7 @@ from langgraph_supervisor import create_supervisor
 
 from .state import AgentName
 from ..config.llm import create_llm, create_routing_llm, create_synthesizer_llm
-from ..agent.prompts import (
+from ..prompts.prompts_old import (
     GENERAL_PROMPT, OOS_PROMPT, SUPERVISOR_PROMPT,
     DIAGNOSIS_PROMPT, DOSAGE_PROMPT, EQUIPMENT_PROMPT, MAINTENANCE_PROMPT,
 )
