@@ -20,6 +20,32 @@ from src.ui.theme import (
     theme_slider,
 )
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def get_config(key: str, default=None):
+    """
+    Get configuration from environment variables first, then Streamlit secrets.
+
+    Local development:
+        .env / environment variables
+
+    Streamlit deployment:
+        .streamlit/secrets.toml
+
+    Never raises StreamlitSecretNotFoundError when secrets.toml is absent.
+    """
+    value = os.getenv(key)
+
+    if value:
+        return value
+
+    try:
+        return st.secrets[key]
+    except (FileNotFoundError, KeyError):
+        return default
+
 # ==========================================
 # CONFIGURATION & LANGFUSE SETUP
 # ==========================================
@@ -103,8 +129,8 @@ def get_langfuse():
     """
     try:
         client = Langfuse(
-            environment=os.getenv("APP_ENV", "development"),
-            release=os.getenv("APP_RELEASE", "local"),
+            environment=get_config("APP_ENV", "development"),
+            release=get_config("APP_RELEASE", "local"),
         )
         if not client.auth_check():
             return None
@@ -193,12 +219,29 @@ def submit_feedback(
 # ==========================================
 @st.cache_resource
 def get_neo4j_driver():
-    uri = os.getenv("NEO4J_URI")
-    user = os.getenv("NEO4J_USER")
-    password = os.getenv("NEO4J_PASSWORD")
+    uri = get_config("NEO4J_URI")
+    user = get_config("NEO4J_USER")
+    password = get_config("NEO4J_PASSWORD")
+
+    # Safe diagnostics — NEVER print the password
+    print("=== Neo4j configuration ===")
+    print(f"NEO4J_URI: {uri}")
+    print(f"NEO4J_USER: {user}")
+    print(f"NEO4J_PASSWORD exists: {bool(password)}")
+
     if not uri:
-        return None
-    return GraphDatabase.driver(uri, auth=(user, password))
+        raise RuntimeError("NEO4J_URI is missing")
+
+    if not user:
+        raise RuntimeError("NEO4J_USER is missing")
+
+    if not password:
+        raise RuntimeError("NEO4J_PASSWORD is missing")
+
+    return GraphDatabase.driver(
+        uri,
+        auth=(user, password),
+    )
 
 
 def check_and_handle_neo4j() -> tuple[bool, str]:
