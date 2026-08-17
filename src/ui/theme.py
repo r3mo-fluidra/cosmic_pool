@@ -36,9 +36,23 @@ Mode selection
 The slider drives *this* stylesheet, not Streamlit's native theme — Streamlit
 exposes no API for an app to switch its own theme at runtime. That works here
 because the CSS below paints every surface the viewer actually sees: page,
-bezel, screen, bubbles, composer, buttons. `.streamlit/config.toml` still
-defines both palettes as native themes so Streamlit-owned chrome that we cannot
-reach (menu popovers, toasts, tooltips) stays in the right family.
+bezel, screen, bubbles, composer, buttons.
+
+It only works, though, if the CSS is *self-sufficient*. Streamlit publishes no
+CSS custom properties for its own theme — the emotion classes it generates
+bake `theme.colors.bodyText` into each element — so anything this stylesheet
+does not explicitly colour is painted by whatever the viewer picked in the ⋮
+menu, on top of whatever palette the slider picked. Those two controls are
+independent, and the mismatched combinations are unreadable (see the ink
+enforcement block in section 5). Every text node inside the phone must
+therefore be given a colour here; none may be left to inherit from Streamlit.
+
+`.streamlit/config.toml` covers the remainder — the surfaces that render in
+portals at the document root and no rule scoped to the phone can reach (menu
+popover, toasts, tooltips, selectbox dropdowns). It pins the *page frame*
+colours, which are identical in both palettes, into `[theme]`, `[theme.light]`
+and `[theme.dark]` alike, so the ⋮ menu cannot change anything and the slider
+stays the single source of truth. That file explains why at length.
 
 Selector note: rules target Streamlit's `data-testid` attributes and the
 `.st-key-*` classes produced by `st.container(key=...)`. Both are stable but
@@ -88,6 +102,9 @@ DEEP_WATER: dict[str, str] = {
     "--dw-input-bg": "rgba(255,255,255,.08)",
     "--dw-input-border": "rgba(255,255,255,.16)",
     "--dw-input-shadow": "none",
+    # -- citation ------------------------------------------------------------
+    # Verbatim from option-c-deep-water.html's `.src` rule.
+    "--dw-src-border": "rgba(89,208,221,.5)",
     # -- type --------------------------------------------------------------
     "--dw-serif": 'Georgia,"Times New Roman",serif',
     "--dw-sans": '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
@@ -106,9 +123,20 @@ DEEP_WATER: dict[str, str] = {
     "--pa-bezel-rim": "transparent",
     "--pa-bezel-shadow": "0 24px 60px rgba(20,26,51,.22)",
     # -- mode slider (Streamlit-only) --------------------------------------
+    # The pill the label and the switch sit in, so the control reads as one
+    # object on the page rather than a word next to a widget.
+    "--pa-chrome-fill": "rgba(255,255,255,.72)",
+    "--pa-chrome-border": "rgba(20,26,51,.10)",
+    "--pa-chrome-shadow": "0 2px 10px rgba(20,26,51,.06)",
     "--pa-track": "rgba(13,58,68,.08)",
     # .54 rather than .20, to clear the 3:1 UI-component threshold.
     "--pa-track-border": "rgba(13,58,68,.54)",
+    # On = dark mode, so the track fills with the bezel's ink and the teal knob
+    # reads 6.4:1 against it — the fill *is* the state, not just the position.
+    "--pa-track-on": "#0c0f1e",
+    "--pa-track-on-border": "#0c0f1e",
+    "--pa-knob-shadow": "0 1px 4px rgba(12,15,30,.38)",
+    "--pa-focus-ring": "rgba(89,208,221,.45)",
 }
 
 SUNLIT_LAGOON: dict[str, str] = {
@@ -139,6 +167,9 @@ SUNLIT_LAGOON: dict[str, str] = {
     "--dw-input-bg": "#ffffff",
     "--dw-input-border": "rgba(13,58,68,.16)",
     "--dw-input-shadow": "0 2px 10px rgba(13,58,68,.05)",
+    # -- citation ------------------------------------------------------------
+    # Verbatim from option-c-sunlit-lagoon.html's `.src` rule.
+    "--dw-src-border": "rgba(11,116,128,.5)",
     # -- type --------------------------------------------------------------
     "--dw-serif": 'Georgia,"Times New Roman",serif',
     "--dw-sans": '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
@@ -153,9 +184,18 @@ SUNLIT_LAGOON: dict[str, str] = {
     "--pa-bezel-rim": "transparent",
     "--pa-bezel-shadow": "0 24px 60px rgba(20,26,51,.22)",
     # -- mode slider (Streamlit-only) --------------------------------------
+    "--pa-chrome-fill": "rgba(255,255,255,.82)",
+    "--pa-chrome-border": "rgba(13,58,68,.12)",
+    "--pa-chrome-shadow": "0 2px 10px rgba(13,58,68,.06)",
     "--pa-track": "rgba(13,58,68,.08)",
     # .54 rather than .20, to clear the 3:1 UI-component threshold.
     "--pa-track-border": "rgba(13,58,68,.54)",
+    # Only ever painted while the switch is on, which means the dark palette is
+    # live — kept here so both palettes declare the same keys.
+    "--pa-track-on": "#0c0f1e",
+    "--pa-track-on-border": "#0c0f1e",
+    "--pa-knob-shadow": "0 1px 4px rgba(13,58,68,.28)",
+    "--pa-focus-ring": "rgba(11,116,128,.35)",
 }
 
 PALETTES = {"dark": DEEP_WATER, "light": SUNLIT_LAGOON}
@@ -168,7 +208,16 @@ MODE_KEY = "pa_dark_mode"
 
 #: Phone geometry, from the prototypes' `.phone` / `.screen` rules.
 PHONE_WIDTH_PX = 392
-SCREEN_HEIGHT_PX = 520
+#: Height of the scrolling conversation area. Chosen so the bezel totals the
+#: prototypes' 718px `.phone` height once the header, composer and the screen's
+#: own padding are added — measured against demo-deep-water.html, so it moves
+#: whenever those insets do. It moved from 574 to 556 with the bubble fixes:
+#: the header block used to lean on the -1rem Streamlit puts under every
+#: markdown container, which made its box 16px shorter than the brand and
+#: status line it holds. Zeroing that (see the rule near .pa-src) gave the
+#: header its real height back, and the screen's padding-top went 16 → 18 at
+#: the same time to match `.hdr`.
+SCREEN_HEIGHT_PX = 556
 
 
 # =====================================================================
@@ -178,7 +227,7 @@ SCREEN_HEIGHT_PX = 520
 # so the rules below are identical for both palettes and there are no braces
 # to escape.
 
-_STATIC_CSS = """
+_STATIC_CSS = r"""
 /* ==================================================================
    1. Page frame — the surface the phone sits on
    ================================================================== */
@@ -219,7 +268,12 @@ html, body,
   color: var(--pa-page-mut);
   text-align: center;
   max-width: 480px;
-  margin: 6px auto 20px;
+  /* !important because this is a <p>: Streamlit's own
+     `[data-testid="stMarkdownContainer"] p { margin: ... }` outranks a single
+     class, so the `auto` was dropped and the 480px block sat against the
+     column's left edge — centred text, but 112px left of the phone it is
+     meant to sit under. The margin is what aligns it with the bezel. */
+  margin: 6px auto 20px !important;
 }
 .pa-footer {
   text-align: center;
@@ -242,13 +296,36 @@ html, body,
 /* ==================================================================
    3. Mode slider — top right, drives this stylesheet
    ================================================================== */
-.st-key-pa-themebar { padding-bottom: 2px; }
+/* The label and the switch share one pill: sized to its contents and pushed
+   right, which is the alignment the container's horizontal_alignment gave it
+   before it had a surface of its own. Streamlit's horizontal container also
+   lets its children flex, so they are pinned to their natural width — a
+   stretching child would drag the pill's right edge past the switch. */
+.st-key-pa-themebar {
+  width: fit-content !important;
+  margin-left: auto !important;
+  align-items: center !important;
+  gap: 11px !important;
+  padding: 5px 7px 5px 14px !important;
+  border-radius: 999px;
+  background: var(--pa-chrome-fill);
+  border: 1px solid var(--pa-chrome-border);
+  box-shadow: var(--pa-chrome-shadow);
+}
+.st-key-pa-themebar > div,
+.st-key-pa-themebar [data-testid="stElementContainer"] {
+  flex: 0 0 auto !important;
+  width: auto !important;
+  margin: 0 !important;
+}
 .pa-mode-label {
-  font-size: 11.5px;
-  letter-spacing: .08em;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .09em;
   text-transform: uppercase;
   color: var(--pa-page-mut);
   white-space: nowrap;
+  line-height: 26px;   /* the track's height, so the two share a midline */
 }
 
 /* The native toggle's own visuals are hidden and the track + knob are drawn
@@ -258,7 +335,7 @@ html, body,
 .st-key-pa-themebar label[data-testid="stCheckbox"] {
   position: relative;
   display: inline-block;
-  width: 54px;
+  width: 46px;
   height: 26px;
   margin: 0;
   cursor: pointer;
@@ -277,6 +354,17 @@ html, body,
   border: 1px solid var(--pa-track-border);
   transition: background .25s, border-color .25s;
 }
+/* On = dark mode, and the track fills with the bezel's ink to say so: the
+   position alone was a 1.4:1 read against a near-white track, while the teal
+   knob on the filled track is 6.4:1. The word beside it still names the mode,
+   so the state never rests on colour alone. */
+.st-key-pa-themebar [data-testid="stCheckbox"] label:has(input:checked)::before,
+.st-key-pa-themebar label[data-testid="stCheckbox"]:has(input:checked)::before,
+.st-key-pa-themebar [data-testid="stCheckbox"] label[data-selected="true"]::before,
+.st-key-pa-themebar label[data-testid="stCheckbox"][data-selected="true"]::before {
+  background: var(--pa-track-on);
+  border-color: var(--pa-track-on-border);
+}
 .st-key-pa-themebar [data-testid="stCheckbox"] label::after,
 .st-key-pa-themebar label[data-testid="stCheckbox"]::after {
   content: "";
@@ -287,13 +375,26 @@ html, body,
   height: 18px;
   border-radius: 50%;
   background: var(--dw-teal);
-  box-shadow: 0 1px 5px rgba(0,0,0,.3);
-  transition: transform .25s ease;
+  box-shadow: var(--pa-knob-shadow);
+  transition: transform .22s cubic-bezier(.34,1.4,.64,1), background .25s;
 }
-/* Knob right = dark mode. */
+/* Knob right = dark mode. 46 − 4 − 18 − 4 = 20, so it lands on the far inset. */
 .st-key-pa-themebar [data-testid="stCheckbox"] label:has(input:checked)::after,
-.st-key-pa-themebar label[data-testid="stCheckbox"]:has(input:checked)::after {
-  transform: translateX(28px);
+.st-key-pa-themebar label[data-testid="stCheckbox"]:has(input:checked)::after,
+.st-key-pa-themebar [data-testid="stCheckbox"] label[data-selected="true"]::after,
+.st-key-pa-themebar label[data-testid="stCheckbox"][data-selected="true"]::after {
+  transform: translateX(20px);
+}
+/* Hover deepens the rim, press shrinks the knob — the only feedback the
+   control gets, since Streamlit's own focus and hover styling is hidden with
+   the native widget. */
+.st-key-pa-themebar label:hover::before { border-color: var(--dw-teal); }
+.st-key-pa-themebar label:active::after { transform: scale(.92); }
+.st-key-pa-themebar label:has(input:checked):active::after {
+  transform: translateX(20px) scale(.92);
+}
+.st-key-pa-themebar label:has(input:focus-visible)::before {
+  box-shadow: 0 0 0 3px var(--pa-focus-ring);
 }
 
 /* ==================================================================
@@ -306,7 +407,12 @@ html, body,
   padding: 10px;
   border-radius: 38px;
   background: var(--pa-bezel);
-  border: 1px solid var(--pa-bezel-rim);
+  /* The rim is drawn as an inset outline, not a border: `width` is border-box
+     here, so a 1px border would spend 2px of the 392px on the bezel edge and
+     leave a 370px screen where the prototypes have 372 — every inset inside
+     the phone would then be 1px shy. An outline costs no layout. */
+  outline: 1px solid var(--pa-bezel-rim);
+  outline-offset: -1px;
   box-shadow: var(--pa-bezel-shadow);
 }
 .st-key-pa-screen {
@@ -314,7 +420,10 @@ html, body,
   overflow: hidden;
   background: var(--dw-surface);
   color: var(--dw-text);
-  padding: 16px 14px 12px;
+  /* Top inset is `.hdr`'s 18px; the bottom is `.composer`'s 18px
+     padding-bottom, since the composer is a Streamlit widget with no padding
+     of its own. Both are in the SCREEN_HEIGHT_PX arithmetic. */
+  padding: 18px 14px 18px;
   gap: 0;
 }
 
@@ -334,9 +443,16 @@ html, body,
 }
 .st-key-pa-scroll,
 .st-key-pa-scroll > div { background: transparent !important; }
-/* The only thing separating the header from the first turn, so it carries
-   the whole gap. */
-.st-key-pa-scroll { padding-top: 22px; }
+/* Padding-top is the only thing separating the header from the first turn, so
+   it carries the whole gap: `.hdr`'s 10px bottom plus `.body`'s 14px top.
+   The sides and bottom restate `.body` in the
+   prototypes (`padding:14px 18px 8px; gap:14px`): a height-constrained
+   st.container() carries 15px of Streamlit's own padding, which stacked on the
+   screen's 14px and set the turns 29px in — 11px past the design, so every
+   card was ~22px narrower than the prototypes' and its text wrapped early.
+   The 4px tops the screen's 14px inset up to 18px; the gap is the space
+   between turns, which Streamlit otherwise sets to 8.8px. */
+.st-key-pa-scroll { padding: 24px 4px 8px; gap: 14px !important; }
 .st-key-pa-scroll::-webkit-scrollbar { width: 0; height: 0; }
 .st-key-pa-scroll { scrollbar-width: none; }
 
@@ -348,6 +464,10 @@ html, body,
   font-size: 19px;
   color: var(--dw-brand-ink);
   line-height: 1.2;
+  /* `.hdr` in the prototypes is inset 20px; the screen already gives 14px, so
+     the brand and the status line top that up by 6. Horizontal only — the
+     header's vertical rhythm is spent in SCREEN_HEIGHT_PX. */
+  padding-left: 6px;
 }
 .pa-ctx {
   display: flex;
@@ -356,6 +476,7 @@ html, body,
   font-size: 11.5px;
   color: var(--dw-text-ctx);
   margin: 3px 0 0;
+  padding-left: 6px;   /* see .pa-brand */
 }
 .pa-ctx .pa-dot {
   flex: 0 0 7px;
@@ -368,6 +489,17 @@ html, body,
 .pa-ctx.pa-off .pa-dot {
   background: var(--dw-text-ctx);
   box-shadow: none;
+}
+
+/* Streamlit dims any element still mounted from the previous run to
+   opacity:theme.stale (~0.3) for up to 1.5s while a rerun is in flight
+   (`data-stale="true"` on stElementContainer). A rerun landing mid-turn — a
+   suggestion chip, a fresh prompt — catches the whole phone in that dip,
+   which reads as unreadable, washed-out text. Nothing in this UI depends on
+   that affordance, so it is neutralised everywhere inside the phone. */
+.st-key-pa-phone [data-stale="true"] {
+  opacity: 1 !important;
+  transition: none !important;
 }
 
 /* ==================================================================
@@ -395,8 +527,14 @@ html, body,
   box-shadow: var(--dw-card-shadow);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  padding: 12px 13px;
-  max-width: 80%;
+  /* `.glass` in the prototypes: padding 13px 14px, max-width 95%. Both were
+     short here (12/13 and 80%), which cost the card ~50px of width and pulled
+     the text in towards the border twice over — narrower lines *and* a
+     thinner inset. Read together with the 18px column inset on
+     .st-key-pa-scroll: 95% only lands on the prototypes' 319px card if the
+     column underneath it is the prototypes' 336px. */
+  padding: 13px 14px;
+  max-width: 95%;
   color: var(--dw-text-ast);
 }
 
@@ -407,24 +545,117 @@ html, body,
   border: 1px solid var(--dw-bubble-border);
   border-radius: var(--dw-radius) var(--dw-radius) 4px var(--dw-radius);
   color: var(--dw-bubble-text);
-  padding: 9px 13px;
+  padding: 10px 14px;      /* `.usr` in the prototypes */
   width: fit-content;
-  max-width: 80%;
+  max-width: 82%;          /* `.usr` — narrower than the assistant's 95% */
   margin-left: auto;
 }
 
+/* `.glass .tx` is 14px/1.55; `.usr` is 14px/1.45 — the tighter leading is what
+   keeps a one-line user bubble compact. */
 [data-testid="stChatMessage"] p {
   font-size: 14px;
   line-height: 1.55;
 }
+[data-testid="stChatMessage"]:has([data-pa-role="user"]) p,
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) p {
+  line-height: 1.45;
+}
 [data-testid="stChatMessage"] p:last-child { margin-bottom: 0; }
+
+/* Streamlit pairs `p { margin-bottom: 1rem }` with `margin-bottom: -1rem` on
+   the markdown container, so a block of markdown measures exactly as tall as
+   its text. The `p:last-child` reset above removes the paragraph's 1rem but
+   not the container's -1rem, which left every markdown block inside a bubble
+   16px shorter than the text it wraps: the closing line of an answer, and the
+   whole of a one-line user bubble, rendered *below* the card's border instead
+   of inside its padding. Zeroing the compensation makes the box honest again;
+   it must stay paired with the reset above (drop that and the 1rem comes
+   back as a gap under every bubble). */
+.st-key-pa-screen [data-testid="stMarkdownContainer"] {
+  margin-bottom: 0 !important;
+}
+
+/* Inside a card the spacing is carried by the elements themselves — .pa-who's
+   6px below the label, .pa-src's 9px above the citation — exactly as in the
+   prototypes. Streamlit's 8.8px block gap would add to both, and (because the
+   invisible .pa-role marker is still a flex item) would also spend one gap
+   above the label, so the card's top inset read 21.8px instead of 13. */
+[data-testid="stChatMessage"] [data-testid="stVerticalBlock"] { gap: 0 !important; }
+
+/* --- ink enforcement: hand every Streamlit-painted text node back to us ---
+   Streamlit exposes no CSS custom properties for its own theme. The emotion
+   classes it generates bake `theme.colors.bodyText` straight into each
+   element, so the `color` set on the bubble above is never inherited by the
+   markdown inside it — Streamlit's explicit colour wins over inheritance
+   regardless of specificity. Message text was therefore painted in the
+   *native* theme's ink, and turned unreadable whenever the ⋮ menu disagreed
+   with our slider: near-black on the Deep Water navy, and (symmetrically,
+   though it was never the reported symptom) near-white on Sunlit Lagoon.
+   Sunlit Lagoon only ever looked correct because Streamlit's light bodyText
+   happens to read on a pale surface — coincidence, not theming.
+
+   `inherit` rather than a token, deliberately: it hands the decision back to
+   the container rules above, so an assistant card resolves to --dw-text-ast,
+   a user bubble to --dw-bubble-text, and anything else inside the phone to
+   the --dw-text set on .st-key-pa-screen. One rule covers both roles and the
+   palette stays declared in exactly one place.
+
+   An element list rather than `*`: the .pa-* nodes this module emits are
+   themselves markdown children (assistant_label, citation, phone_header) and
+   carry their own accent colours, which must survive. Every one of them is a
+   <div>, which is why <div> is absent below. */
+.st-key-pa-screen [data-testid="stChatMessageContent"],
+.st-key-pa-screen [data-testid="stMarkdownContainer"],
+.st-key-pa-screen .stMarkdown,
+.st-key-pa-screen [data-testid="stMarkdownContainer"]
+  :is(p, li, ul, ol, span, strong, em, h1, h2, h3, h4, h5, h6, blockquote, td, th) {
+  color: inherit !important;
+}
+
+/* Links and inline code keep an accent instead of inheriting the body ink.
+   Both are palette tokens, so they follow the slider like everything else.
+   Inline code matters here: both app.py and preview_ui.py render the planner
+   steps with `[agent_name]` in backticks. */
+.st-key-pa-screen [data-testid="stMarkdownContainer"] a {
+  color: var(--dw-teal) !important;
+}
+.st-key-pa-screen [data-testid="stMarkdownContainer"] code {
+  color: var(--dw-chip-text) !important;
+  background: var(--dw-chip-fill) !important;
+  border: 1px solid var(--dw-chip-border);
+  border-radius: 5px;
+  padding: 0 4px;
+  font-size: 12px;
+}
 
 .pa-who {
   font-family: var(--dw-serif);
   font-style: italic;
   font-size: 12.5px;
   color: var(--dw-teal);
-  margin-bottom: 5px;
+  /* `.glass .who` — 6px, not the 5px of `.ast .who`: the label always sits
+     inside a card here. */
+  margin-bottom: 6px;
+  /* The prototypes set no leading on `.who`, so its line box is 14px; under
+     Streamlit's body 1.6 it grew to 20 and pushed the answer 6px down inside
+     the card. Same for `.pa-src` below. */
+  line-height: normal;
+}
+
+/* Citation — "Manual · §5 Maintenance", a dashed-underline chip closing an
+   answer that is grounded in a document. Verbatim from the prototypes' `.src`
+   rule (option-c-deep-water.html / option-c-sunlit-lagoon.html). */
+.pa-src {
+  display: inline-flex;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--dw-teal);
+  margin-top: 9px;
+  line-height: normal;   /* see .pa-who */
+  border-bottom: 1px dashed var(--dw-src-border);
+  padding-bottom: 2px;
 }
 
 /* ==================================================================
@@ -444,16 +675,52 @@ html, body,
   border: 1px solid var(--dw-input-border) !important;
   border-radius: 22px !important;
   box-shadow: var(--dw-input-shadow) !important;
-  /* The prototypes' well: an 8px surround on a 35px row, 53px overall.
-     Streamlit's own padding is taller and left the pill looking slack. */
-  padding: 8px !important;
-  margin-top: 8px;
+  /* `.input` in the prototypes: padding 8px 8px 8px 16px around a 34px send
+     disc — 52px overall, with the text inset 16px from the pill's left edge.
+     Both numbers are measured off demo-deep-water.html, so keep them paired
+     with the 34px disc below; changing one alone breaks the pill's height. */
+  padding: 8px 8px 8px 16px !important;
+  /* `.composer` padding-top. Its 18px bottom is the screen's padding-bottom;
+     the 2px sides top up the screen's 14px inset to the composer's 16px, so
+     the pill is 340px wide on a 372px screen as in the prototypes. */
+  margin: 10px 2px 0;
   overflow: hidden;
 }
-/* Centre the row, so the placeholder and the send disc share a midline. */
+/* Centre every row, so the placeholder and the send disc share a midline, and
+   strip the padding Streamlit puts on its inner wrapper (12px 16px) — that
+   surround is what made the pill 68px tall and pushed the text to 30px in
+   from the edge. The pill's own padding is the only inset. */
 .st-key-pa-screen [data-testid="stChatInput"] > div,
+.st-key-pa-screen [data-testid="stChatInput"] div,
 .st-key-pa-screen [data-testid="stChatInput"] form {
   align-items: center !important;
+  padding: 0 !important;
+  /* No flex `gap` here: Streamlit's row carries a zero-width hidden item ahead
+     of the textarea, so a gap lands *before* the text and pushes it 10px past
+     the 16px inset. `.input`'s 10px gap is drawn as the disc's margin instead
+     (below), which is the one place it can only fall between the two. */
+  gap: 0 !important;
+  /* Text and disc stay on one line. Streamlit re-flows the widget once the
+     input holds more than a line's worth of text, dropping the disc onto a row
+     of its own and taking the pill to 72px mid-sentence — and it stays there
+     after the turn is sent. The prototypes' `.input` is a single flex row at
+     all times, so the reflow is pinned out here. */
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+}
+/* Holding that single row together needs the two flex items sized as well:
+   the reflow Streamlit intended hands the text wrapper the full width (it was
+   about to own a row of its own), which pushes the disc past the pill's edge
+   and `overflow: hidden` then eats it. The text takes what is left, the disc
+   keeps its 34px. */
+.st-key-pa-screen [data-testid="stChatInput"] div:has(> textarea) {
+  flex: 1 1 0% !important;
+  min-width: 0 !important;
+  width: auto !important;
+}
+.st-key-pa-screen
+[data-testid="stChatInput"] div:has(> [data-testid="stChatInputSubmitButton"]) {
+  flex: 0 0 auto !important;
 }
 /* Inner wrappers, the form, and the focus ring: no surface of their own. */
 .st-key-pa-screen [data-testid="stChatInput"] div,
@@ -467,11 +734,13 @@ html, body,
 .st-key-pa-screen [data-testid="stChatInput"] div {
   border: 0 !important;
 }
-/* One line, the same height as the send disc beside it. Streamlit sizes the
-   textarea from JS with an inline style and grows it as you type, which is
-   what made the composer tall — hence !important on all three of min/max/
-   height. Long input scrolls inside the pill, as it does in the prototypes,
-   where the composer is a single-line <input>. */
+/* One text line, vertically centred against the disc beside it — the disc,
+   not the textarea, sets the row height, exactly as in the prototypes where
+   `.input input` has no height of its own. Streamlit sizes the textarea from
+   JS with an inline style and grows it as you type, which is what made the
+   composer tall — hence !important on all three of min/max/height. Long input
+   scrolls inside the pill, as it does in the prototypes, where the composer is
+   a single-line <input>. */
 [data-testid="stChatInput"] textarea,
 [data-testid="stChatInputTextArea"] {
   background: transparent !important;
@@ -479,12 +748,24 @@ html, body,
   font-size: 13.5px !important;
   -webkit-text-fill-color: var(--dw-text);
   box-sizing: border-box !important;
-  height: 35px !important;
-  min-height: 35px !important;
-  max-height: 35px !important;
-  line-height: 19px !important;
-  padding: 8px !important;   /* text sits 16px in from the pill's edge */
-  overflow-y: auto;
+  height: 20px !important;
+  min-height: 20px !important;
+  max-height: 20px !important;
+  line-height: 20px !important;
+  padding: 0 !important;
+  /* One line that scrolls sideways, like the prototypes' `<input>`: a wrapping
+     textarea clamped to 20px would hide everything but the line the caret is
+     on. `pre` stops the wrap; the scrollbar is hidden as it is everywhere else
+     inside the phone. */
+  white-space: pre !important;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+[data-testid="stChatInput"] textarea::-webkit-scrollbar,
+[data-testid="stChatInputTextArea"]::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 [data-testid="stChatInput"] textarea::placeholder,
 [data-testid="stChatInputTextArea"]::placeholder {
@@ -494,9 +775,12 @@ html, body,
 }
 
 /* Send control: teal disc, 34px, arrow — never a square.
-   Streamlit's own glyph is an icon-font ligature that renders as a filled box
-   when the Material Symbols face is unavailable, so the button's children are
-   hidden and the arrow is drawn as text in the page font instead. */
+   34px is `.btn-send` in the prototypes; it is also what sets the pill's
+   height, so it moves together with the composer padding above.
+   Streamlit's own glyph (an SVG icon, or a ligature-font fallback depending on
+   version) is hidden outright — font-size/color collapsed on the button
+   itself so no native glyph or stray text node can show through — and the
+   arrow is drawn as our own ::after instead. */
 [data-testid="stChatInputSubmitButton"] {
   background: var(--dw-teal) !important;
   border: 0 !important;
@@ -507,24 +791,39 @@ html, body,
   min-width: 34px;
   min-height: 34px;
   padding: 0 !important;
+  margin-left: 10px !important;      /* `.input` gap, see the composer above */
   display: flex !important;
   align-items: center;
   justify-content: center;
+  color: transparent !important;
+  font-size: 0 !important;
+  /* Full-strength teal at all times. Streamlit disables the button while the
+     field is empty and fades it to .45, which over the navy surface reads as
+     #3c7d90 instead of #59d0dd — the muted disc. The prototypes' `.btn-send`
+     has no disabled state at all, so the fade is cancelled here rather than
+     merely lightened. */
+  opacity: 1 !important;
 }
 [data-testid="stChatInputSubmitButton"] > * { display: none !important; }
 [data-testid="stChatInputSubmitButton"]::after {
-  content: "\2191";                      /* ↑ */
+  content: "\2191";                      /* U+2191 UPWARDS ARROW (↑) — this
+                                             string MUST stay in a raw Python
+                                             string: in a normal string, Python
+                                             reads \21 as a 2-digit octal
+                                             escape (an invisible control
+                                             char) and leaves the literal "91"
+                                             behind, which is the "91" bug. */
   font-family: var(--dw-sans);
-  font-size: 16px;
+  font-size: 16px !important;        /* `.btn-send` font-size */
   font-weight: 800;
   line-height: 1;
-  color: var(--dw-on-teal);
+  color: var(--dw-on-teal) !important;
 }
 [data-testid="stChatInputSubmitButton"]:hover {
   background: var(--dw-teal) !important;
-  opacity: .88;
+  opacity: .88 !important;
 }
-[data-testid="stChatInputSubmitButton"]:disabled { opacity: .45; }
+[data-testid="stChatInputSubmitButton"]:disabled { opacity: 1 !important; }
 
 /* ==================================================================
    7. Buttons -> the prototypes' chip language
@@ -592,19 +891,41 @@ html, body,
   border-radius: var(--dw-radius);
   box-shadow: var(--dw-card-shadow);
 }
+/* `st.status` renders as an expander, so its label and chevron are the
+   summary row. Streamlit paints both from the native theme, hence the same
+   enforcement the chat bubbles need — !important and the child nodes named
+   explicitly, since the colour sits on the inner span, not the <summary>. */
 [data-testid="stExpander"] summary {
   font-size: 12px;
   color: var(--dw-text-ctx);
 }
+.st-key-pa-screen [data-testid="stExpander"] summary,
+.st-key-pa-screen [data-testid="stExpander"] summary :is(span, p, div) {
+  color: var(--dw-text-ctx) !important;
+}
+.st-key-pa-screen [data-testid="stExpander"] summary svg { fill: currentColor; }
+/* The summary row is painted from the native theme's secondaryBackgroundColor
+   (it resolves to a near-white #f9fafc). That value is correct for the page,
+   which is where config.toml sets it, but the status header lives *inside*
+   the phone — on Deep Water it came through as a white band. The expander
+   already draws the card, so the summary needs no surface of its own. */
+.st-key-pa-screen [data-testid="stExpander"] summary,
+.st-key-pa-screen [data-testid="stExpander"] details {
+  background-color: transparent !important;
+}
 [data-testid="stExpander"] summary:hover { color: var(--dw-teal); }
 
+/* !important on the alert colour so the markdown nested inside it — which
+   now resolves `inherit` against this node — lands on our ink and not on the
+   colour Streamlit sets on stAlertContainer itself. Without it the inherit
+   rule above would faithfully inherit the wrong value. */
 [data-testid="stAlert"],
 [data-testid="stAlertContainer"],
 .stAlert {
   border-radius: var(--dw-radius);
   border: 1px solid var(--dw-glass-border);
   background: var(--dw-glass-fill);
-  color: var(--dw-text-ast);
+  color: var(--dw-text-ast) !important;
   font-size: 12.5px;
 }
 [data-testid="stAlert"] a,
@@ -612,8 +933,40 @@ html, body,
 
 [data-testid="stCaptionContainer"],
 [data-testid="stCaptionContainer"] p {
-  color: var(--dw-text-ctx);
+  color: var(--dw-text-ctx) !important;
   font-size: 11.5px;
+}
+
+/* st.selectbox — app.py's feedback flow puts one inside the phone. BaseWeb
+   paints the closed control from the native theme. Its dropdown opens in a
+   portal at the document root, outside .st-key-pa-screen and beyond the
+   reach of any rule here; that surface is covered by .streamlit/config.toml
+   instead. Same for st.toast, which also portals out. */
+.st-key-pa-screen [data-testid="stSelectbox"] :is(div, span, input, button, svg) {
+  color: var(--dw-text) !important;
+}
+.st-key-pa-screen [data-testid="stSelectbox"] svg { fill: currentColor; }
+.st-key-pa-screen [data-testid="stSelectbox"] input::placeholder {
+  color: var(--dw-text-ctx) !important;
+  opacity: 1;
+}
+/* Same secondaryBackgroundColor leak as the status summary above: the control
+   is painted on an inner emotion div, so every surface inside is flattened
+   and the pill is drawn once on the node that owns the control.
+
+   Two anchors, because Streamlit changed engines: 1.61 builds the selectbox
+   with react-aria (`.react-aria-ComboBox` wrapping a [role="group"]), older
+   builds used BaseWeb (`[data-baseweb="select"]`). Matching both keeps this
+   working across the >=1.57,<2.0 range pyproject allows. Either selector
+   outranks the blanket `div` rule above, so the flattening does not undo it. */
+.st-key-pa-screen [data-testid="stSelectbox"] div {
+  background-color: transparent !important;
+}
+.st-key-pa-screen [data-testid="stSelectbox"] .react-aria-ComboBox [role="group"],
+.st-key-pa-screen [data-testid="stSelectbox"] [data-baseweb="select"] {
+  background-color: var(--dw-input-bg) !important;
+  border-color: var(--dw-input-border) !important;
+  border-radius: 999px;
 }
 
 /* Tighten Streamlit's default vertical rhythm inside the phone. */
@@ -738,3 +1091,13 @@ def role_marker(role: str) -> None:
 def assistant_label(text: str = ASSISTANT_LABEL) -> None:
     """Serif italic label that opens an assistant turn."""
     st.markdown(f'<div class="pa-who">{text}</div>', unsafe_allow_html=True)
+
+
+def citation(text: str) -> None:
+    """
+    Dashed-underline source chip closing an answer grounded in a document,
+    e.g. "Manual · §5 Maintenance". Call last, inside the same
+    `st.chat_message("assistant")` block, only when the answer actually cites
+    a source.
+    """
+    st.markdown(f'<div class="pa-src">{text}</div>', unsafe_allow_html=True)
