@@ -84,7 +84,12 @@ GREETING = (
 
 # Openers, from the prototypes' first screen. Clicking one sends it as if it
 # had been typed.
-SUGGESTIONS = [
+#
+# NOTE: renamed from SUGGESTIONS to OPENERS to avoid confusion with the
+# suggester node's chips, which are a different feature entirely: openers are
+# static and only appear before the first user message; chips are predicted per
+# turn by the graph and appear under the answer.
+OPENERS = [
     "My water looks cloudy",
     "I saw a warning in the app",
     "I have a maintenance question",
@@ -99,6 +104,11 @@ def initial_messages() -> list[dict]:
 # moved feedback to the end-of-chat survey (option-c-deep-water.html, v0.3). The
 # widget and its Langfuse plumbing stay intact; flip this back to True to show it.
 SHOW_PER_ANSWER_FEEDBACK = False
+
+# Number of consecutive turns with ignored chips before the suggester stops
+# emitting. Mirrors the backend gate in should_suggest(); kept here as a named
+# constant because the UI is what actually counts the streak.
+IGNORED_CHIP_LIMIT = 2
 
 # --- Score naming (kept in constants so score_id stays stable across reruns) ---
 SCORE_FEEDBACK = "user_feedback"
@@ -215,6 +225,38 @@ def submit_feedback(
 
 
 # ==========================================
+# CHIP TELEMETRY
+# ==========================================
+def log_chip_event(trace_id: str, event: str, payload: dict) -> None:
+    """
+    Records chip impressions and taps as Langfuse scores, which is what feeds
+    the metrics in step 9 of the plan: emission rate, tap rate, and which
+    entity/agent pairs actually get tapped.
+
+    Fire-and-forget: chip telemetry must never break a turn, so every failure
+    is swallowed. Uses a deterministic score id per (trace, event) so a rerun
+    upserts instead of duplicating.
+    """
+    if lf is None:
+        return
+    try:
+        lf.create_score(
+            score_id=build_score_id(trace_id, f"chip_{event}"),
+            trace_id=trace_id,
+            name=f"chip_{event}",
+            value=payload.get("count", 1),
+            data_type="NUMERIC",
+            metadata={
+                "thread_id": st.session_state.thread_id,
+                **payload,
+            },
+        )
+        lf.flush()
+    except Exception:
+        pass
+
+
+# ==========================================
 # NEO4J CONNECTION HANDLER
 # ==========================================
 @st.cache_resource
@@ -291,6 +333,17 @@ if "turn_counter" not in st.session_state:
 if "db_online" not in st.session_state:
     st.session_state.db_online, st.session_state.db_message = check_and_handle_neo4j()
 
+# --- chip bookkeeping ------------------------------------------------------
+# The suggester reads ignored_chip_streak from the graph state, but the UI is
+# the only side that can observe whether a chip was tapped, so the UI owns the
+# counter and ships it into the graph on every turn.
+if "ignored_chip_streak" not in st.session_state:
+    st.session_state.ignored_chip_streak = 0
+if "chips_shown_last_turn" not in st.session_state:
+    st.session_state.chips_shown_last_turn = False
+if "last_turn_was_tap" not in st.session_state:
+    st.session_state.last_turn_was_tap = False
+
 # The diagnostics that used to occupy the sidebar (session id, interaction and
 # score counts, graph status) are intentionally not displayed: they are control
 # and tracking data for us, not for the user. Nothing is lost — thread_id ships
@@ -301,16 +354,77 @@ if "db_online" not in st.session_state:
 # ==========================================
 # OPENING SUGGESTIONS
 # ==========================================
-def render_suggestions(options: list[str], disabled: bool = False):
+def render_openers(options: list[str], disabled: bool = False):
     """
     The openers under the greeting. A click stashes the text and reruns; the
     composer picks it up below and the turn runs exactly as if it were typed —
     so they follow the composer and go dead while the graph is unreachable.
+
+    Container key stays "pa-chips" so the existing theme rule keeps applying.
     """
     with st.container(key="pa-chips"):
         for i, text in enumerate(options):
-            if st.button(text, key=f"sug_{i}", disabled=disabled):
+            if st.button(text, key=f"opener_{i}", disabled=disabled):
                 st.session_state.pending_prompt = text
+                st.rerun()
+
+
+# ==========================================
+# SUGGESTION CHIPS (suggester node)
+# ==========================================
+def render_chips(
+    suggestions: list,
+    turn_index: int,
+    trace_id: str | None = None,
+    disabled: bool = False,
+):
+    """
+    Predicted next-question chips, rendered under the tier-1 answer. Zero chips
+    is the normal case: the suggester suppresses itself far more often than it
+    fires, so this returns early without drawing anything.
+
+    A tap sends the label as a plain user message and resets the ignored streak.
+
+    NOTE: the `agent` the suggester already resolved is discarded here — the tap
+    re-enters through the planner like any typed message, costing one extra LLM
+    call per tap. Removing that cost needs a route_hint path in the planner,
+    which is not implemented yet.
+    """
+    if not suggestions:
+        return
+
+    with st.container(key=f"pa-suggest-{turn_index}"):
+        for i, sug in enumerate(suggestions):
+            # Tolerate both the pydantic model and its dict form: what arrives
+            # depends on whether LangGraph serialized the state on the way out.
+            if isinstance(sug, dict):
+                label = sug.get("label", "")
+                agent = sug.get("agent", "")
+                entity = sug.get("entity", "")
+            else:
+                label = getattr(sug, "label", "")
+                agent = getattr(sug, "agent", "")
+                entity = getattr(sug, "entity", "")
+
+            if not label:
+                continue
+
+            if st.button(label, key=f"chip_{turn_index}_{i}", disabled=disabled):
+                st.session_state.pending_prompt = label
+                st.session_state.last_turn_was_tap = True
+                st.session_state.ignored_chip_streak = 0
+                if trace_id:
+                    log_chip_event(
+                        trace_id,
+                        "tap",
+                        {
+                            "turn_index": turn_index,
+                            "position": i,
+                            "label": label,
+                            "agent": agent,
+                            "entity": entity,
+                        },
+                    )
                 st.rerun()
 
 
@@ -444,7 +558,7 @@ with st.container(key="pa-phone"):
 
             # Chat history. Feedback rides on answers the assistant has
             # actually settled — see `is_definitive_answer`.
-            for msg in st.session_state.messages:
+            for idx, msg in enumerate(st.session_state.messages):
                 with st.chat_message(msg["role"]):
                     role_marker(msg["role"])
                     if msg["role"] == "assistant":
@@ -453,10 +567,27 @@ with st.container(key="pa-phone"):
                     if msg["role"] == "assistant" and msg.get("can_rate"):
                         render_feedback(msg["trace_id"], turn_index=msg.get("turn_index"))
 
+                    # Chips only on the latest assistant message. Older turns
+                    # keep their suggestions in history for telemetry, but
+                    # rendering them would offer stale next-steps for a
+                    # conversation that already moved on.
+                    is_last = idx == len(st.session_state.messages) - 1
+                    if (
+                        msg["role"] == "assistant"
+                        and is_last
+                        and msg.get("suggestions")
+                    ):
+                        render_chips(
+                            msg["suggestions"],
+                            turn_index=msg.get("turn_index", idx),
+                            trace_id=msg.get("trace_id"),
+                            disabled=not online,
+                        )
+
                 # Openers sit outside the greeting card, as in the prototypes,
                 # and only while the greeting is still the whole conversation.
                 if msg.get("opening") and len(st.session_state.messages) == 1:
-                    render_suggestions(SUGGESTIONS, disabled=not online)
+                    render_openers(OPENERS, disabled=not online)
 
         # Nested inside a container, so it renders inline in the phone rather
         # than pinned to the bottom of the viewport.
@@ -465,8 +596,8 @@ with st.container(key="pa-phone"):
             disabled=not online,
         )
 
-# A clicked opener behaves like a typed message. Popped unconditionally so a
-# stale value can never fire a turn on a later rerun.
+# A clicked opener or chip behaves like a typed message. Popped unconditionally
+# so a stale value can never fire a turn on a later rerun.
 suggested = st.session_state.pop("pending_prompt", None)
 if suggested and not prompt:
     prompt = suggested
@@ -480,6 +611,9 @@ with st.container(key="pa-reset", horizontal=True, horizontal_alignment="center"
         st.session_state.thread_id = str(uuid.uuid4())
         st.session_state.feedback = {}
         st.session_state.turn_counter = 0
+        st.session_state.ignored_chip_streak = 0
+        st.session_state.chips_shown_last_turn = False
+        st.session_state.last_turn_was_tap = False
         st.rerun()
 
 
@@ -500,7 +634,7 @@ def is_definitive_answer(plan, runs, text: str) -> bool:
 
       * a refusal (`oos`) is not an answer about the pool;
       * an answer nobody grounded — every step failed, or the only agents that
-        ran were `general`/`ooo` — is conversation, not a documented answer;
+        ran were `general`/`oos` — is conversation, not a documented answer;
       * a short reply ending in a question mark is the assistant asking back.
 
     `plan` is the planner's ExecutionStep list, `runs` the (agent, error) pairs
@@ -514,7 +648,7 @@ def is_definitive_answer(plan, runs, text: str) -> bool:
     if any(getattr(step, "oos", False) for step in plan):
         return False
     grounded = any(
-        agent not in ("ooo", "general") and not error for agent, error in runs
+        agent not in ("oos", "general") and not error for agent, error in runs
     )
     if not grounded:
         return False
@@ -523,12 +657,13 @@ def is_definitive_answer(plan, runs, text: str) -> bool:
     return True
 
 
-def run_turn(prompt: str, trace_id: str, turn_index: int) -> tuple[str, bool]:
+def run_turn(prompt: str, trace_id: str, turn_index: int) -> tuple[str, bool, list]:
     """
     Executes the graph and streams intermediate state into the UI.
     Separated from the trace plumbing so the span wrapper stays readable.
 
-    Returns the final response and whether it is a definitive answer.
+    Returns the final response, whether it is a definitive answer, and the
+    suggester's chips (empty list is the common case).
     """
     config = {
         "configurable": {"thread_id": st.session_state.thread_id},
@@ -545,9 +680,15 @@ def run_turn(prompt: str, trace_id: str, turn_index: int) -> tuple[str, bool]:
     final_response = ""
     plan_steps: list = []
     agent_runs: list[tuple[str, str | None]] = []
+    suggestions: list = []
 
     for event in graph.stream(
-        {"messages": [HumanMessage(content=prompt)]},
+        {
+            "messages": [HumanMessage(content=prompt)],
+            # The suggester's suppression gate reads this from state, but only
+            # the UI can tell whether the last chips were tapped or ignored.
+            "ignored_chip_streak": st.session_state.ignored_chip_streak,
+        },
         config=config,
         stream_mode="updates",
     ):
@@ -580,13 +721,32 @@ def run_turn(prompt: str, trace_id: str, turn_index: int) -> tuple[str, bool]:
             if messages:
                 final_response = messages[-1].content
 
-    return final_response, is_definitive_answer(plan_steps, agent_runs, final_response)
+        elif "suggester" in event:
+            # Parallel branch: can arrive before or after the synthesizer, so
+            # nothing here may assume the answer already exists. An empty list
+            # is the expected outcome most turns.
+            suggester_state = event.get("suggester")
+            if isinstance(suggester_state, dict):
+                suggestions = suggester_state.get("suggestions") or []
+
+    return (
+        final_response,
+        is_definitive_answer(plan_steps, agent_runs, final_response),
+        suggestions,
+    )
 
 
 # User Input — the composer lives inside the phone, above.
 # Rendering through `screen_scroll` keeps the live turn inside the phone's
 # scroll area, which was laid out before the composer.
 if prompt:
+    # Chip bookkeeping, before anything else touches the counters. If last turn
+    # rendered chips and this prompt did not come from tapping one, they were
+    # ignored; IGNORED_CHIP_LIMIT of those in a row and the suggester goes quiet.
+    if st.session_state.chips_shown_last_turn and not st.session_state.last_turn_was_tap:
+        st.session_state.ignored_chip_streak += 1
+    st.session_state.last_turn_was_tap = False
+
     # Monotonic turn index -> the seed is unique even if a previous turn failed.
     st.session_state.turn_counter += 1
     turn_index = st.session_state.turn_counter
@@ -607,6 +767,7 @@ if prompt:
         with st.status("Agent Thinking Process...", expanded=True) as status:
             final_response = ""
             definitive = False
+            suggestions: list = []
             turn_error: Exception | None = None
 
             if lf is not None:
@@ -628,14 +789,17 @@ if prompt:
                     )
 
                     try:
-                        final_response, definitive = run_turn(
+                        final_response, definitive, suggestions = run_turn(
                             prompt,
                             current_trace_id,
                             turn_index,
                         )
 
                         span.update(
-                            output={"response": final_response}
+                            output={
+                                "response": final_response,
+                                "suggestion_count": len(suggestions),
+                            }
                         )
 
                         span.set_trace_io(
@@ -660,7 +824,7 @@ if prompt:
                 lf.flush()
             else:
                 try:
-                    final_response, definitive = run_turn(
+                    final_response, definitive, suggestions = run_turn(
                         prompt, current_trace_id, turn_index
                     )
                 except Exception as e:
@@ -686,7 +850,21 @@ if prompt:
                 "trace_id": current_trace_id,
                 "turn_index": turn_index,
                 "can_rate": definitive,
+                "suggestions": suggestions,
             })
+
+            # Emission rate denominator: recorded whether or not chips appeared.
+            st.session_state.chips_shown_last_turn = bool(suggestions)
+            log_chip_event(
+                current_trace_id,
+                "impression",
+                {
+                    "turn_index": turn_index,
+                    "count": len(suggestions),
+                    "ignored_streak": st.session_state.ignored_chip_streak,
+                },
+            )
+
             # Rerun so the feedback widget renders from the history loop, where
             # it survives the reruns that its own buttons trigger.
             st.rerun()
