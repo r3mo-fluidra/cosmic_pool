@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import BaseMessage, AIMessage
 from langgraph.graph.message import add_messages
 from langgraph.types import Command
-
+from ..graph_context.response_contracts import SynthesizerOutput
 
 # =====================================================================
 # 0. AGENT NAMES (Centralized to avoid typos)
@@ -175,6 +175,21 @@ class PoolAgentState(TypedDict):
     # ── Sub-agent results (dual-track pattern) ───────────────────────
     agent_results: NotRequired[Dict[str, AgentResult]]
     # Keys: "step_1", "step_2", ...
+    # ── Response contract (NUEVO) ────────────────────────────────────
+    archetype: NotRequired[str]
+    response: NotRequired[SynthesizerOutput]   # payload para el frontend
+    validation: NotRequired[dict]   
 
     # ── Error handling ───────────────────────────────────────────────
     error: NotRequired[Optional[str]]
+
+
+
+# futuro: test para asegurar que todos los agentes declarados en AgentName estén mapeados en AGENT_TO_ARCHETYPE
+#     from state import AgentName. 
+# from graph_context.response_contracts import AGENT_TO_ARCHETYPE
+
+# def test_todos_los_agentes_mapeados():
+#     declarados = set(AgentName.__args__)
+#     mapeados   = set(AGENT_TO_ARCHETYPE)
+#     assert declarados == mapeados, f"sin mapear: {declarados - mapeados}"

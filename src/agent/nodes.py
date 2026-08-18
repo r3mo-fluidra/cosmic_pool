@@ -7,6 +7,11 @@ from ..prompts.prompts_old import PLANNER_PROMPT, SYNTHESIZER_PROMPT
 from .chains import create_planner_chain
 from ..config.llm import create_llm
 from .agents import get_agent_by_name
+from ..graph_context.response_contracts import (
+    SynthesizerOutput, get_contract, resolve_archetype,
+    usable_results, DetailSection,
+)
+from ..graph_context.response_validator import enforce_contract, fallback_payload
 
 # ================================================================
 # CONFIGURATION
@@ -37,6 +42,26 @@ def _get_planner_chain():
 # ================================================================
 # HELPERS
 # ================================================================
+def _flatten(content) -> str:
+    """Tu lógica actual de parseo, ahora solo para el camino de fallback."""
+    if isinstance(content, list):
+        return " ".join(
+            item.get("text", "") for item in content
+            if isinstance(item, dict) and item.get("text", "").strip()
+        ).strip()
+    return str(content).strip()
+
+
+def _attach_sources(payload: SynthesizerOutput, results: list) -> None:
+    seen, srcs = set(), []
+    for r in results:
+        for s in r.sources:
+            if s not in seen:
+                seen.add(s); srcs.append(s)
+    if srcs:
+        payload.details.append(
+            DetailSection(label="Fuentes", body="\n".join(f"- {s}" for s in srcs))
+        )
 
 def _extract_text(content) -> str:
     """Normalise LLM content to plain text regardless of its shape."""
@@ -300,35 +325,50 @@ def synthesizer(state: PoolAgentState) -> dict:
 
     is_oos = _is_oos(execution_plan)
     oos_instruction = _OOS_INSTRUCTION_ACTIVE if is_oos else _OOS_INSTRUCTION_INACTIVE
-
     language_instruction = _LANGUAGE_MAP.get(language_code, _LANGUAGE_MAP["es"])
+
+    # ── Arquetipo, derivado de lo que REALMENTE se obtuvo ────────────
+    usable    = usable_results(agent_results)
+    agents    = [r.agent for r in usable]
+    archetype = resolve_archetype(agents, is_oos)
+    contract  = get_contract(archetype)
 
     raw_content = _build_raw_content(agent_results)
     if not raw_content:
         raw_content = "(no prior content — generate a warm greeting and offer help)"
+        archetype, contract = "conversational", get_contract("conversational")
 
     system_content = SYNTHESIZER_PROMPT.format(
+        archetype=archetype,
+        shape=contract["shape"],
+        budget=contract["budget"],
+        detail_labels=", ".join(contract["details"]) or "(ninguna)",
         oos_instruction=oos_instruction,
         language=language_instruction,
         raw_content=raw_content,
     )
 
-    # ✅ Lazy — LLM se inicializa solo aquí
-    response = _get_llm().invoke([
-        SystemMessage(content=system_content),
-        HumanMessage(content="Generate the final refined response now."),
-    ])
+    try:
+        payload = _get_llm().with_structured_output(SynthesizerOutput).invoke([
+            SystemMessage(content=system_content),
+            HumanMessage(content="Generate the final refined response now."),
+        ])
+        payload, report = enforce_contract(payload, contract, agents,
+                                           detail_cls=DetailSection)
+        validation = report.to_dict()
+    except Exception as exc:
+        raw = _get_llm().invoke([
+            SystemMessage(content=system_content),
+            HumanMessage(content="Generate the final refined response now."),
+        ])
+        payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
+        validation = {"fallback": True, "reason": str(exc)}
 
-    content = response.content
-    if isinstance(content, list):
-        final_text = " ".join(
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and item.get("text", "").strip()
-        ).strip()
-    else:
-        final_text = str(content).strip()
+    _attach_sources(payload, usable)
 
     return {
-        "messages": [AIMessage(content=final_text, name="Izel")]
+        "archetype": archetype,
+        "response": payload,
+        "validation": validation,
+        "messages": [AIMessage(content=payload.tier1_markdown(), name="Marlin")],
     }
