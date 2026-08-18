@@ -27,7 +27,7 @@ AGENT_SLUGS = {
     "records": "Pool Records Agent",
     "recovery": "Pool Recovery & Environmental Agent",
     "general": "Pool General Assistant Agent",
-    "ooo": "Out-of-Scope Handler",
+    "oos": "Out-of-Scope Handler",
 }
 
 
@@ -275,7 +275,7 @@ You have access to the current graph state, which includes an `execution_plan` (
 - records          → Recordkeeping systems: log structure, required fields, retention, inspection packages.
 - recovery         → Site-level disaster/environmental recovery: flooding, storm damage, sewage backup, wildfire ash, extended power loss, prolonged closure.
 - general          → Greetings, capability questions, and educational/theoretical pool topics with no reference to the user's own facility.
-- ooo              → Strict out-of-scope handler: unrelated topics, unsafe/illegal requests, personal medical diagnosis. Requires `oos = True` in the step.
+- oos              → Strict out-of-scope handler: unrelated topics, unsafe/illegal requests, personal medical diagnosis. Requires `oos = True` in the step.
 
 ### Strict Rules:
 - Do NOT attempt to answer the user's query yourself.
@@ -391,7 +391,7 @@ PROMPTS = {
     "synthesizer": SYNTHESIZER_PROMPT,
     "supervisor": SUPERVISOR_PROMPT,
     "general": GENERAL_PROMPT,
-    "ooo": OOS_PROMPT,
+    "oos": OOS_PROMPT,
     "base": BASE_POOL_AGENT_PROMPT,
 }
 

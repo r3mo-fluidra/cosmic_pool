@@ -8,26 +8,13 @@ from langchain_core.messages import BaseMessage, AIMessage
 from langgraph.graph.message import add_messages
 from langgraph.types import Command
 from ..graph_context.response_contracts import SynthesizerOutput
-
+from ..graph_context.suggestions import Suggestion
+from ..agent.agent_names import AgentName
 # =====================================================================
 # 0. AGENT NAMES (Centralized to avoid typos)
 # =====================================================================
 
-AgentName = Literal[
-    "general",
-    "ooo",
-    "chemistry",
-    "equipment",
-    "hydraulics",
-    "operations",
-    "compliance",
-    "contamination",
-    "facility_design",
-    "safety",
-    "recovery",
-    "records",
-    "math",
-]
+
 
 
 # =====================================================================
@@ -103,7 +90,7 @@ class ExecutionStep(BaseModel):
         "historical data, documentation, and record-management tasks.\n"
         "- 'math': Numerical calculations, formulas, measurements, conversions, "
         "dosage calculations, hydraulic calculations, and quantitative reasoning.\n"
-        "- 'ooo': Mandatory choice for unsafe, prohibited, irrelevant, "
+        "- 'oos': Mandatory choice for unsafe, prohibited, irrelevant, "
         "or out-of-scope requests.\n"
         "The planner may assign multiple steps to the same agent when "
         "multiple independent tasks require the same specialization."
@@ -179,6 +166,9 @@ class PoolAgentState(TypedDict):
     archetype: NotRequired[str]
     response: NotRequired[SynthesizerOutput]   # payload para el frontend
     validation: NotRequired[dict]   
+    # ── Sugerencias (chips) ──────────────────────────────────────────
+    suggestions: NotRequired[List[Suggestion]]
+    ignored_chip_streak: NotRequired[int]
 
     # ── Error handling ───────────────────────────────────────────────
     error: NotRequired[Optional[str]]

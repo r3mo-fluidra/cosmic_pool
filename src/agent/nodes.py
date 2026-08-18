@@ -1,4 +1,5 @@
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, BaseMessage, RemoveMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 from langfuse import observe
 from typing import List, Literal
@@ -7,11 +8,15 @@ from ..prompts.prompts_old import PLANNER_PROMPT, SYNTHESIZER_PROMPT
 from .chains import create_planner_chain
 from ..config.llm import create_llm
 from .agents import get_agent_by_name
+
+# Graph context
 from ..graph_context.response_contracts import (
     SynthesizerOutput, get_contract, resolve_archetype,
     usable_results, DetailSection,
 )
 from ..graph_context.response_validator import enforce_contract, fallback_payload
+from ..graph_context.suggestions import Suggestion  
+from ..graph_context.turn_cache import reset_turn
 
 # ================================================================
 # CONFIGURATION
@@ -222,12 +227,14 @@ def summarize_memory_node(state: PoolAgentState) -> Command[Literal["planner"]]:
 # ================================================================
 
 @observe(as_type='agent', name="Planner Node")
-def planner(state: PoolAgentState):
+def planner(state: PoolAgentState, config: RunnableConfig):
+    thread_id = config["configurable"]["thread_id"]
+    reset_turn(thread_id)  
     user_input = state["messages"][-1].content
 
     agent_messages = [
         m for m in state["messages"]
-        if isinstance(m, AIMessage) and getattr(m, "name", None) == "Izel"
+        if isinstance(m, AIMessage) and getattr(m, "name", None) == "Marlin"
     ]
 
     last_agent_msg = agent_messages[-1].content if agent_messages else ""
@@ -327,15 +334,17 @@ def synthesizer(state: PoolAgentState) -> dict:
     oos_instruction = _OOS_INSTRUCTION_ACTIVE if is_oos else _OOS_INSTRUCTION_INACTIVE
     language_instruction = _LANGUAGE_MAP.get(language_code, _LANGUAGE_MAP["es"])
 
-    # ── Arquetipo, derivado de lo que REALMENTE se obtuvo ────────────
     usable    = usable_results(agent_results)
     agents    = [r.agent for r in usable]
-    archetype = resolve_archetype(agents, is_oos)
+    # archetype ya viene resuelto del orchestrator (punto de fan-out)
+    archetype = state.get("archetype", "conversational")
     contract  = get_contract(archetype)
 
     raw_content = _build_raw_content(agent_results)
     if not raw_content:
         raw_content = "(no prior content — generate a warm greeting and offer help)"
+        # fallback defensivo — no debería dispararse si el orchestrator hizo su parte,
+        # pero cubre la rama de error / cualquier estado inconsistente
         archetype, contract = "conversational", get_contract("conversational")
 
     system_content = SYNTHESIZER_PROMPT.format(

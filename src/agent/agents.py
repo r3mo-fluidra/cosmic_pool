@@ -8,7 +8,7 @@ from langchain_core.tools import tool
 from langchain.agents import create_agent
 from langgraph_supervisor import create_supervisor
 
-from .state import AgentName
+from .agent_names import AgentName
 from ..config.llm import create_llm, create_routing_llm, create_synthesizer_llm
 from ..prompts.prompts import (
     GENERAL_PROMPT, 
@@ -86,7 +86,7 @@ def _initialize():
     oos_agent = create_agent(
         model=_synthesizer_llm,
         tools=[],
-        name="out_of_scope",
+        name="oos",
         system_prompt=OOS_PROMPT,
     )
 
@@ -168,7 +168,7 @@ def _initialize():
     )
     _agents = {
         "general":     general_agent,
-        "ooo":         oos_agent,
+        "oos":  oos_agent,
         "chemistry":   chemistry_agent,
         "equipment":   equipment_agent,
         "hydraulics":  hydraulics_agent,

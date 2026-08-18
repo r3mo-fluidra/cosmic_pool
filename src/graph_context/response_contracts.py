@@ -126,7 +126,7 @@ AGENT_TO_ARCHETYPE: dict[str, str] = {
     "contamination":   "critical",
     "safety":          "critical",
     "general":         "conversational",
-    "ooo":             "oos",
+    "oos":             "oos",
 }
 
 # Cuando un turno produce varios arquetipos, gana el de índice más bajo.

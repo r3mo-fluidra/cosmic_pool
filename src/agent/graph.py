@@ -54,6 +54,7 @@ from .nodes import (
     synthesizer,
     build_context_node,
     summarize_memory_node,
+    suggester,
 )
 
 # ================================================================
@@ -98,16 +99,17 @@ def build_graph(checkpointer=None):
     builder.add_node(
         "orchestrator",
         orchestrator,
-        destinations=["orchestrator", "synthesizer"],
+        destinations=["orchestrator", "synthesizer", "suggester"],  # + suggester
     )
 
     builder.add_node("synthesizer", synthesizer)
+    builder.add_node("suggester", suggester) 
 
     # ── Wire edges ────────────────────────────────────────────────────────────
 
     builder.add_edge(START, "build_context_node")   # new entry point
     builder.add_edge("synthesizer", END)             # terminal node
-
+    builder.add_edge("suggester", END)  
     # All other transitions (build_context_node → summarize_memory_node | planner,
     # summarize_memory_node → planner, planner → orchestrator,
     # orchestrator → orchestrator | synthesizer) are driven by the Command
