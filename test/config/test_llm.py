@@ -23,10 +23,10 @@ def test_create_llm(mock_get_secret, mock_chat):
     create_llm()
 
     mock_chat.assert_called_once_with(
-        model="gemini-3.5-flash-lite",
+        model="gemini-3.1-flash-lite",
         google_api_key="fake-key",
         temperature=0.2,
-    )
+        )
 
 
 # ==========================================================
@@ -41,7 +41,7 @@ def test_create_routing_llm(mock_get_secret, mock_chat):
     create_routing_llm()
 
     mock_chat.assert_called_once_with(
-        model="gemini-3.5-flash-lite",
+        model="gemini-3.1-flash-lite",
         google_api_key="fake-key",
         temperature=0.0,
     )
@@ -59,7 +59,7 @@ def test_create_synthesizer_llm(mock_get_secret, mock_chat):
     create_synthesizer_llm()
 
     mock_chat.assert_called_once_with(
-        model="gemini-3.5-flash-lite",
+        model="gemini-3.1-flash-lite",
         google_api_key="fake-key",
         temperature=0.4,
     )

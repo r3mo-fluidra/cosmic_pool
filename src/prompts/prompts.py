@@ -16,9 +16,9 @@ full agent names, so the orchestrator must translate.
 
 AGENT_SLUGS = {
     "chemistry": "Pool Chemistry Agent",
+    "math": "Pool Math Agent",
     "equipment": "Pool Equipment Agent",
     "hydraulics": "Pool Hydraulics Agent",
-    "math": "Pool Math Agent",
     "operations": "Pool Operations Agent",
     "compliance": "Pool Compliance Agent",
     "contamination": "Pool Contamination Agent",
@@ -26,6 +26,8 @@ AGENT_SLUGS = {
     "safety": "Pool Safety Agent",
     "records": "Pool Records Agent",
     "recovery": "Pool Recovery & Environmental Agent",
+    "general": "Pool General Assistant Agent",
+    "ooo": "Out-of-Scope Handler",
 }
 
 
@@ -233,11 +235,19 @@ You have access to the current graph state, which includes an `execution_plan` (
 
 ### Sub-Agent Directory (For your reference):
 ──────────────
-• diagnosis     → Executes symptom-to-parameter mappings.
-• dosage        → Executes explicit chemical calculations (RAISES/LOWERS).
-• equipment     → Evaluates physical hardware damage or operational anomalies.
-• maintenance   → Provides checklists for routine/seasonal procedures.
-• ooo           → Triggers out-of-scope/safety refusal protocols.
+- chemistry        → Water chemistry judgment for a specific pool/spa: which parameters are out of balance and what corrective action to take, in what order. Does not produce dosing numbers.
+- math             → Deterministic numeric computation: volume, flow rate, turnover, head loss, dosage amounts, saturation index, unit conversion. Retrieves the governing formula rather than assuming it.
+- equipment        → Condition, maintenance, and repair of installed hardware: pumps, filters, heaters, valves, feeders, controllers, probes.
+- hydraulics       → Flow behavior of an existing circulation system: flow rate, turnover, head loss, pump operating point, dead spots, short-circuiting.
+- operations       → Routine day-to-day/seasonal running of the facility: schedules, testing cadence, opening/closing, winterization, bather-load practice.
+- compliance       → Regulatory requirements: whether something is required/permitted/inspectable, what a code provision means for the venue.
+- contamination    → Active biological contamination of the water: fecal/vomit/blood incidents, animal intrusion, suspected RWI outbreaks. Takes precedence over chemistry when an incident has occurred.
+- facility_design  → Design/construction of new or renovated facilities: plan review, equipment sizing, proposed layout evaluation.
+- safety           → Bather safety and emergency preparedness for a specific facility: supervision, barriers, entrapment/drain-cover safety, EAPs, chemical handling/PPE. Prevention only — an incident in progress goes to contamination.
+- records          → Recordkeeping systems: log structure, required fields, retention, inspection packages.
+- recovery         → Site-level disaster/environmental recovery: flooding, storm damage, sewage backup, wildfire ash, extended power loss, prolonged closure.
+- general          → Greetings, capability questions, and educational/theoretical pool topics with no reference to the user's own facility.
+- ooo              → Strict out-of-scope handler: unrelated topics, unsafe/illegal requests, personal medical diagnosis. Requires `oos = True` in the step.
 
 ### Strict Rules:
 - Do NOT attempt to answer the user's query yourself.
