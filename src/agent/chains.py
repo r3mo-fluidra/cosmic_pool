@@ -3,7 +3,7 @@ from langchain_core.runnables import Runnable
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from .state import PlannerOutput   # ← Importamos el modelo Pydantic
-from ..prompts.prompts_old import PLANNER_PROMPT
+from ..prompts.prompts import PLANNER_PROMPT
 # ================================================================
 # PLANNER CHAIN
 # ================================================================

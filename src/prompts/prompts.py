@@ -416,7 +416,7 @@ def build_agent_prompt(config: AgentConfig) -> str:
     )
 
     return BASE_POOL_AGENT_PROMPT.format(
-        agent_name=config.name,
+        agent_name=config.agent_name,
         specialization=config.specialization,
         responsibilities="\n".join(
             f"- {item}" for item in config.responsibilities

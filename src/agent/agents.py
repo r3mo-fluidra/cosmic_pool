@@ -14,8 +14,8 @@ from ..prompts.prompts import (
     GENERAL_PROMPT, 
     OOS_PROMPT, 
     SUPERVISOR_PROMPT,
-    build_agent_prompt
 )
+from ..prompts.prompt_archetype import build_agent_prompt
 from ..prompts.prompts_sub_agents import (
     AGENT_REGISTRY,
     CHEMISTRY,
