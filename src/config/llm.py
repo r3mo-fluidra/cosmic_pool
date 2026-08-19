@@ -14,7 +14,8 @@ def create_llm():
         model="gemini-3.1-flash-lite",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=10,
-        temperature=0.2
+        temperature=0.2,
+        max_retries=0,  # evita que el cliente subdivida el deadline < 10s
     )
 
 def create_routing_llm():
@@ -22,7 +23,8 @@ def create_routing_llm():
         model="gemini-2.5-flash-lite",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=10,
-        temperature=0.0
+        temperature=0.0,
+        max_retries=0,
     )
 
 def create_synthesizer_llm():
@@ -30,7 +32,8 @@ def create_synthesizer_llm():
         model="gemini-2.5-flash-lite",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=10,
-        temperature=0.4
+        temperature=0.4,
+        max_retries=0,
     )
 
 def create_suggester_llm():
