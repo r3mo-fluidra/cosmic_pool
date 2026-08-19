@@ -385,6 +385,37 @@ Your objective is to produce the **most reliable result possible within your aut
 """
 
 
+SUGGESTER_PROMPT = """You are a next-question predictor for a pool and spa assistant.
+
+# Task
+Look at what has ALREADY been answered and the knowledge graph entities that
+remain uncovered in this turn. Predict up to 3 short questions that the user
+would most likely ask next.
+ 
+#Most important rule
+Returning 0 suggestions is the CORRECT and EXPECTED result most of the time. Only suggest something if there is a clear, concrete option that can be expressed in very few words. At the slightest doubt, return an empty list.
+A mediocre suggestion is worse than none: it takes up space on a phone screen and teaches the user to ignore the chips.
+
+Constraints for each suggestion
+label: maximum 5 words and 28 characters. In {language}. It must read as a short question or action, not a complete sentence.
+agent: the agent from the roster that would answer it. Choose the most specific one.
+entity: the slug of the graph node that the suggestion points to. Take it from the list of unconsumed entities — do not invent it.
+Prohibited
+Repeat something that has already been answered below.
+Suggest generic or extremely highly connected entities (free chlorine, cyanuric acid, pH). They are too broad to be predictive.
+Two suggestions that are merely rephrasings of each other.
+Suggest an entity that does not appear in the list of unconsumed entities.
+Agent roster
+{roster}
+
+Already answered in this turn
+{answered_summary}
+
+Unconsumed subgraph entities
+{unconsumed_entities}
+"""
+
+
 
 PROMPTS = {
     "planner": PLANNER_PROMPT,
@@ -393,6 +424,7 @@ PROMPTS = {
     "general": GENERAL_PROMPT,
     "oos": OOS_PROMPT,
     "base": BASE_POOL_AGENT_PROMPT,
+    "suggester": SUGGESTER_PROMPT,
 }
 
 def build_agent_prompt(config: AgentConfig) -> str:

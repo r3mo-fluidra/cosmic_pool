@@ -1,26 +1,36 @@
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, BaseMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
+import logging
 from langfuse import observe
 from typing import List, Literal
 from .state import PoolAgentState, ExecutionStep, AgentResult
-from ..prompts.prompts_old import PLANNER_PROMPT, SYNTHESIZER_PROMPT
+from ..prompts.prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
 from .chains import create_planner_chain
-from ..config.llm import create_llm
+from ..config.llm import create_llm, create_suggester_llm
 from .agents import get_agent_by_name
 
 # Graph context
 from ..graph_context.response_contracts import (
     SynthesizerOutput, get_contract, resolve_archetype,
-    usable_results, DetailSection,
+    usable_results, DetailSection, agents_from_results
 )
 from ..graph_context.response_validator import enforce_contract, fallback_payload
-from ..graph_context.suggestions import Suggestion  
+from ..graph_context.suggestions import (
+    SUPERNODES,
+    Suggestion,
+    SuggesterOutput,
+    answer_ends_with_question,
+    apply_gates_with_report,
+    roster_text,
+)
 from ..graph_context.turn_cache import reset_turn
-
+from ..graph_context.turn_cache import get_touched
 # ================================================================
 # CONFIGURATION
 # ================================================================
+
+logger = logging.getLogger(__name__)
 
 TOKEN_LIMIT = 4_000
 MESSAGES_TO_KEEP = 6
@@ -168,6 +178,82 @@ def estimated_tokens(messages: List[BaseMessage]) -> int:
                 if isinstance(block, dict):
                     total += len(block.get("text", "")) // 4
     return total
+
+def should_suggest(state: PoolAgentState) -> bool:
+    """
+    Lógica pura, cero llamadas al LLM. Corre antes de cualquier gasto de
+    cuota. El orden es intencional: lo más barato y más frecuente primero.
+    """
+    if state.get("archetype") in _SUPPRESSED_ARCHETYPES:
+        return False
+ 
+    if state.get("error"):
+        return False
+ 
+    # Sin agentes usables no hay contenido del cual predecir nada.
+    if not agents_from_results(state.get("agent_results") or {}):
+        return False
+ 
+    # El usuario ya ignoró chips dos turnos seguidos: dejar de ofrecerlos.
+    if state.get("ignored_chip_streak", 0) >= _IGNORED_CHIP_LIMIT:
+        return False
+ 
+    # El synthesizer ya cerró con una pregunta propia; un chip encima es ruido.
+    if answer_ends_with_question(state):
+        return False
+ 
+    return True
+
+def _build_answered_summary(state: PoolAgentState) -> str:
+    """Solo el tier 1: es lo que el usuario efectivamente leyó."""
+    response = state.get("response")
+    if response is None:
+        return "(sin respuesta disponible)"
+    return response.tier1_markdown()
+ 
+ 
+def _unconsumed_entities(state: PoolAgentState, thread_id: str) -> List:
+    """
+    Nodos que el retrieval tocó este turno pero que la respuesta no cubrió.
+ 
+    Doble filtro:
+      1. Anti-hub: los supernodos nunca son buen material de chip.
+      2. Redundancia: si el nombre ya aparece en la respuesta, está cubierto.
+ 
+    Es deliberadamente conservador — preferimos perder un candidato válido
+    a alimentar el prompt con algo ya respondido.
+    """
+    touched = get_touched(thread_id)
+    if not touched:
+        return []
+ 
+    answer = _build_answered_summary(state).lower()
+ 
+    return [
+        n for n in touched
+        if n.id.lower() not in SUPERNODES
+        and n.name.lower().replace("_", " ") not in answer
+    ]
+ 
+ 
+def _format_entities(nodes: List) -> str:
+    if not nodes:
+        return "(ninguna)"
+    return "\n".join(f"- {n.id} | {n.name} | {n.label}" for n in nodes)
+
+_SUPPRESSED_ARCHETYPES = frozenset({"critical", "conversational", "oos"})
+ 
+_IGNORED_CHIP_LIMIT = 2
+ 
+_suggester_llm = None
+ 
+ 
+def _get_llm():
+    """Lazy: no construir el cliente si el gate de supresión corta antes."""
+    global _suggester_llm
+    if _suggester_llm is None:
+        _suggester_llm = create_suggester_llm()
+    return _suggester_llm
 
 # ================================================================
 # CONTEXT NODE
@@ -381,3 +467,63 @@ def synthesizer(state: PoolAgentState) -> dict:
         "validation": validation,
         "messages": [AIMessage(content=payload.tier1_markdown(), name="Marlin")],
     }
+
+# ================================================================
+# SUGGESTER NODE
+# ================================================================
+def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
+    """
+    Rama paralela del fan-out del orchestrator. Lee agent_results y
+    archetype; no depende del synthesizer ni lo bloquea.
+ 
+    Devuelve siempre la clave "suggestions" — nunca la omite, para que
+    el frontend pueda distinguir "no hubo chips" de "el nodo no corrió".
+    """
+    if not should_suggest(state):
+        return {"suggestions": []}
+ 
+    thread_id = config.get("configurable", {}).get("thread_id", "")
+ 
+    unconsumed = _unconsumed_entities(state, thread_id)
+    if not unconsumed:
+        # Sin entidades libres el LLM solo puede inventar. Ahorramos la
+        # llamada: es el caso más común en turnos sin retrieval.
+        return {"suggestions": []}
+ 
+    language_code = state.get("detected_language", "es")
+    language = "español" if language_code == "es" else "English"
+    answer_text = _build_answered_summary(state)
+ 
+    system_content = SUGGESTER_PROMPT.format(
+        language=language,
+        roster=roster_text(),
+        answered_summary=answer_text,
+        unconsumed_entities=_format_entities(unconsumed),
+    )
+ 
+    try:
+        payload: SuggesterOutput = _get_llm().with_structured_output(
+            SuggesterOutput
+        ).invoke([
+            SystemMessage(content=system_content),
+            HumanMessage(content="Generá las sugerencias ahora, o ninguna."),
+        ])
+    except Exception as exc:
+        # Todo se degrada igual: 429, timeout (el cliente corta a 1.2s por
+        # config), o structured output inválido. Se loguea para poder ver la
+        # distribución real de fallas en Langfuse, pero nunca se propaga:
+        # un chip opcional no rompe el turno del usuario.
+        logger.warning(
+            "suggester degraded to []: %s: %s", type(exc).__name__, exc
+        )
+        return {"suggestions": []}
+ 
+    raw: List[Suggestion] = payload.suggestions or []
+    gated, report = apply_gates_with_report(raw, answer_text)
+ 
+    # El reporte va al log, no al state: es telemetría de calidad del prompt
+    # (paso 9: "cuál gate descarta más"), no algo que el frontend consuma.
+    if report["input"] != report["output"]:
+        logger.info("suggester gates: %s", report)
+ 
+    return {"suggestions": gated}
