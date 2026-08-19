@@ -1,9 +1,6 @@
 # BASE_POOL_AGENT_PROMPT_V1
 from .prompts_sub_agents import AgentConfig
-from ..graph_context.response_contracts import (
-
-
-)
+from ..graph_context.response_contracts import ARCHETYPE_CONTRACTS
 """
 Planner and boundary prompts for the Pool Chemistry & Maintenance Assistant.
 
@@ -34,7 +31,7 @@ AGENT_SLUGS = {
     "oos": "Out-of-Scope Handler",
 }
 
-ARCHETYPE_CONTRACTS = 
+
 
 PLANNER_PROMPT = """
 You are an expert Planner for a Pool Chemistry and Maintenance Assistant.

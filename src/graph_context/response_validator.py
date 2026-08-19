@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, asdict
-from typing import Any
+from typing import Any, Optional, Union
 
 # --------------------------------------------------------------------------
 # Configuración
@@ -76,7 +76,7 @@ class ValidationReport:
 # --------------------------------------------------------------------------
 # Utilidades
 # --------------------------------------------------------------------------
-def _has_hazard_agent(agents: list[str] | None) -> bool:
+def _has_hazard_agent(agents: Optional[list[str]]) -> bool:
     """
     Tolerante al namespace. Acepta slug ("chemistry"), display name
     ("Pool Chemistry Agent") y cualquier casing/separador, porque el valor
@@ -97,7 +97,7 @@ def _has_hazard_agent(agents: list[str] | None) -> bool:
     return False
 
 
-def _safety_trigger(contract: dict, agents: list[str] | None, payload) -> str:
+def _safety_trigger(contract: dict, agents: Optional[list[str]], payload) -> str:
     """
     Devuelve QUÉ activó la exigencia de safety: "contract" | "agent" |
     "lexicon" | "". Se separa del booleano para que enforce_contract pueda
@@ -159,7 +159,7 @@ def _first_sentence(text: str) -> str:
 # Resolución de safety condicional
 # --------------------------------------------------------------------------
 
-def resolve_safety_required(contract: dict, agents: list[str], payload) -> bool:
+def resolve_safety_required(contract: dict, agents: Optional[list[str]], payload) -> bool:
     """
     `safety_required` puede ser True, False o "conditional".
 
