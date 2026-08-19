@@ -4,6 +4,7 @@ from langgraph.types import Command
 import logging
 from langfuse import observe
 from typing import List, Literal
+import concurrent.futures
 from .state import PoolAgentState, ExecutionStep, AgentResult
 from ..prompts.prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
 from .chains import create_planner_chain
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN_LIMIT = 4_000
 MESSAGES_TO_KEEP = 6
+_SUGGESTER_DEADLINE_S = 1.2
 
 # ================================================================
 # LAZY LLM + PLANNER CHAIN
@@ -248,7 +250,7 @@ _IGNORED_CHIP_LIMIT = 2
 _suggester_llm = None
  
  
-def _get_llm():
+def _get_llm_suggester():
     """Lazy: no construir el cliente si el gate de supresión corta antes."""
     global _suggester_llm
     if _suggester_llm is None:
@@ -475,55 +477,62 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
     """
     Rama paralela del fan-out del orchestrator. Lee agent_results y
     archetype; no depende del synthesizer ni lo bloquea.
- 
+
     Devuelve siempre la clave "suggestions" — nunca la omite, para que
     el frontend pueda distinguir "no hubo chips" de "el nodo no corrió".
     """
     if not should_suggest(state):
         return {"suggestions": []}
- 
+
     thread_id = config.get("configurable", {}).get("thread_id", "")
- 
+
     unconsumed = _unconsumed_entities(state, thread_id)
     if not unconsumed:
         # Sin entidades libres el LLM solo puede inventar. Ahorramos la
         # llamada: es el caso más común en turnos sin retrieval.
         return {"suggestions": []}
- 
+
     language_code = state.get("detected_language", "es")
     language = "español" if language_code == "es" else "English"
     answer_text = _build_answered_summary(state)
- 
+
     system_content = SUGGESTER_PROMPT.format(
         language=language,
         roster=roster_text(),
         answered_summary=answer_text,
         unconsumed_entities=_format_entities(unconsumed),
     )
- 
+
+    messages = [
+        SystemMessage(content=system_content),
+        HumanMessage(content="Generá las sugerencias ahora, o ninguna."),
+    ]
+
     try:
-        payload: SuggesterOutput = _get_llm().with_structured_output(
-            SuggesterOutput
-        ).invoke([
-            SystemMessage(content=system_content),
-            HumanMessage(content="Generá las sugerencias ahora, o ninguna."),
-        ])
+        chain = _get_llm_suggester().with_structured_output(SuggesterOutput)
+        # El deadline lo impone el executor, no el cliente: la API exige
+        # timeout >= 10s, y 10s bloqueando la superstep rompe el invariante
+        # "NUNCA bloquea al synthesizer".
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            payload: SuggesterOutput = ex.submit(chain.invoke, messages).result(
+                timeout=_SUGGESTER_DEADLINE_S
+            )
     except Exception as exc:
-        # Todo se degrada igual: 429, timeout (el cliente corta a 1.2s por
-        # config), o structured output inválido. Se loguea para poder ver la
-        # distribución real de fallas en Langfuse, pero nunca se propaga:
-        # un chip opcional no rompe el turno del usuario.
+        # Todo se degrada igual: 429, TimeoutError del executor, o structured
+        # output inválido. Se loguea para poder ver la distribución real de
+        # fallas en Langfuse, pero nunca se propaga: un chip opcional no rompe
+        # el turno del usuario.
         logger.warning(
             "suggester degraded to []: %s: %s", type(exc).__name__, exc
         )
         return {"suggestions": []}
- 
+
     raw: List[Suggestion] = payload.suggestions or []
     gated, report = apply_gates_with_report(raw, answer_text)
- 
+
     # El reporte va al log, no al state: es telemetría de calidad del prompt
     # (paso 9: "cuál gate descarta más"), no algo que el frontend consuma.
     if report["input"] != report["output"]:
         logger.info("suggester gates: %s", report)
- 
+
     return {"suggestions": gated}
