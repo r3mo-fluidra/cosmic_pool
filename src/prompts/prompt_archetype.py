@@ -24,7 +24,7 @@ from ..graph_context.response_validator import (
     HAZARD_AGENTS,
     OVERFLOW_LABEL,
 )
-
+from .prompts import BASE_POOL_AGENT_PROMPT 
 
 # =====================================================================
 # Bloques condicionales
@@ -112,7 +112,7 @@ line rather than fabricating content.
 # Sub-agente
 # =====================================================================
 
-_SUBAGENT_TEMPLATE = """## 9. DOWNSTREAM RESPONSE SHAPE
+_SUBAGENT_TEMPLATE = """## 10. DOWNSTREAM RESPONSE SHAPE
 
 Your JSON output is not shown to the user. A Synthesizer node consumes it and
 renders the final answer. Your job is to supply the material that shape needs,

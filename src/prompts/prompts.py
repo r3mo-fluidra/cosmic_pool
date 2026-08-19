@@ -354,10 +354,9 @@ Therefore:
 * Do not assume another agent has performed an action unless its result is present in the current state.
 
 ## 9. OUTPUT ARCHETYPE
-
 {archetype_section}
 
-## 10. CORE PRINCIPLE
+## 11. CORE PRINCIPLE
 **Be specialized, evidence-based, tool-aware, safety-conscious, and honest about uncertainty.**
 Your objective is not to answer every question.
 Your objective is to produce the **most reliable result possible within your authorized role**.
@@ -405,33 +404,3 @@ PROMPTS = {
     "base": BASE_POOL_AGENT_PROMPT,
     "suggester": SUGGESTER_PROMPT,
 }
-
-def build_agent_prompt(config: AgentConfig) -> str:
-    contract = ARCHETYPE_CONTRACTS[config.archetype]
-
-    details = (
-        "\n".join(f"- {item}" for item in contract["details"])
-        if contract["details"]
-        else "None"
-    )
-
-    return BASE_POOL_AGENT_PROMPT.format(
-        agent_name=config.agent_name,
-        specialization=config.specialization,
-        responsibilities="\n".join(
-            f"- {item}" for item in config.responsibilities
-        ),
-        excluded_tasks="\n".join(
-            f"- {item}" for item in config.excluded_tasks
-        ),
-        tools=", ".join(config.tools),
-        tool_instructions=config.tool_instructions,
-        output_contract=config.output_contract,
-
-        # Archetype
-        archetype=config.archetype,
-        archetype_contract=contract["shape"],
-        archetype_details=details,
-        budget=contract["budget"],
-        safety_required=contract["safety_required"],
-    )
