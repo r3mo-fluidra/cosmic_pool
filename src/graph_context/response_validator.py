@@ -40,9 +40,9 @@ HAZARD_PATTERN = re.compile(
 )
 
 # Etiquetas usadas al reubicar contenido excedente.
-OVERFLOW_LABEL = "Pasos adicionales"
+OVERFLOW_LABEL = "Next actions (overflow)"
 SAFETY_LABEL_PATTERN = re.compile(
-    r"seguridad|safety|precaución|precaucion|advertencia|warning|riesgo|hazard",
+    r"safety|warning|hazard",
     re.IGNORECASE,
 )
 
@@ -76,6 +76,48 @@ class ValidationReport:
 # --------------------------------------------------------------------------
 # Utilidades
 # --------------------------------------------------------------------------
+def _has_hazard_agent(agents: list[str] | None) -> bool:
+    """
+    Tolerante al namespace. Acepta slug ("chemistry"), display name
+    ("Pool Chemistry Agent") y cualquier casing/separador, porque el valor
+    que llega en state["assigned_agents"] lo produce el planner y no está
+    normalizado. Un fallo aquí es silencioso: intersection() con un display
+    name da vacío y la advertencia simplemente no se exige.
+    """
+    for raw in agents or []:
+        norm = re.sub(r"[^a-z0-9]+", "_", (raw or "").lower()).strip("_")
+        if not norm:
+            continue
+        if norm in HAZARD_AGENTS:                      # slug exacto
+            return True
+        if set(norm.split("_")) & HAZARD_AGENTS:       # display name
+            return True
+        if any(h in norm for h in HAZARD_AGENTS if "_" in h):  # slug compuesto
+            return True
+    return False
+
+
+def _safety_trigger(contract: dict, agents: list[str] | None, payload) -> str:
+    """
+    Devuelve QUÉ activó la exigencia de safety: "contract" | "agent" |
+    "lexicon" | "". Se separa del booleano para que enforce_contract pueda
+    registrar el motivo sin cambiar la firma pública.
+    """
+    required = contract.get("safety_required", False)
+    if required is True:
+        return "contract"
+    if required != "conditional":
+        return ""
+
+    if _has_hazard_agent(agents):
+        return "agent"
+
+    surface = " ".join([
+        getattr(payload, "answer", "") or "",
+        *(getattr(payload, "actions", None) or []),
+    ])
+    return "lexicon" if HAZARD_PATTERN.search(surface) else ""
+
 
 def _words(text: str | None) -> int:
     if not text:
@@ -131,11 +173,11 @@ def resolve_safety_required(contract: dict, agents: list[str], payload) -> bool:
     if required is True:
         return True
 
-    if HAZARD_AGENTS.intersection(agents or []):
+    if _has_hazard_agent(agents):
         return True
 
     surface = " ".join([payload.answer or "", *(payload.actions or [])])
-    return bool(HAZARD_PATTERN.search(surface))
+    return bool(_safety_trigger(contract, agents, payload))
 
 
 # --------------------------------------------------------------------------
@@ -271,7 +313,9 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     normalize_actions(payload, detail_cls, report)
 
     # 2. Seguridad: promover ANTES del overflow, porque suma al conteo visible.
-    if resolve_safety_required(contract, agents or [], payload):
+    trigger = _safety_trigger(contract, agents or [], payload)
+    if trigger:
+        report.notes.append(f"safety exigida por: {trigger}")
         promote_safety_from_details(payload, report)
 
     # 3. Presupuesto.

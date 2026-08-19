@@ -135,6 +135,21 @@ def _detect_intent_boosts(query: str) -> list[str]:
         return INTENT_BOOSTS["part"]
     return []
 
+def _as_list(value, delimiters: tuple[str, ...] = (";", ",")) -> list[str]:
+    """Coerce a Neo4j property that may be LIST<STRING> or a delimited STRING into list[str]."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        for d in delimiters:
+            if d in text:
+                return [p.strip() for p in text.split(d) if p.strip()]
+        return [text]
+    return [str(value)]
 
 # ---------------------------------------------------------------------------
 # 1. Vector store tool
@@ -291,8 +306,8 @@ def search_seed_nodes(
             description = _truncate(
                 node.get("description") or node.get("summary") or "", MAX_DESC_CHARS
             )
-            aliases = node.get("aliases") or []
-            keywords = node.get("keywords") or []
+            aliases = _as_list(node.get("aliases"))
+            keywords = _as_list(node.get("keywords"))
 
             parts.append(
                 f"--- Seed {i} (score: {score:.3f}) ---\n"

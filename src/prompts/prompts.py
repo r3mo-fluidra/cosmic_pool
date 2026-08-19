@@ -1,5 +1,9 @@
 # BASE_POOL_AGENT_PROMPT_V1
 from .prompts_sub_agents import AgentConfig
+from ..graph_context.response_contracts import (
+
+
+)
 """
 Planner and boundary prompts for the Pool Chemistry & Maintenance Assistant.
 
@@ -30,6 +34,7 @@ AGENT_SLUGS = {
     "oos": "Out-of-Scope Handler",
 }
 
+ARCHETYPE_CONTRACTS = 
 
 PLANNER_PROMPT = """
 You are an expert Planner for a Pool Chemistry and Maintenance Assistant.
@@ -201,21 +206,6 @@ Always be polite, concise, and non-judgemental.
 Never attempt to answer a genuinely out-of-scope question even partially.
 """
 
-ARCHETYPE_CONTRACTS = {
-    "dosage": {
-        "shape": "Una frase con la dosis exacta. Luego 2-4 acciones de ≤12 palabras.",
-        "budget": 80,
-        "details": ["Cómo se calculó", "Por qué esta dosis", "Qué pasa si no se corrige"],
-        "safety_required": True,
-    },
-    "diagnosis": {
-        "shape": "Causa más probable en 1 frase. Luego la primera verificación a realizar.",
-        "budget": 90,
-        "details": ["Otras causas posibles", "Cómo confirmar el diagnóstico"],
-        "safety_required": False,
-    },
-    # procedure, compliance, lookup, conversational, oos, safety...
-}
 
 SYNTHESIZER_PROMPT = """You are an expert Pool Chemistry and Maintenance Assistant.
 You refine raw outputs from internal specialist agents into a mobile-first response.
@@ -366,17 +356,9 @@ Therefore:
 * Escalate tasks outside your responsibility.
 * Do not assume another agent has performed an action unless its result is present in the current state.
 
-## 9. OUTPUT CONTRACT
-Return information according to:
-**Output contract:** {output_contract}
-The output must be:
-* Relevant to the current task.
-* Evidence-based.
-* Concise.
-* Structured when required.
-* Explicit about uncertainty.
-* Free of unsupported claims.
-If the task cannot be completed reliably, return the appropriate failure, missing-information, or escalation state rather than guessing.
+## 9. OUTPUT ARCHETYPE
+
+{archetype_section}
 
 ## 10. CORE PRINCIPLE
 **Be specialized, evidence-based, tool-aware, safety-conscious, and honest about uncertainty.**
@@ -428,9 +410,16 @@ PROMPTS = {
 }
 
 def build_agent_prompt(config: AgentConfig) -> str:
+    contract = ARCHETYPE_CONTRACTS[config.archetype]
+
+    details = (
+        "\n".join(f"- {item}" for item in contract["details"])
+        if contract["details"]
+        else "None"
+    )
 
     return BASE_POOL_AGENT_PROMPT.format(
-        agent_name=config.agent_name,
+        agent_name=config.name,
         specialization=config.specialization,
         responsibilities="\n".join(
             f"- {item}" for item in config.responsibilities
@@ -441,4 +430,11 @@ def build_agent_prompt(config: AgentConfig) -> str:
         tools=", ".join(config.tools),
         tool_instructions=config.tool_instructions,
         output_contract=config.output_contract,
+
+        # Archetype
+        archetype=config.archetype,
+        archetype_contract=contract["shape"],
+        archetype_details=details,
+        budget=contract["budget"],
+        safety_required=contract["safety_required"],
     )

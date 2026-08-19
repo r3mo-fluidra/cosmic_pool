@@ -11,6 +11,7 @@ class AgentConfig:
     tools: tuple[str, ...]
     tool_instructions: str
     output_contract: str
+    archetype: str
 
 """
 Optimized agent configurations for the Pool Chemistry Assistant.
@@ -194,7 +195,7 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         f"Whether a chemical result violates a code or must be logged -- owned by "
         f"the {COMPLIANCE} and the {RECORDS} respectively.",
     ),
-    tools=(
+    tools=( 
         "neo4j",
         "qdrant",
     ),
@@ -205,6 +206,7 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "calculation_request (null, or: intent, known_inputs, missing_inputs)",
         "retest_guidance",
     ),
+    archetype="assessment", 
 )
 
 
@@ -248,6 +250,7 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
         "maintenance_actions",
         "parts (name, specification, quantity)",
     ),
+    archetype="procedure", 
 )
 
 
@@ -292,6 +295,7 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
         "observed_conditions",
         "calculation_request (null, or: intent, known_inputs, missing_inputs)",
     ),
+    archetype="assessment",
 )
 
 
@@ -338,6 +342,7 @@ MATH_AGENT_CONFIG = AgentConfig(
         "result (value, unit)",
         "plausibility_check",
     ),
+    archetype="calculation",
 )
 
 
@@ -382,6 +387,7 @@ OPERATIONS_AGENT_CONFIG = AgentConfig(
         "schedule (task, frequency, responsible_role)",
         "best_practices",
     ),
+    archetype="procedure",
 )
 
 
@@ -433,6 +439,7 @@ COMPLIANCE_AGENT_CONFIG = AgentConfig(
         "gaps",
         "jurisdiction_caveat",
     ),
+    archetype="compliance",
 )
 
 
@@ -489,6 +496,7 @@ CONTAMINATION_AGENT_CONFIG = AgentConfig(
         "reopening_conditions",
         "documentation_required",
     ),
+    archetype="critical"
 )
 
 
@@ -534,6 +542,7 @@ FACILITY_DESIGN_AGENT_CONFIG = AgentConfig(
         "design_concerns (concern, severity, consequence_if_built)",
         "calculation_request (null, or: intent, known_inputs, missing_inputs)",
     ),
+    archetype="assessment",
 )
 
 
@@ -581,6 +590,7 @@ SAFETY_AGENT_CONFIG = AgentConfig(
         "required_equipment",
         "emergency_procedures",
     ),
+    archetype="critical"
 )
 
 
@@ -622,6 +632,7 @@ RECORDS_AGENT_CONFIG = AgentConfig(
         "log_structure",
         "gaps_identified",
     ),
+    archetype="reference"
 )
 
 
@@ -669,6 +680,7 @@ RECOVERY_AGENT_CONFIG = AgentConfig(
         "recovery_sequence (ordered: step, precondition, verification)",
         "systems_requiring_inspection",
     ),
+    archetype="procedure"
 )
 
 
