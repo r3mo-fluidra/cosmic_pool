@@ -24,10 +24,7 @@ import yaml
 # Catalog loading
 # ---------------------------------------------------------------------------
 
-DEFAULT_CATALOG_PATH = os.getenv(
-    "POOL_MATH_CATALOG",
-    os.path.join(os.path.dirname(__file__), "data", "pool_math_catalog_v2.yaml"),
-)
+DEFAULT_CATALOG_PATH = r'fluidra_ai_pool-assistant_mvp/src/tools_math/pool_math_catalog_v2.yaml'
 
 _catalog: Optional[dict] = None
 _index: Optional[dict] = None

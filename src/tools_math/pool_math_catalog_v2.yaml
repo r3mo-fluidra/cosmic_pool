@@ -1,0 +1,1609 @@
+# =============================================================================
+# Pool/Spa Operator Math — Formula Catalog
+# Source: "Pool/Spa Operator Math: Research Foundation for a YAML Formula
+#          Catalog (US Market, US Customary Primary)"
+# Units: US customary primary.
+# =============================================================================
+# SCHEMA NOTES (adjust to match FormulaSpec if field names differ):
+#   expression      : Python-AST-safe arithmetic. Uses ** for exponent (NOT ^),
+#                     and floor() / min() / max() which must be whitelisted.
+#   tier            : core | extended   (core = reproduces a published example)
+#   category        : a = universal deterministic math
+#                     b = industry convention (widely used, not binding)
+#                     c = code / AHJ-dependent (overridable per jurisdiction)
+#   verify          : true = ⚠VERIFY against primary source before compliance use
+#   executable      : false = procedure/lookup, not a closed-form expression
+#   guards[].check  : evaluable boolean; failing it emits severity+message
+# =============================================================================
+
+catalog:
+  id: pool_spa_operator_math
+  version: "1.0.1"
+  unit_system: us_customary
+  provenance_status: provisional
+  provenance_note: >-
+    Universal math and the validated worked examples are independently
+    verified. All category-c code limits, MAHC section numbers, CDC CT values,
+    ANSI/APSP velocity caps and Taylor LSI factor tables were synthesized from
+    stable conventions but NOT opened against primary sources. Every such item
+    carries verify: true and must be confirmed before compliance-critical use.
+    Local health authority requirements legally supersede all category-c values.
+  changelog:
+    - version: "1.0.1"
+      date: "2026-08-20"
+      changes:
+        - "Fixed circular-area worked example / validation inconsistency (pi alignment)."
+        - "Strengthened preference for density-corrected liquid chlorine dose."
+        - "Clarified pi policy and legacy reproduction flag."
+        - "Minor note and guard clean-ups for operator safety."
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+constants:
+
+  # --- Volume / capacity -----------------------------------------------------
+  gal_per_cuft_exact:
+    value: 7.4805
+    unit: gal/ft3
+    category: a
+    verify: false
+    conservative_direction: none
+    notes: >-
+      Exact conversion (7.48052). Use whenever an explicit ft3<->gal conversion
+      is the operation itself: filter media volume, surge/balance tank sizing.
+
+  gal_per_cuft_industry:
+    value: 7.5
+    unit: gal/ft3
+    category: b
+    verify: false
+    conservative_direction: overstates_volume
+    error_vs_exact_pct: 0.26
+    notes: >-
+      Industry rounding used for basin volume from dimensions. Overstates true
+      volume by ~0.26%, which is conservative for dose-to-raise calculations
+      and negligible against +/-5-15% average-depth measurement error.
+
+  lb_per_gal_water: {value: 8.34, unit: lb/gal, category: a, verify: false}
+  lb_per_cuft_water: {value: 62.4, unit: lb/ft3, category: a, verify: false}
+  floz_per_gal: {value: 128, unit: floz/gal, category: a, verify: false}
+  liters_per_gal: {value: 3.78541, unit: L/gal, category: a, verify: false}
+  gal_per_acre_ft: {value: 325851, unit: gal/acre-ft, category: a, verify: false}
+
+  # --- Weight ----------------------------------------------------------------
+  oz_per_lb: {value: 16, unit: oz/lb, category: a, verify: false}
+  g_per_lb: {value: 453.592, unit: g/lb, category: a, verify: false}
+  lb_per_kg: {value: 2.20462, unit: lb/kg, category: a, verify: false}
+  g_per_oz: {value: 28.3495, unit: g/oz, category: a, verify: false}
+
+  # --- Concentration ---------------------------------------------------------
+  mg_per_L_per_ppm: {value: 1, unit: (mg/L)/ppm, category: a, verify: false}
+  ppm_per_percent: {value: 10000, unit: ppm/percent, category: a, verify: false}
+  ppm_basis: {value: 1000000, unit: dimensionless, category: a, verify: false}
+
+  dose_const_liquid:
+    value: 7489
+    unit: dimensionless
+    category: b
+    verify: true
+    conservative_direction: overstates_dose
+    notes: >-
+      CPO liquid-dose constant (legacy). Reproduces the classic 105.8 fl oz
+      worked example exactly. Derivation treats 1 fl oz of product as weighing
+      1 oz (product density == water). For real 12.5% NaOCl (SG ≈ 1.17) this
+      overstates the required volume by roughly 17-20%. Prefer
+      dose_liquid_chlorine_sg for accurate dosing, cost estimation, and
+      hyperchlorination. Retain this constant only for legacy-example fidelity.
+
+  dose_const_dry:
+    value: 7494
+    unit: dimensionless
+    category: a
+    verify: true
+    conservative_direction: none
+    notes: >-
+      CORRECTED. Source document listed 936.1, which is 7489*0.125 — the
+      denominator of the liquid worked example mistaken for a constant. It
+      yields results 8x too large. Correct derivation:
+      oz_weight = gal*8.34*ppm*16/1e6 -> constant = 1e6/(8.34*16) = 7494.
+      Cross-checks against dose_generic_ppm_lb: 33,000 gal @ 3 ppm 100% active
+      = 0.826 lb = 13.2 oz; (33000*3)/7494 = 13.2 oz. OK.
+
+  # --- Flow ------------------------------------------------------------------
+  min_per_hr: {value: 60, unit: min/hr, category: a, verify: false}
+  min_per_day: {value: 1440, unit: min/day, category: a, verify: false}
+  gpm_per_cfs: {value: 448.8, unit: gpm/cfs, category: a, verify: false}
+
+  # --- Pressure --------------------------------------------------------------
+  ft_head_per_psi: {value: 2.31, unit: ft/psi, category: a, verify: false}
+  psi_per_ft_head: {value: 0.433, unit: psi/ft, category: a, verify: false}
+  kpa_per_psi: {value: 6.895, unit: kPa/psi, category: a, verify: false}
+
+  # --- Geometry / physics ----------------------------------------------------
+  pi:
+    value: 3.14159
+    unit: dimensionless
+    category: a
+    verify: false
+    notes: >-
+      Canonical value used by all formulas. Legacy 3.14 introduces ≈ -0.0507%
+      error; use pi_legacy only under an explicit legacy_reproduction flag to
+      match older published worked examples. Never mix the two in the same
+      calculation.
+  pi_legacy: {value: 3.14, unit: dimensionless, category: b, verify: false, legacy_reproduction: true}
+  g_ft_s2: {value: 32.174, unit: ft/s2, category: a, verify: false}
+  specific_heat_water: {value: 1, unit: BTU/lb/degF, category: a, verify: false}
+  vel_const: {value: 0.4085, unit: dimensionless, category: a, verify: false}
+  flow_const: {value: 2.448, unit: dimensionless, category: a, verify: false}
+
+  # --- Available chlorine (nominal strengths) --------------------------------
+  naocl_fraction:
+    value: 0.125
+    range: [0.10, 0.125]
+    category: b
+    verify: false
+    conservative_direction: use_high_end_for_dose
+    notes: >-
+      Sodium hypochlorite, no CYA contribution. Degrades in storage. For a DOSE
+      calculation use the high end so you do not overdose; when guaranteeing a
+      sanitizer residual, use measured (lower) strength instead. Always retest.
+  calhypo_fraction:
+    value: 0.73
+    range: [0.65, 0.73]
+    category: b
+    verify: false
+    conservative_direction: use_high_end_for_dose
+  lihypo_fraction: {value: 0.35, category: b, verify: false}
+  dichlor_fraction: {value: 0.56, category: b, verify: false}
+  trichlor_fraction: {value: 0.90, category: b, verify: false, notes: "Also acidic; depresses pH and TA over time."}
+  dichlor_cya_ratio:
+    value: 0.9
+    unit: ppm_CYA/ppm_FC
+    category: b
+    verify: false
+    conservative_direction: assume_higher_cya_contribution
+  trichlor_cya_ratio:
+    value: 0.6
+    unit: ppm_CYA/ppm_FC
+    category: b
+    verify: false
+    conservative_direction: assume_higher_cya_contribution
+  br_cl_factor:
+    value: 2.25
+    unit: dimensionless
+    category: a
+    verify: false
+    notes: "Br2/Cl2 molecular weight ratio 159.8/71.0 = 2.25."
+
+  # --- Water balance ---------------------------------------------------------
+  lsi_tds_constant:
+    value: 12.1
+    category: b
+    verify: true
+    notes: "Use 12.1 for TDS <= ~1000 ppm, 12.2 above."
+  lsi_tds_constant_high: {value: 12.2, category: b, verify: true}
+  cya_alk_correction:
+    value: 0.333
+    category: b
+    verify: true
+    notes: >-
+      Subtract CYA/3 from total alkalinity near pH 7.5. pH-dependent:
+      ~0.22 at pH 7.0, ~0.35 at pH 7.6.
+
+  # --- Dosing rules of thumb -------------------------------------------------
+  bicarb_lb_per_10k_per_10ppm_TA: {value: 1.5, unit: lb, category: b, verify: false}
+  cacl2_lb_per_10k_per_10ppm_CH: {value: 1.25, unit: lb, category: b, verify: true, range: [1.2, 1.4]}
+  muriatic_floz_per_10k_per_10ppm_TA: {value: 26, unit: floz, category: b, verify: true, notes: "31.45% / 20 Baume acid."}
+  soda_ash_lb_per_10k_per_0_2_pH: {value: 0.2, unit: lb, category: b, verify: true}
+  de_precoat_lb_per_sqft: {value: 0.125, unit: lb/ft2, category: b, verify: false, range: [0.125, 0.15]}
+  kidney_factor: {value: 0.45, category: b, verify: false, range: [0.38, 0.45]}
+  breakpoint_ratio: {value: 10, category: b, verify: false}
+
+  # --- Code / AHJ defaults (MAHC, NON-NORMATIVE) -----------------------------
+  pool_turnover_max_hr: {value: 6, unit: hr, category: c, verify: true, ahj_override: true}
+  spa_turnover_max_hr: {value: 0.5, unit: hr, category: c, verify: true, ahj_override: true}
+  wading_turnover_max_hr: {value: 2, unit: hr, category: c, verify: true, ahj_override: true, range: [1, 2]}
+
+  filt_rate_max_highrate_sand: {value: 15, unit: gpm/ft2, category: c, verify: true, ahj_override: true}
+  filt_rate_max_conventional_sand: {value: 3, unit: gpm/ft2, category: c, verify: true, ahj_override: true}
+  filt_rate_max_de_precoat: {value: 2, unit: gpm/ft2, category: c, verify: true, ahj_override: true}
+  filt_rate_max_cartridge_public: {value: 0.375, unit: gpm/ft2, category: c, verify: true, ahj_override: true,
+    notes: "Public venue per MAHC/NSF. Residential practice often 0.5-1.0 — set venue_class."}
+
+  suction_velocity_max_fps: {value: 6, unit: ft/s, category: c, verify: true, ahj_override: true}
+  return_velocity_max_fps: {value: 8, unit: ft/s, category: c, verify: true, ahj_override: true}
+
+  spa_replacement_const: {value: 3, category: c, verify: true, ahj_override: true}
+  spa_area_per_bather: {value: 10, unit: ft2/person, category: c, verify: true, ahj_override: true}
+  pool_area_per_bather_shallow: {value: 15, unit: ft2/person, category: c, verify: true, ahj_override: true}
+  pool_area_per_bather_deep: {value: 25, unit: ft2/person, category: c, verify: true, ahj_override: true, range: [20, 25]}
+  wading_area_per_bather: {value: 10, unit: ft2/person, category: c, verify: true, ahj_override: true}
+
+  spa_max_temp_F: {value: 104, unit: degF, category: c, verify: true, ahj_override: true}
+  fc_min_pool_ppm: {value: 1, unit: ppm, category: c, verify: true, ahj_override: true}
+  fc_min_spa_ppm: {value: 3, unit: ppm, category: c, verify: true, ahj_override: true}
+  br_min_pool_ppm: {value: 3, unit: ppm, category: c, verify: true, ahj_override: true}
+  br_min_spa_ppm: {value: 4, unit: ppm, category: c, verify: true, ahj_override: true}
+  ph_min: {value: 7.2, category: c, verify: true, ahj_override: true}
+  ph_max: {value: 7.8, category: c, verify: true, ahj_override: true}
+  cya_max_outdoor_ppm: {value: 90, unit: ppm, category: c, verify: true, ahj_override: true}
+  combined_chlorine_action_ppm: {value: 0.4, unit: ppm, category: c, verify: true, ahj_override: true}
+
+  ct_crypto:
+    value: 15300
+    unit: ppm-min
+    category: c
+    verify: true
+    ahj_override: true
+    alternatives: [12000, 12300]
+    notes: >-
+      CDC 3-log Cryptosporidium hyperchlorination target at pH <= 7.5, 25 C,
+      CYA absent. Reproduces the 765 min @ 20 ppm example. 12,300 appears in
+      other/older log-reduction contexts. CT roughly DOUBLES when CYA present.
+  ct_giardia: {value: 45, unit: ppm-min, category: c, verify: true, ahj_override: true}
+  ct_formed_stool: {value: 50, unit: ppm-min, category: c, verify: true, ahj_override: true, range: [45, 60]}
+
+# =============================================================================
+# LOOKUP TABLES (Taylor-style water balance — ⚠VERIFY against current card)
+# =============================================================================
+
+lookup_tables:
+
+  temperature_factor:
+    id: TF
+    verify: true
+    interpolate: linear
+    input_unit: degF
+    points:
+      - [32, 0.0]
+      - [37, 0.1]
+      - [46, 0.2]
+      - [53, 0.3]
+      - [60, 0.4]
+      - [66, 0.5]
+      - [76, 0.6]
+      - [84, 0.7]
+      - [94, 0.8]
+      - [105, 0.9]
+
+  calcium_hardness_factor:
+    id: CF
+    verify: true
+    interpolate: linear
+    input_unit: ppm
+    points:
+      - [25, 1.0]
+      - [50, 1.3]
+      - [75, 1.5]
+      - [100, 1.6]
+      - [150, 1.8]
+      - [200, 1.9]
+      - [300, 2.1]
+      - [400, 2.2]
+      - [800, 2.5]
+      - [1000, 2.6]
+
+  alkalinity_factor:
+    id: AF
+    verify: true
+    interpolate: linear
+    input_unit: ppm
+    input_note: "Use CYA-CORRECTED carbonate alkalinity, not total alkalinity."
+    points:
+      - [25, 1.4]
+      - [50, 1.7]
+      - [75, 1.9]
+      - [100, 2.0]
+      - [150, 2.2]
+      - [200, 2.3]
+      - [300, 2.5]
+      - [400, 2.6]
+      - [800, 2.9]
+
+# =============================================================================
+# FORMULAS
+# =============================================================================
+
+formulas:
+
+# --- DOMAIN A: VOLUME --------------------------------------------------------
+
+  - formula_id: volume_rectangular
+    name: Rectangular pool volume
+    domain: volume
+    tier: core
+    category: b
+    verify: false
+    expression: "length_ft * width_ft * avg_depth_ft * gal_per_cuft_industry"
+    result_unit: gallons
+    inputs:
+      - {name: length_ft, unit: ft, min: 5, max: 300}
+      - {name: width_ft, unit: ft, min: 5, max: 150}
+      - {name: avg_depth_ft, unit: ft, min: 0.5, max: 20}
+    constants: [gal_per_cuft_industry]
+    guards:
+      - {check: "avg_depth_ft > 0", severity: error, message: "Average depth must be positive."}
+      - {check: null, severity: info, message: "Use true average depth (see average_depth_two_point / average_depth_transition). Constant cross-section assumed."}
+    worked_example: {inputs: {length_ft: 40, width_ft: 20, avg_depth_ft: 5.5}, expected: 33000, tolerance: 1}
+    source_id: cpo_handbook_volume
+    aliases: ["how many gallons in a rectangular pool", "rectangle pool volume", "tank capacity length times width"]
+
+  - formula_id: volume_circular
+    name: Circular pool volume
+    domain: volume
+    tier: core
+    category: b
+    verify: false
+    expression: "pi * radius_ft ** 2 * avg_depth_ft * gal_per_cuft_industry"
+    result_unit: gallons
+    inputs:
+      - {name: radius_ft, unit: ft, min: 1, max: 75}
+      - {name: avg_depth_ft, unit: ft, min: 0.5, max: 20}
+    constants: [pi, gal_per_cuft_industry]
+    guards:
+      - {check: null, severity: warn, message: "radius = diameter / 2. Passing diameter is the most common error here (4x overstatement)."}
+    source_id: cpo_handbook_volume
+    aliases: ["round pool gallons", "circular tank volume"]
+
+  - formula_id: area_circular
+    name: Circular surface area
+    domain: volume
+    tier: core
+    category: a
+    verify: false
+    expression: "pi * radius_ft ** 2"
+    result_unit: ft2
+    inputs:
+      - {name: radius_ft, unit: ft, min: 1, max: 75}
+    constants: [pi]
+    worked_example: {inputs: {radius_ft: 4}, expected: 50.27, tolerance: 0.05, note: "Uses canonical pi = 3.14159. With pi_legacy = 3.14 the result is 50.24."}
+    source_id: universal_geometry
+    aliases: ["surface area of round pool", "circle area"]
+
+  - formula_id: average_depth_two_point
+    name: Average depth (shallow/deep)
+    domain: volume
+    tier: core
+    category: a
+    verify: false
+    expression: "(shallow_depth_ft + deep_depth_ft) / 2"
+    result_unit: ft
+    inputs:
+      - {name: shallow_depth_ft, unit: ft, min: 0.5, max: 6}
+      - {name: deep_depth_ft, unit: ft, min: 1, max: 20}
+    guards:
+      - {check: "deep_depth_ft >= shallow_depth_ft", severity: error, message: "Deep depth must be >= shallow depth."}
+      - {check: null, severity: warn, message: "Valid only for a uniform constant-slope floor. Compound floors require average_depth_transition."}
+    worked_example: {inputs: {shallow_depth_ft: 3, deep_depth_ft: 8}, expected: 5.5, tolerance: 0.01}
+    source_id: cpo_handbook_volume
+    aliases: ["average depth", "mean depth of pool"]
+
+  - formula_id: average_depth_transition
+    name: Average depth with shallow/deep flats plus slope (constant width)
+    domain: volume
+    tier: extended
+    category: a
+    verify: false
+    expression: "((shallow_depth_ft * shallow_len_ft) + ((shallow_depth_ft + deep_depth_ft) / 2 * slope_len_ft) + (deep_depth_ft * deep_len_ft)) / (shallow_len_ft + slope_len_ft + deep_len_ft)"
+    result_unit: ft
+    inputs:
+      - {name: shallow_depth_ft, unit: ft, min: 0.5, max: 20}
+      - {name: deep_depth_ft, unit: ft, min: 0.5, max: 20}
+      - {name: shallow_len_ft, unit: ft, min: 0, max: 300}
+      - {name: slope_len_ft, unit: ft, min: 0, max: 300}
+      - {name: deep_len_ft, unit: ft, min: 0, max: 300}
+    guards:
+      - {check: "(shallow_len_ft + slope_len_ft + deep_len_ft) > 0", severity: error, message: "Total length must be positive."}
+      - {check: null, severity: warn, message: "Length-weighted, constant width assumed. For varying width compute volume section by section."}
+    source_id: cpo_handbook_compound_floor
+    aliases: ["pool with slope volume", "hopper bottom average depth", "transition section depth"]
+
+  - formula_id: volume_oval
+    name: Oval / ellipse pool volume
+    domain: volume
+    tier: extended
+    category: b
+    verify: false
+    expression: "pi * (length_ft / 2) * (width_ft / 2) * avg_depth_ft * gal_per_cuft_industry"
+    result_unit: gallons
+    inputs:
+      - {name: length_ft, unit: ft, min: 8, max: 200, note: "major axis"}
+      - {name: width_ft, unit: ft, min: 5, max: 100, note: "minor axis"}
+      - {name: avg_depth_ft, unit: ft, min: 0.5, max: 20}
+    constants: [pi, gal_per_cuft_industry]
+    guards:
+      - {check: "length_ft >= width_ft", severity: warn, message: "Length should be the major axis."}
+      - {check: null, severity: info, message: "True ellipse only. Stadium/obround shapes use volume_oblong_stadium."}
+    source_id: cpo_handbook_volume
+    aliases: ["oval pool gallons", "elliptical pool volume"]
+
+  - formula_id: volume_oblong_stadium
+    name: Oblong / stadium volume (rectangle plus two semicircular ends)
+    domain: volume
+    tier: extended
+    category: b
+    verify: false
+    expression: "((rect_len_ft * width_ft) + (pi * (width_ft / 2) ** 2)) * avg_depth_ft * gal_per_cuft_industry"
+    result_unit: gallons
+    inputs:
+      - {name: rect_len_ft, unit: ft, min: 0, max: 300, note: "straight section only"}
+      - {name: width_ft, unit: ft, min: 5, max: 100, note: "equals end diameter"}
+      - {name: avg_depth_ft, unit: ft, min: 0.5, max: 20}
+    constants: [pi, gal_per_cuft_industry]
+    guards:
+      - {check: null, severity: info, message: "End radius = width / 2. rect_len_ft excludes the curved ends."}
+    source_id: geometry_composition
+    aliases: ["lap pool with rounded ends", "obround pool volume"]
+
+  - formula_id: volume_kidney
+    name: Kidney / freeform volume (0.45 factor method)
+    domain: volume
+    tier: extended
+    category: b
+    verify: false
+    expression: "(max_width_ft_A + max_width_ft_B) * length_ft * avg_depth_ft * kidney_factor * gal_per_cuft_industry"
+    result_unit: gallons
+    inputs:
+      - {name: max_width_ft_A, unit: ft, min: 3, max: 150}
+      - {name: max_width_ft_B, unit: ft, min: 3, max: 150}
+      - {name: length_ft, unit: ft, min: 5, max: 300}
+      - {name: avg_depth_ft, unit: ft, min: 0.5, max: 20}
+    constants: [kidney_factor, gal_per_cuft_industry]
+    accuracy: "+/-10%"
+    guards:
+      - {check: null, severity: warn, message: "Empirical shape factor (0.38-0.45 in practice). Result is an estimate +/-10%. Prefer volume_irregular_grid when a measured plan area exists."}
+    source_id: cpo_handbook_freeform
+    aliases: ["kidney pool gallons", "freeform pool volume", "irregular pool estimate"]
+
+  - formula_id: volume_irregular_grid
+    name: Irregular basin from measured surface area and average depth
+    domain: volume
+    tier: extended
+    category: b
+    verify: false
+    expression: "surface_area_sqft * avg_depth_ft * gal_per_cuft_industry"
+    result_unit: gallons
+    inputs:
+      - {name: surface_area_sqft, unit: ft2, min: 10, max: 200000}
+      - {name: avg_depth_ft, unit: ft, min: 0.5, max: 20}
+    constants: [gal_per_cuft_industry]
+    guards:
+      - {check: null, severity: info, message: "Most defensible general method when plan area is planimetered and average depth is grid-averaged."}
+    source_id: cpo_handbook_general
+    aliases: ["gallons from surface area", "irregular shape pool volume"]
+
+  - formula_id: volume_constant_depth
+    name: Constant-depth basin (wading pool, flat-floor spa)
+    domain: volume
+    tier: extended
+    category: b
+    verify: false
+    expression: "surface_area_sqft * depth_ft * gal_per_cuft_industry"
+    result_unit: gallons
+    inputs:
+      - {name: surface_area_sqft, unit: ft2, min: 4, max: 200000}
+      - {name: depth_ft, unit: ft, min: 0.5, max: 4}
+    constants: [gal_per_cuft_industry]
+    guards:
+      - {check: null, severity: info, message: "Floor must be truly flat."}
+    source_id: cpo_handbook_volume
+    aliases: ["wading pool gallons", "flat-bottom spa volume"]
+
+# --- DOMAIN B: FLOW, TURNOVER, CIRCULATION -----------------------------------
+
+  - formula_id: turnover_time_hours
+    name: Turnover time
+    domain: flow
+    tier: core
+    category: a
+    verify: false
+    expression: "gallons / (flow_gpm * min_per_hr)"
+    result_unit: hours
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: flow_gpm, unit: gpm, min: 10, max: 5000}
+    constants: [min_per_hr]
+    guards:
+      - {check: "flow_gpm > 0", severity: error, message: "Flow must be positive."}
+      - {check: null, severity: warn, message: "Use measured flow-meter reading, not pump nameplate rating."}
+    worked_example: {inputs: {gallons: 60000, flow_gpm: 180}, expected: 5.56, tolerance: 0.01}
+    source_id: mahc_4_7
+    aliases: ["turnover rate", "how long to filter all the water", "one full turnover"]
+
+  - formula_id: required_flow_from_turnover
+    name: Required recirculation flow from target turnover
+    domain: flow
+    tier: core
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "gallons / (target_turnover_hr * min_per_hr)"
+    result_unit: gpm
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: target_turnover_hr, unit: hr, min: 0.1, max: 12, note: "pool 6, spa 0.5, wading 1-2 — category c"}
+    constants: [min_per_hr]
+    conservative_direction: round_up
+    guards:
+      - {check: "target_turnover_hr > 0", severity: error, message: "Target turnover must be positive."}
+      - {check: null, severity: info, message: "Round result UP. More flow is the safe direction for water quality."}
+    source_id: mahc_4_7
+    aliases: ["gpm needed", "pump flow required", "size the circulation"]
+
+  - formula_id: flow_gpm_to_gph
+    name: Flow conversion gpm to gph
+    domain: flow
+    tier: core
+    category: a
+    verify: false
+    expression: "flow_gpm * min_per_hr"
+    result_unit: gph
+    inputs: [{name: flow_gpm, unit: gpm, min: 0, max: 5000}]
+    constants: [min_per_hr]
+    aliases: ["gallons per hour"]
+
+  - formula_id: flow_gpm_to_gpd
+    name: Flow conversion gpm to gpd
+    domain: flow
+    tier: core
+    category: a
+    verify: false
+    expression: "flow_gpm * min_per_day"
+    result_unit: gpd
+    inputs: [{name: flow_gpm, unit: gpm, min: 0, max: 5000}]
+    constants: [min_per_day]
+    aliases: ["gallons per day"]
+
+  - formula_id: flow_cfs_to_gpm
+    name: Flow conversion cfs to gpm
+    domain: flow
+    tier: core
+    category: a
+    verify: false
+    expression: "cfs * gpm_per_cfs"
+    result_unit: gpm
+    inputs: [{name: cfs, unit: ft3/s, min: 0, max: 100}]
+    constants: [gpm_per_cfs]
+    aliases: ["cfs to gpm", "cubic feet per second to gallons per minute"]
+
+  - formula_id: surface_area_flow_requirement
+    name: Surface-area-based flow requirement
+    domain: flow
+    tier: extended
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "surface_area_sqft * flow_per_sqft"
+    result_unit: gpm
+    inputs:
+      - {name: surface_area_sqft, unit: ft2, min: 4, max: 200000}
+      - {name: flow_per_sqft, unit: gpm/ft2, min: 0, max: 5, note: "venue-specific, set by AHJ"}
+    guards:
+      - {check: null, severity: warn, message: "Where code sets a per-area minimum in ADDITION to turnover, take the LARGER of this and required_flow_from_turnover."}
+    source_id: mahc_state_codes
+    aliases: ["flow per square foot", "surface flow rate"]
+
+# --- DOMAIN C: CHEMICAL DOSING -----------------------------------------------
+
+  - formula_id: dose_liquid_chlorine_floz
+    name: Liquid sanitizer dose to raise FC (fluid ounces, CPO convention — legacy)
+    domain: dosing
+    tier: core
+    category: b
+    verify: true
+    expression: "(gallons * ppm_rise) / (dose_const_liquid * fraction_available)"
+    result_unit: fl_oz
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ppm_rise, unit: ppm, min: 0.1, max: 40, note: ">10 ppm is hyperchlorination"}
+      - {name: fraction_available, unit: fraction, min: 0.05, max: 0.16, default_constant: naocl_fraction}
+    constants: [dose_const_liquid]
+    conservative_direction: use_high_end_strength_for_dose
+    preferred_alternative: dose_liquid_chlorine_sg
+    guards:
+      - {check: "fraction_available > 0", severity: error, message: "Available chlorine fraction must be positive."}
+      - {check: "ppm_rise <= 10", severity: info, message: "Above 10 ppm this is a hyperchlorination dose — confirm closure procedure."}
+      - {check: null, severity: warn, message: "fraction_available must be the ACTUAL current strength; NaOCl degrades in storage. Retest after dosing."}
+      - {check: null, severity: warn, message: "LEGACY CPO constant ignores product specific gravity and overstates volume ~17-20% for 12.5% NaOCl (SG ≈ 1.17). Prefer dose_liquid_chlorine_sg for accurate dosing, cost estimation, and hyperchlorination."}
+    worked_example: {inputs: {gallons: 33000, ppm_rise: 3, fraction_available: 0.125}, expected: 105.76, tolerance: 0.1}
+    source_id: cpo_handbook_liquid_dose
+    aliases: ["how much liquid chlorine", "bleach dose", "fluid ounces of hypo to add"]
+
+  - formula_id: dose_liquid_chlorine_sg
+    name: Liquid sanitizer dose, density-corrected (fluid ounces) — preferred
+    domain: dosing
+    tier: extended
+    category: a
+    verify: false
+    expression: "(gallons * lb_per_gal_water * ppm_rise / ppm_basis) / fraction_available / (lb_per_gal_water * specific_gravity) * floz_per_gal"
+    result_unit: fl_oz
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ppm_rise, unit: ppm, min: 0.1, max: 40}
+      - {name: fraction_available, unit: fraction, min: 0.05, max: 0.16}
+      - {name: specific_gravity, unit: dimensionless, min: 1.0, max: 1.30, note: "12.5% NaOCl ≈ 1.168; 10% ≈ 1.14; 15% ≈ 1.20"}
+    constants: [lb_per_gal_water, ppm_basis, floz_per_gal]
+    guards:
+      - {check: "specific_gravity >= 1.0", severity: error, message: "Specific gravity of hypochlorite solution is > 1."}
+      - {check: null, severity: info, message: "Mass-balance exact. Returns ~15-20% less product than the legacy CPO constant. Preferred formula for all precision work, hyperchlorination, and cost estimation."}
+    source_id: mass_balance
+    aliases: ["accurate liquid chlorine dose", "density corrected bleach dose"]
+
+  - formula_id: dose_dry_chlorine_oz
+    name: Dry / granular sanitizer dose to raise FC (weight ounces)
+    domain: dosing
+    tier: core
+    category: a
+    verify: true
+    expression: "(gallons * ppm_rise) / (dose_const_dry * fraction_available)"
+    result_unit: oz_weight
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ppm_rise, unit: ppm, min: 0.1, max: 40}
+      - {name: fraction_available, unit: fraction, min: 0.3, max: 1.0, default_constant: calhypo_fraction}
+    constants: [dose_const_dry]
+    guards:
+      - {check: "fraction_available > 0", severity: error, message: "Active fraction must be positive."}
+      - {check: null, severity: warn, message: "Source document listed 936.1 for this constant; that value is wrong by 8x. Corrected to 7494 = 1e6/(8.34*16). Cross-check against dose_generic_ppm_lb."}
+    worked_example: {inputs: {gallons: 33000, ppm_rise: 3, fraction_available: 1.0}, expected: 13.21, tolerance: 0.05}
+    source_id: derived_mass_balance
+    aliases: ["how much cal hypo", "granular chlorine ounces"]
+
+  - formula_id: dose_dry_chlorine_lb
+    name: Dry sanitizer dose (pounds), ppm-in-a-million-pounds method
+    domain: dosing
+    tier: core
+    category: a
+    verify: false
+    expression: "(gallons * lb_per_gal_water * ppm_rise / ppm_basis) / fraction_available"
+    result_unit: lb
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ppm_rise, unit: ppm, min: 0.1, max: 40}
+      - {name: fraction_available, unit: fraction, min: 0.3, max: 1.0}
+    constants: [lb_per_gal_water, ppm_basis]
+    guards:
+      - {check: null, severity: info, message: "Canonical and unit-transparent: 1 lb of 100% active in 1,000,000 lb water = 1 ppm."}
+    worked_example: {inputs: {gallons: 33000, ppm_rise: 3, fraction_available: 0.70}, expected: 1.18, tolerance: 0.01}
+    source_id: cpo_handbook_ppm_method
+    aliases: ["pounds of chlorine", "how many pounds to raise 1 ppm"]
+
+  - formula_id: dose_generic_ppm_lb
+    name: Generic dry-chemical dose to raise any parameter (pounds)
+    domain: dosing
+    tier: core
+    category: a
+    verify: false
+    expression: "(gallons * lb_per_gal_water * ppm_rise / ppm_basis) / fraction_active"
+    result_unit: lb
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ppm_rise, unit: ppm, min: 0.1, max: 5000, note: "target minus current"}
+      - {name: fraction_active, unit: fraction, min: 0.1, max: 1.0}
+    constants: [lb_per_gal_water, ppm_basis]
+    guards:
+      - {check: "ppm_rise > 0", severity: error, message: "Target must exceed current level; this formula only raises."}
+    applies_to: [calcium_chloride, sodium_bicarbonate, cyanuric_acid, salt, soda_ash]
+    source_id: cpo_handbook_ppm_method
+    aliases: ["how much chemical to raise ppm", "dry chemical dose"]
+
+  - formula_id: dose_soda_ash_ph
+    name: Soda ash (sodium carbonate) dose for pH rise
+    domain: dosing
+    tier: extended
+    category: b
+    verify: true
+    expression: "(gallons / 10000) * soda_ash_lb_per_10k_per_0_2_pH * (ph_rise / 0.2)"
+    result_unit: lb
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ph_rise, unit: pH_units, min: 0.05, max: 0.8}
+    constants: [soda_ash_lb_per_10k_per_0_2_pH]
+    conservative_direction: underdose
+    guards:
+      - {check: "ph_rise <= 0.6", severity: warn, message: "Large single-step pH corrections overshoot. Dose incrementally and retest."}
+      - {check: null, severity: warn, message: "pH dosing is buffering-dependent. Rule-of-thumb only; underdose deliberately since overshoot is hard to reverse."}
+    source_id: cpo_taylor_dosing_table
+    aliases: ["raise pH", "soda ash amount"]
+
+  - formula_id: dose_muriatic_acid_ph_ta
+    name: Muriatic acid dose to lower pH / total alkalinity
+    domain: dosing
+    tier: extended
+    category: b
+    verify: true
+    expression: "(gallons / 10000) * muriatic_floz_per_10k_per_10ppm_TA * (ta_drop_ppm / 10)"
+    result_unit: fl_oz
+    product_spec: "31.45% (20 degrees Baume) muriatic acid"
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ta_drop_ppm, unit: ppm, min: 5, max: 100}
+    constants: [muriatic_floz_per_10k_per_10ppm_TA]
+    conservative_direction: underdose
+    guards:
+      - {check: "ta_drop_ppm <= 50", severity: warn, message: "Large TA reductions should be staged across days with aeration."}
+      - {check: null, severity: warn, message: "Lowering TA also lowers pH. Use the column-pour or aeration method. Underdose: low-pH overshoot is corrosive and hard to reverse."}
+    source_id: cpo_taylor_acid_demand
+    aliases: ["how much acid", "lower pH", "reduce alkalinity", "muriatic acid dose"]
+
+  - formula_id: dose_sodium_bicarb_ta
+    name: Sodium bicarbonate dose to raise total alkalinity
+    domain: dosing
+    tier: core
+    category: b
+    verify: false
+    expression: "(gallons / 10000) * bicarb_lb_per_10k_per_10ppm_TA * (ta_rise_ppm / 10)"
+    result_unit: lb
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ta_rise_ppm, unit: ppm, min: 5, max: 120}
+    constants: [bicarb_lb_per_10k_per_10ppm_TA]
+    conservative_direction: underdose
+    guards:
+      - {check: null, severity: info, message: "Minimal pH effect; relatively safe to raise. Still add incrementally."}
+    source_id: cpo_handbook_dosing
+    aliases: ["raise alkalinity", "baking soda dose", "bicarb amount"]
+
+  - formula_id: dose_calcium_chloride_hardness
+    name: Calcium chloride dose to raise calcium hardness
+    domain: dosing
+    tier: extended
+    category: b
+    verify: true
+    expression: "(gallons / 10000) * cacl2_lb_per_10k_per_10ppm_CH * (ch_rise_ppm / 10)"
+    result_unit: lb
+    product_spec: "77% flake calcium chloride"
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ch_rise_ppm, unit: ppm, min: 5, max: 300}
+    constants: [cacl2_lb_per_10k_per_10ppm_CH]
+    conservative_direction: underdose
+    guards:
+      - {check: null, severity: warn, message: "Hardness can only be lowered by dilution. Raise incrementally. Rate varies 1.2-1.4 lb by product purity/hydration."}
+    source_id: cpo_taylor_dosing_table
+    aliases: ["raise calcium hardness", "calcium chloride amount", "increase hardness"]
+
+  - formula_id: dose_cya_add
+    name: Cyanuric acid dose to raise stabilizer
+    domain: dosing
+    tier: core
+    category: a
+    verify: false
+    expression: "gallons * lb_per_gal_water * cya_rise_ppm / ppm_basis"
+    result_unit: lb
+    product_spec: "cyanuric acid, ~100% active"
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: cya_rise_ppm, unit: ppm, min: 1, max: 90, note: "target minus current; typical target 30-50"}
+    constants: [lb_per_gal_water, ppm_basis]
+    conservative_direction: underdose
+    guards:
+      - {check: null, severity: warn, message: "CYA dissolves over days. Do not re-dose on early low readings."}
+      - {check: null, severity: warn, message: "CYA is removable only by dilution and suppresses chlorine efficacy. Underdose deliberately."}
+    source_id: cpo_handbook_ppm_method
+    aliases: ["add stabilizer", "raise cyanuric acid", "conditioner dose"]
+
+  - formula_id: cya_added_by_dichlor
+    name: CYA increase from dichlor use
+    domain: dosing
+    tier: core
+    category: b
+    verify: false
+    expression: "dichlor_cya_ratio * fc_ppm_delivered"
+    result_unit: ppm_cya
+    inputs:
+      - {name: fc_ppm_delivered, unit: ppm, min: 0, max: 200, note: "cumulative FC delivered as dichlor"}
+    constants: [dichlor_cya_ratio]
+    guards:
+      - {check: null, severity: warn, message: "Cumulative across the season. Track running total against cya_max_outdoor_ppm."}
+    source_id: industry_consensus
+    aliases: ["does dichlor add stabilizer", "CYA buildup from dichlor"]
+
+  - formula_id: cya_added_by_trichlor
+    name: CYA increase from trichlor use
+    domain: dosing
+    tier: extended
+    category: b
+    verify: false
+    expression: "trichlor_cya_ratio * fc_ppm_delivered"
+    result_unit: ppm_cya
+    inputs:
+      - {name: fc_ppm_delivered, unit: ppm, min: 0, max: 200}
+    constants: [trichlor_cya_ratio]
+    guards:
+      - {check: null, severity: warn, message: "Trichlor also depresses pH and TA over time. Cumulative."}
+    source_id: industry_consensus
+    aliases: ["trichlor stabilizer buildup"]
+
+  - formula_id: breakpoint_chlorination_target
+    name: Breakpoint FC target
+    domain: dosing
+    tier: core
+    category: b
+    verify: false
+    expression: "breakpoint_ratio * combined_chlorine_ppm"
+    result_unit: ppm_fc
+    inputs:
+      - {name: combined_chlorine_ppm, unit: ppm, min: 0.1, max: 5, note: "total chlorine minus free chlorine"}
+    constants: [breakpoint_ratio]
+    conservative_direction: aim_at_or_above
+    guards:
+      - {check: "combined_chlorine_ppm >= 0.4", severity: info, message: "Below 0.4 ppm CC no breakpoint action is normally required."}
+      - {check: null, severity: warn, message: "Theoretical 10:1 ratio. Real demand varies; retest after treatment."}
+    source_id: cpo_handbook_breakpoint
+    aliases: ["breakpoint dose", "shock to clear combined chlorine", "superchlorinate"]
+
+  - formula_id: dilution_replacement_fraction
+    name: Dilution to reduce a dissolved parameter
+    domain: dosing
+    tier: core
+    category: a
+    verify: false
+    expression: "total_gallons * (1 - (target_ppm / current_ppm))"
+    result_unit: gallons_to_replace
+    inputs:
+      - {name: total_gallons, unit: gal, min: 100, max: 2000000}
+      - {name: current_ppm, unit: ppm, min: 1, max: 5000}
+      - {name: target_ppm, unit: ppm, min: 0, max: 5000}
+    guards:
+      - {check: "current_ppm > target_ppm", severity: error, message: "Dilution only reduces. Current must exceed target."}
+      - {check: null, severity: warn, message: "Assumes replacement water contains 0 of the parameter. Subtract the source-water level if non-zero."}
+    worked_example: {inputs: {total_gallons: 25000, current_ppm: 140, target_ppm: 40}, expected: 17857, tolerance: 10}
+    source_id: mass_balance
+    aliases: ["how much water to drain", "dilute the CYA", "partial drain and refill"]
+
+  - formula_id: percent_to_ppm
+    name: Percent to ppm
+    domain: dosing
+    tier: core
+    category: a
+    verify: false
+    expression: "percent * ppm_per_percent"
+    result_unit: ppm
+    inputs: [{name: percent, unit: percent, min: 0, max: 100}]
+    constants: [ppm_per_percent]
+    aliases: ["percent to ppm", "convert concentration"]
+
+  - formula_id: stock_solution_dilution
+    name: Stock-solution dilution (C1V1 = C2V2)
+    domain: dosing
+    tier: core
+    category: a
+    verify: false
+    expression: "(c2 * v2) / c1"
+    result_unit: volume_of_stock
+    inputs:
+      - {name: c1, unit: concentration, min: 0.0001, max: 1000000, note: "stock strength"}
+      - {name: c2, unit: concentration, min: 0.0001, max: 1000000, note: "target strength"}
+      - {name: v2, unit: volume, min: 0, max: 1000000, note: "final volume"}
+    guards:
+      - {check: "c1 > c2", severity: error, message: "Stock must be stronger than target."}
+      - {check: null, severity: warn, message: "c1 and c2 must share the same concentration unit; result carries the unit of v2."}
+    source_id: universal_chemistry
+    aliases: ["dilute stock solution", "how much concentrate"]
+
+  - formula_id: dose_bromine
+    name: Bromine dose to raise total bromine
+    domain: dosing
+    tier: extended
+    category: a
+    verify: false
+    expression: "(gallons * lb_per_gal_water * ppm_rise / ppm_basis) / fraction_active_bromine"
+    result_unit: lb
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ppm_rise, unit: ppm, min: 0.1, max: 40}
+      - {name: fraction_active_bromine, unit: fraction, min: 0.2, max: 1.0}
+    constants: [lb_per_gal_water, ppm_basis]
+    guards:
+      - {check: null, severity: info, message: "Bromine targets run higher than chlorine: pool 3 ppm min, spa 4 ppm min."}
+    source_id: cpo_handbook_ppm_method
+    aliases: ["bromine dose", "how much bromine"]
+
+  - formula_id: bromine_chlorine_equivalence
+    name: Bromine / chlorine equivalence
+    domain: dosing
+    tier: core
+    category: a
+    verify: false
+    expression: "cl_ppm * br_cl_factor"
+    result_unit: ppm_bromine
+    inputs: [{name: cl_ppm, unit: ppm, min: 0, max: 100}]
+    constants: [br_cl_factor]
+    guards:
+      - {check: null, severity: info, message: "Explains why bromine residuals read ~2.25x the chlorine number for equivalent oxidizing capacity."}
+    source_id: stoichiometry
+    aliases: ["bromine vs chlorine", "chlorine to bromine conversion"]
+
+  - formula_id: salt_addition_lb
+    name: Salt addition for salt-chlorine generator
+    domain: dosing
+    tier: core
+    category: b
+    verify: false
+    expression: "gallons * (target_ppm - current_ppm) * lb_per_gal_water / ppm_basis"
+    result_unit: lb_salt
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: target_ppm, unit: ppm, min: 2000, max: 4000, note: "per generator manufacturer, typically 3000-3500"}
+      - {name: current_ppm, unit: ppm, min: 0, max: 6000}
+    constants: [lb_per_gal_water, ppm_basis]
+    conservative_direction: underdose
+    guards:
+      - {check: "target_ppm > current_ppm", severity: error, message: "Salt can only be lowered by dilution."}
+      - {check: null, severity: warn, message: "Target is set by the generator manufacturer. Underdose, retest, top up."}
+    worked_example: {inputs: {gallons: 20000, target_ppm: 3200, current_ppm: 0}, expected: 533.8, tolerance: 0.5}
+    source_id: manufacturer_mass_balance
+    aliases: ["how much salt", "salt for SWG", "raise salt level"]
+
+# --- DOMAIN D: WATER BALANCE -------------------------------------------------
+
+  - formula_id: lsi_langelier
+    name: Langelier Saturation Index (Taylor constant-table form)
+    domain: water_balance
+    tier: core
+    category: b
+    verify: true
+    canonical: true
+    expression: "ph + tf + cf + af - lsi_tds_constant"
+    result_unit: index
+    inputs:
+      - {name: ph, unit: pH_units, min: 6.5, max: 8.5}
+      - {name: tf, unit: factor, min: 0.0, max: 0.9, from_table: temperature_factor, table_input: temp_F}
+      - {name: cf, unit: factor, min: 1.0, max: 2.6, from_table: calcium_hardness_factor, table_input: calcium_hardness_ppm}
+      - {name: af, unit: factor, min: 1.4, max: 2.9, from_table: alkalinity_factor, table_input: carbonate_alkalinity_ppm}
+    constants: [lsi_tds_constant]
+    target_range: [-0.3, 0.3]
+    guards:
+      - {check: "cya_ppm == 0 or carbonate_alkalinity_corrected == true", severity: error, message: "Alkalinity MUST be CYA-corrected via carbonate_alkalinity_correction before the AF lookup."}
+      - {check: "tds_ppm <= 1000", severity: info, message: "Use lsi_tds_constant_high (12.2) when TDS exceeds ~1000 ppm."}
+      - {check: null, severity: info, message: "Negative index = corrosive, positive = scaling, 0.0 ideal."}
+    source_id: taylor_water_balance
+    aliases: ["is my water balanced", "saturation index", "LSI", "scaling or corrosive"]
+
+  - formula_id: carbonate_alkalinity_correction
+    name: CYA correction to total alkalinity
+    domain: water_balance
+    tier: core
+    category: b
+    verify: true
+    expression: "max(0, total_alk_ppm - (cya_alk_correction * cyanuric_acid_ppm))"
+    result_unit: ppm_carbonate_alkalinity
+    inputs:
+      - {name: total_alk_ppm, unit: ppm, min: 0, max: 400}
+      - {name: cyanuric_acid_ppm, unit: ppm, min: 0, max: 300}
+    constants: [cya_alk_correction]
+    guards:
+      - {check: null, severity: error, message: "Must run before the AF lookup in lsi_langelier."}
+      - {check: null, severity: info, message: "Correction factor is pH-dependent: ~0.22 at pH 7.0, 0.333 at 7.5, ~0.35 at 7.6. Common CPO simplification is CYA/3."}
+    source_id: taylor_apsp_11
+    aliases: ["adjusted alkalinity", "carbonate alkalinity", "cyanurate correction"]
+
+  - formula_id: lsi_full_analytic
+    name: LSI analytic variant (audit cross-check only)
+    domain: water_balance
+    tier: extended
+    category: a
+    verify: false
+    executable: false
+    expression: "ph - phs"
+    phs_definition: "phs = (9.3 + A + B) - (C + D); A = f(TDS), B = f(temp), C = f(Ca hardness as CaCO3), D = f(alkalinity)"
+    result_unit: index
+    guards:
+      - {check: null, severity: warn, message: "DO NOT use for operator field math. Reserved for audit cross-check; agrees with lsi_langelier within ~0.1-0.2 index units in normal pool ranges."}
+    source_id: langelier_1936_astm
+    aliases: ["Langelier formula", "pHs method"]
+
+# --- DOMAIN E: FILTRATION ----------------------------------------------------
+
+  - formula_id: filtration_rate
+    name: Filtration rate (flux)
+    domain: filtration
+    tier: core
+    category: a
+    verify: false
+    expression: "flow_gpm / filter_area_sqft"
+    result_unit: gpm/ft2
+    inputs:
+      - {name: flow_gpm, unit: gpm, min: 10, max: 5000}
+      - {name: filter_area_sqft, unit: ft2, min: 0.5, max: 2000}
+    guards:
+      - {check: "filter_area_sqft > 0", severity: error, message: "Filter area must be positive."}
+      - {check: null, severity: warn, message: "Result must be <= the code/NSF maximum for the filter type. Exceeding it degrades filtration."}
+    source_id: mahc_4_7_nsf_50
+    aliases: ["filter rate", "gpm per square foot", "flux"]
+
+  - formula_id: required_filter_area
+    name: Required filter area from design flow
+    domain: filtration
+    tier: core
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "flow_gpm / max_rate_gpm_sqft"
+    result_unit: ft2
+    inputs:
+      - {name: flow_gpm, unit: gpm, min: 10, max: 5000}
+      - {name: max_rate_gpm_sqft, unit: gpm/ft2, min: 0.1, max: 20, note: "filter-type maximum, category c"}
+    conservative_direction: round_up
+    guards:
+      - {check: null, severity: info, message: "Round area UP / use the LOWER allowable rate. More area = better water quality and code headroom."}
+    worked_example: {inputs: {flow_gpm: 180, max_rate_gpm_sqft: 15}, expected: 12.0, tolerance: 0.01}
+    source_id: mahc_filtration_tables
+    aliases: ["how big a filter", "filter size needed", "square feet of filter"]
+
+  - formula_id: sand_filter_area_from_diameter
+    name: Sand filter effective area (vertical tank)
+    domain: filtration
+    tier: core
+    category: a
+    verify: false
+    expression: "pi * (tank_diameter_ft / 2) ** 2"
+    result_unit: ft2
+    inputs:
+      - {name: tank_diameter_ft, unit: ft, min: 0.5, max: 12}
+    constants: [pi]
+    guards:
+      - {check: null, severity: info, message: "Effective bed area equals tank cross-section for downflow sand."}
+    source_id: manufacturer_geometry
+    aliases: ["sand filter area", "filter tank square footage"]
+
+  - formula_id: de_filter_area
+    name: DE filter area (manufacturer grid rating)
+    domain: filtration
+    tier: extended
+    category: b
+    verify: false
+    executable: false
+    expression: null
+    procedure: "Read the rated grid/plate area from the manufacturer nameplate or NSF listing. DE area is NOT computable from tank dimensions."
+    result_unit: ft2
+    source_id: manufacturer_mahc
+    aliases: ["DE filter area"]
+
+  - formula_id: de_precoat_amount
+    name: DE precoat quantity
+    domain: filtration
+    tier: extended
+    category: b
+    verify: false
+    expression: "de_area_sqft * de_precoat_lb_per_sqft"
+    result_unit: lb_de
+    inputs:
+      - {name: de_area_sqft, unit: ft2, min: 6, max: 500}
+    constants: [de_precoat_lb_per_sqft]
+    guards:
+      - {check: null, severity: warn, message: "Under-coating causes short cycles and breakthrough; over-coating raises head loss."}
+    source_id: manufacturer_mahc
+    aliases: ["DE recharge amount", "pounds of DE to add", "how much DE powder"]
+
+  - formula_id: cartridge_area_and_rate
+    name: Cartridge filter rate check
+    domain: filtration
+    tier: core
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "flow_gpm / cartridge_rated_area_sqft"
+    result_unit: gpm/ft2
+    inputs:
+      - {name: flow_gpm, unit: gpm, min: 10, max: 2000}
+      - {name: cartridge_rated_area_sqft, unit: ft2, min: 10, max: 2000}
+    guards:
+      - {check: "result <= filt_rate_max_cartridge_public", severity: error, message: "Exceeds MAHC public-venue cartridge maximum of 0.375 gpm/ft2."}
+      - {check: null, severity: warn, message: "Set venue_class. Residential practice often allows 0.5-1.0 gpm/ft2."}
+    source_id: mahc_nsf_50
+    aliases: ["cartridge filter size", "cartridge flow rating"]
+
+# --- DOMAIN F: HYDRAULICS ----------------------------------------------------
+
+  - formula_id: pipe_velocity
+    name: Water velocity in pipe
+    domain: hydraulics
+    tier: core
+    category: a
+    verify: false
+    expression: "vel_const * flow_gpm / pipe_id_in ** 2"
+    result_unit: ft/s
+    inputs:
+      - {name: flow_gpm, unit: gpm, min: 1, max: 5000}
+      - {name: pipe_id_in, unit: in, min: 0.5, max: 24, note: "INSIDE diameter, not nominal size"}
+    constants: [vel_const]
+    guards:
+      - {check: "pipe_id_in > 0", severity: error, message: "Pipe inside diameter must be positive."}
+      - {check: "result <= suction_velocity_max_fps", severity: error, message: "Exceeds 6 ft/s suction limit — entrapment and cavitation risk. Increase pipe size.", applies_when: "line_type == 'suction'"}
+      - {check: "result <= return_velocity_max_fps", severity: warn, message: "Exceeds 8 ft/s return limit — excessive head loss and noise.", applies_when: "line_type == 'return'"}
+    conservative_direction: keep_below_cap
+    source_id: continuity_ansi_apsp_7
+    aliases: ["water velocity", "pipe speed", "feet per second in pipe", "is my pipe too small"]
+
+  - formula_id: flow_from_velocity
+    name: Flow capacity from velocity limit
+    domain: hydraulics
+    tier: core
+    category: a
+    verify: false
+    expression: "flow_const * pipe_id_in ** 2 * velocity_fps"
+    result_unit: gpm
+    inputs:
+      - {name: pipe_id_in, unit: in, min: 0.5, max: 24}
+      - {name: velocity_fps, unit: ft/s, min: 0.5, max: 12}
+    constants: [flow_const]
+    guards:
+      - {check: null, severity: info, message: "Pair with the applicable velocity cap (6 suction / 8 return) to get max safe flow for a pipe size."}
+    source_id: continuity
+    aliases: ["max flow for pipe size", "how much flow can this pipe carry"]
+
+  - formula_id: total_dynamic_head
+    name: Total dynamic head (TDH)
+    domain: hydraulics
+    tier: extended
+    category: a
+    verify: false
+    expression: "static_head_ft + friction_loss_ft + velocity_head_ft"
+    result_unit: ft_head
+    inputs:
+      - {name: static_head_ft, unit: ft, min: 0, max: 100, note: "elevation plus suction lift"}
+      - {name: friction_loss_ft, unit: ft, min: 0, max: 200, note: "pipe plus fittings"}
+      - {name: velocity_head_ft, unit: ft, min: 0, max: 10, note: "usually small"}
+    guards:
+      - {check: null, severity: info, message: "Operators normally read friction loss from manufacturer tables rather than computing it. TDH sets the pump operating point against the pump curve."}
+    source_id: pump_engineering_phta
+    aliases: ["total head", "TDH", "system head", "head the pump works against"]
+
+  - formula_id: head_loss_hazen_williams
+    name: Pipe friction head loss (Hazen-Williams)
+    domain: hydraulics
+    tier: extended
+    category: a
+    verify: false
+    expression: "0.002083 * length_ft * (100 / c_factor) ** 1.85 * (flow_gpm ** 1.85 / pipe_id_in ** 4.8655)"
+    result_unit: ft
+    inputs:
+      - {name: length_ft, unit: ft, min: 1, max: 5000}
+      - {name: flow_gpm, unit: gpm, min: 1, max: 5000}
+      - {name: pipe_id_in, unit: in, min: 0.5, max: 24}
+      - {name: c_factor, unit: dimensionless, min: 80, max: 150, note: "PVC ~150"}
+    guards:
+      - {check: null, severity: warn, message: "Valid for water in turbulent flow; C must match the pipe material. Most operators use friction-loss charts. Reference/audit path."}
+    source_id: hazen_williams
+    aliases: ["friction loss", "pipe head loss", "Hazen Williams"]
+
+  - formula_id: head_loss_darcy_weisbach
+    name: Pipe friction head loss (Darcy-Weisbach)
+    domain: hydraulics
+    tier: extended
+    category: a
+    verify: false
+    expression: "f_factor * (length_ft / pipe_id_ft) * (velocity_fps ** 2 / (2 * g_ft_s2))"
+    result_unit: ft
+    inputs:
+      - {name: f_factor, unit: dimensionless, min: 0.008, max: 0.08, note: "from Moody chart or Colebrook"}
+      - {name: length_ft, unit: ft, min: 1, max: 5000}
+      - {name: pipe_id_ft, unit: ft, min: 0.04, max: 2.0}
+      - {name: velocity_fps, unit: ft/s, min: 0.1, max: 20}
+    constants: [g_ft_s2]
+    guards:
+      - {check: null, severity: info, message: "More fundamental than Hazen-Williams but requires a friction factor. Audit/reference only for operator context."}
+    source_id: darcy_weisbach
+    aliases: ["Darcy Weisbach", "friction factor head loss"]
+
+  - formula_id: fitting_equivalent_length
+    name: Fitting loss via equivalent pipe length
+    domain: hydraulics
+    tier: extended
+    category: b
+    verify: false
+    expression: "straight_pipe_ft + sum_fitting_equiv_length_ft"
+    result_unit: ft
+    inputs:
+      - {name: straight_pipe_ft, unit: ft, min: 0, max: 5000}
+      - {name: sum_fitting_equiv_length_ft, unit: ft, min: 0, max: 2000}
+    guards:
+      - {check: null, severity: info, message: "Equivalent lengths come from manufacturer/engineering tables and scale with diameter. Feed the result into head_loss_hazen_williams or head_loss_darcy_weisbach."}
+    source_id: hydraulics_tables_phta
+    aliases: ["fitting loss", "equivalent length of elbows"]
+
+  - formula_id: pump_operating_point
+    name: Pump operating point
+    domain: hydraulics
+    tier: extended
+    category: a
+    verify: false
+    executable: false
+    expression: null
+    procedure: >-
+      Overlay the system curve (static head + K * flow^1.85..2) on the
+      manufacturer pump curve. The operating point is their intersection,
+      returned as a (flow_gpm, head_ft) pair. No closed-form operator formula.
+    result_unit: "(gpm, ft) pair"
+    source_id: pump_engineering_phta
+    aliases: ["operating point", "where pump runs on its curve", "duty point"]
+
+# --- DOMAIN G: HEATER / THERMAL ----------------------------------------------
+
+  - formula_id: heater_btu_to_raise_temp
+    name: Total BTU to raise water temperature
+    domain: thermal
+    tier: core
+    category: a
+    verify: false
+    expression: "gallons * lb_per_gal_water * delta_T_F * specific_heat_water"
+    result_unit: BTU
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: delta_T_F, unit: degF, min: 1, max: 60, note: "target minus current"}
+    constants: [lb_per_gal_water, specific_heat_water]
+    conservative_direction: add_loss_margin
+    guards:
+      - {check: null, severity: warn, message: "Ignores standby and surface losses, so it UNDERSTATES need. Apply a margin (e.g. x1.25) when sizing a heater."}
+    worked_example: {inputs: {gallons: 20000, delta_T_F: 10}, expected: 1668000, tolerance: 100}
+    source_id: thermodynamics
+    aliases: ["BTU to heat pool", "heater energy needed"]
+
+  - formula_id: heater_temp_rise_time
+    name: Time to raise temperature at a given heater output
+    domain: thermal
+    tier: core
+    category: a
+    verify: false
+    expression: "(gallons * lb_per_gal_water * delta_T_F) / heater_btu_per_hr"
+    result_unit: hours
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: delta_T_F, unit: degF, min: 1, max: 60}
+      - {name: heater_btu_per_hr, unit: BTU/hr, min: 50000, max: 5000000}
+    constants: [lb_per_gal_water]
+    guards:
+      - {check: "heater_btu_per_hr > 0", severity: error, message: "Heater output must be positive."}
+      - {check: null, severity: warn, message: "Neglects losses. Real time is longer, especially outdoors. Treat as best case."}
+    worked_example: {inputs: {gallons: 20000, delta_T_F: 10, heater_btu_per_hr: 400000}, expected: 4.17, tolerance: 0.01}
+    source_id: thermodynamics
+    aliases: ["how long to heat", "heat-up time", "temperature rise rate"]
+
+  - formula_id: temp_rise_rate_per_hour
+    name: Degrees per hour a heater delivers
+    domain: thermal
+    tier: core
+    category: a
+    verify: false
+    expression: "heater_btu_per_hr / (gallons * lb_per_gal_water)"
+    result_unit: degF/hr
+    inputs:
+      - {name: heater_btu_per_hr, unit: BTU/hr, min: 50000, max: 5000000}
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+    constants: [lb_per_gal_water]
+    guards:
+      - {check: null, severity: info, message: "Best case, no losses."}
+    source_id: thermodynamics
+    aliases: ["degrees per hour", "how fast does it heat"]
+
+# --- DOMAIN H: SPA-SPECIFIC --------------------------------------------------
+
+  - formula_id: spa_bather_capacity_area
+    name: Spa bather capacity by surface area
+    domain: spa
+    tier: core
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "floor(surface_area_sqft / spa_area_per_bather)"
+    result_unit: persons
+    inputs:
+      - {name: surface_area_sqft, unit: ft2, min: 10, max: 1000}
+    constants: [spa_area_per_bather]
+    guards:
+      - {check: null, severity: warn, message: "AHJ may set a different ft2/person figure. Always floor to an integer."}
+    worked_example: {inputs: {surface_area_sqft: 50.24}, expected: 5, tolerance: 0}
+    source_id: cpo_handbook_mahc
+    aliases: ["spa capacity", "how many people in the hot tub", "max bathers spa"]
+
+  - formula_id: spa_water_replacement_interval
+    name: Spa water replacement interval
+    domain: spa
+    tier: core
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "spa_gallons / (spa_replacement_const * avg_daily_bathers)"
+    result_unit: days
+    inputs:
+      - {name: spa_gallons, unit: gal, min: 100, max: 5000}
+      - {name: avg_daily_bathers, unit: persons/day, min: 1, max: 500}
+    constants: [spa_replacement_const]
+    guards:
+      - {check: "avg_daily_bathers > 0", severity: error, message: "Daily bather count must be positive."}
+      - {check: null, severity: warn, message: "MAHC hot-water venue rule. Some AHJs mandate a fixed maximum drain schedule that supersedes this."}
+    worked_example: {inputs: {spa_gallons: 500, avg_daily_bathers: 30}, expected: 5.56, tolerance: 0.01}
+    source_id: mahc_spa_replacement
+    aliases: ["when to drain the spa", "spa water change interval", "hot tub drain schedule"]
+
+  - formula_id: spa_turnover_required_flow
+    name: Spa required flow (30-minute turnover)
+    domain: spa
+    tier: core
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "spa_gallons / (spa_turnover_max_hr * min_per_hr)"
+    result_unit: gpm
+    inputs:
+      - {name: spa_gallons, unit: gal, min: 100, max: 5000}
+    constants: [spa_turnover_max_hr, min_per_hr]
+    conservative_direction: round_up
+    guards:
+      - {check: null, severity: info, message: "Spas require far faster turnover than pools. Verify the spa turnover maximum in the governing code."}
+    worked_example: {inputs: {spa_gallons: 500}, expected: 16.67, tolerance: 0.05}
+    source_id: mahc_4_7
+    aliases: ["spa pump size", "hot tub circulation flow"]
+
+# --- DOMAIN I: CONTAMINATION / CT --------------------------------------------
+
+  - formula_id: ct_value
+    name: CT (concentration x time)
+    domain: contamination
+    tier: core
+    category: a
+    verify: false
+    expression: "concentration_ppm * time_min"
+    result_unit: ppm-min
+    inputs:
+      - {name: concentration_ppm, unit: ppm, min: 0.1, max: 100}
+      - {name: time_min, unit: min, min: 1, max: 2000}
+    guards:
+      - {check: "cya_ppm == 0", severity: error, message: "CT targets assume CYA absent. With CYA present the required CT roughly DOUBLES — use the CYA-adjusted table."}
+      - {check: null, severity: warn, message: "Valid only at the stated pH and temperature (pH <= 7.5, 25 C)."}
+    source_id: cdc_contamination_response
+    aliases: ["CT value", "contact time", "disinfection dose"]
+
+  - formula_id: ct_required_time
+    name: Time to achieve a required CT
+    domain: contamination
+    tier: core
+    category: a
+    verify: false
+    expression: "required_ct_ppm_min / concentration_ppm"
+    result_unit: minutes
+    inputs:
+      - {name: required_ct_ppm_min, unit: ppm-min, min: 10, max: 30000}
+      - {name: concentration_ppm, unit: ppm, min: 0.5, max: 100, note: "MEASURED FC held during closure, not target"}
+    conservative_direction: higher_ct_lower_fc
+    guards:
+      - {check: "concentration_ppm > 0", severity: error, message: "FC concentration must be positive."}
+      - {check: null, severity: error, message: "FC must be maintained continuously. If FC drops, accumulated CT is reduced or reset."}
+      - {check: null, severity: info, message: "Use the HIGHER required-CT figure and the LOWER measured FC. More contact time is the safe direction."}
+    worked_example: {inputs: {required_ct_ppm_min: 15300, concentration_ppm: 20}, expected: 765, tolerance: 0.5}
+    source_id: cdc_hyperchlorination
+    aliases: ["how long to close the pool", "hyperchlorination time", "shock time for crypto"]
+
+  - formula_id: ct_crypto_diarrheal
+    name: Cryptosporidium diarrheal (loose stool) remediation time
+    domain: contamination
+    tier: core
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "ct_crypto / fc_ppm"
+    result_unit: minutes
+    conditions: "pH <= 7.5, 25 C, CYA absent"
+    inputs:
+      - {name: fc_ppm, unit: ppm, min: 10, max: 40}
+    constants: [ct_crypto]
+    guards:
+      - {check: "cya_ppm == 0", severity: error, message: "CYA present — double the required CT and re-derive closure time."}
+      - {check: null, severity: error, message: "Close the venue. Stop or bypass filtration during treatment; backwash or replace media afterward."}
+      - {check: null, severity: warn, message: "Source lists alternatives of 12,000 and 12,300 ppm-min from other log-reduction contexts. Confirm the current CDC value."}
+    worked_example: {inputs: {fc_ppm: 20}, expected: 765, tolerance: 0.5}
+    source_id: cdc_hyperchlorination
+    aliases: ["diarrhea in pool response", "crypto shock", "loose stool remediation"]
+
+  - formula_id: ct_formed_stool_response
+    name: Formed-stool / vomit response time (non-Crypto pathogens)
+    domain: contamination
+    tier: extended
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "ct_formed_stool / fc_ppm"
+    result_unit: minutes
+    conditions: "raise FC to at least 2 ppm, pH 7.5"
+    inputs:
+      - {name: fc_ppm, unit: ppm, min: 1, max: 20}
+    constants: [ct_formed_stool]
+    guards:
+      - {check: null, severity: info, message: "Formed stool does NOT require Cryptosporidium-level hyperchlorination. Typically FC 2 ppm held ~25-30 min."}
+    source_id: cdc_fecal_response
+    aliases: ["solid poop in pool", "formed stool response", "vomit cleanup chlorine"]
+
+  - formula_id: ct_giardia
+    name: Giardia inactivation time
+    domain: contamination
+    tier: extended
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "ct_giardia / fc_ppm"
+    result_unit: minutes
+    conditions: "pH 7.5, 25 C"
+    inputs:
+      - {name: fc_ppm, unit: ppm, min: 0.5, max: 20}
+    constants: [ct_giardia]
+    guards:
+      - {check: null, severity: warn, message: "Strongly temperature- and pH-dependent."}
+    source_id: cdc_epa_ct_tables
+    aliases: ["giardia contact time"]
+
+  - formula_id: blood_incident_response
+    name: Blood-incident response
+    domain: contamination
+    tier: extended
+    category: c
+    verify: true
+    ahj_override: true
+    executable: false
+    expression: null
+    procedure: >-
+      No CT calculation and no closure or hyperchlorination is required for a
+      blood incident. Confirm FC is at or above the venue minimum (1 ppm pool,
+      3 ppm spa) and pH is in range. Bloodborne pathogens do not survive in
+      properly chlorinated water.
+    source_id: cdc_blood_guidance
+    aliases: ["blood in pool", "bleeding swimmer response"]
+
+# --- DOMAIN J: BATHER LOAD / OCCUPANCY ---------------------------------------
+
+  - formula_id: bather_load_pool
+    name: Maximum bather load (pool) by water surface area
+    domain: occupancy
+    tier: extended
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "floor(water_surface_sqft / area_per_bather)"
+    result_unit: persons
+    inputs:
+      - {name: water_surface_sqft, unit: ft2, min: 50, max: 200000}
+      - {name: area_per_bather, unit: ft2/person, min: 10, max: 40,
+         note: "shallow (<5 ft) ~15; deep 20-25; diving areas larger; whole-pool often 20-24. Varies widely by AHJ."}
+    conservative_direction: use_larger_area_per_bather
+    guards:
+      - {check: null, severity: warn, message: "Deck space and lifeguard ratios may further limit occupancy. Use the larger ft2/person value when in doubt."}
+    source_id: mahc_state_bathing_codes
+    aliases: ["max occupancy pool", "how many swimmers allowed", "bather load"]
+
+  - formula_id: bather_load_wading
+    name: Wading pool bather load
+    domain: occupancy
+    tier: extended
+    category: c
+    verify: true
+    ahj_override: true
+    expression: "floor(surface_sqft / wading_area_per_bather)"
+    result_unit: persons
+    inputs:
+      - {name: surface_sqft, unit: ft2, min: 20, max: 5000}
+    constants: [wading_area_per_bather]
+    source_id: mahc_state_codes
+    aliases: ["kiddie pool capacity"]
+
+# =============================================================================
+# PLAUSIBILITY RANGES — engineering sanity bounds, NOT code limits.
+# If a computed result falls outside, warn and ask the operator to recheck inputs.
+# =============================================================================
+
+plausibility_ranges:
+  residential_pool_volume_gal: {min: 5000, max: 40000, flag: "check dimensions and units"}
+  commercial_pool_volume_gal: {min: 40000, max: 1000000, flag: "verify large basin dimensions"}
+  spa_volume_gal: {min: 200, max: 2000, flag: "over 2,000 gal is likely a pool, not a spa"}
+  avg_depth_pool_ft: {min: 3, max: 8, flag: "over 12 ft is rare outside dive wells"}
+  avg_depth_spa_ft: {min: 3, max: 4}
+  turnover_pool_hr: {min: 0.5, max: 8, flag: "over 12 hr = under-circulated"}
+  turnover_spa_hr: {min: 0.1, max: 0.5, flag: "over 1 hr = under-circulated"}
+  recirculation_flow_gpm: {min: 15, max: 3000, flag: "verify against volume"}
+  filtration_rate_gpm_sqft: {min: 0.3, max: 20, flag: "above the type maximum = over-rate"}
+  pipe_velocity_suction_fps: {min: 2, max: 6, flag: "over 6 = undersized pipe"}
+  pipe_velocity_return_fps: {min: 3, max: 8, flag: "over 8 = undersized pipe"}
+  tdh_ft: {min: 20, max: 100, flag: "over 150 ft is unusual for pools"}
+  fc_pool_ppm: {min: 1, max: 10, shock_max: 40, flag: "over 40 = hyperchlorination only"}
+  fc_spa_ppm: {min: 3, max: 10}
+  ph: {min: 7.0, max: 8.0, flag: "outside range — correct urgently"}
+  total_alkalinity_ppm: {min: 60, max: 180}
+  calcium_hardness_pool_ppm: {min: 150, max: 400}
+  calcium_hardness_spa_ppm: {min: 100, max: 250}
+  cya_ppm: {min: 30, max: 90, indoor_spa_target: 0, flag: "over 100 — dilute"}
+  lsi: {min: -0.3, max: 0.3, flag: "outside range — corrosive or scaling"}
+  spa_water_temp_F: {min: 100, max: 104, flag: "over 104 F is unsafe"}
+  salt_swg_ppm: {min: 2700, max: 3500, flag: "per generator specification"}
+  liquid_chlorine_dose_floz: {min: 0.1, max: 500, flag: "verify very large doses"}
+  spa_bather_load_persons: {min: 1, max: 20}
+  spa_replacement_interval_days: {min: 1, max: 30, flag: "over 30 days — recheck usage figures"}
+  ct_crypto_ppm_min: {min: 15300, max: 15300, flag: "fixed target"}
+  hyperchlorination_time_min: {min: 380, max: 770, flag: "depends on FC held"}
+  heater_btu_per_hr: {min: 100000, max: 5000000, flag: "verify against volume"}
+
+# =============================================================================
+# VALIDATION SUITE — every core formula must reproduce its example before release
+# =============================================================================
+
+validation_suite:
+  - {formula_id: volume_rectangular, inputs: {length_ft: 40, width_ft: 20, avg_depth_ft: 5.5}, expected: 33000, tolerance: 1}
+  - {formula_id: turnover_time_hours, inputs: {gallons: 60000, flow_gpm: 180}, expected: 5.56, tolerance: 0.01}
+  - {formula_id: area_circular, inputs: {radius_ft: 4}, expected: 50.27, tolerance: 0.1, note: "50.24 with pi_legacy"}
+  - {formula_id: spa_bather_capacity_area, inputs: {surface_area_sqft: 50.24}, expected: 5, tolerance: 0}
+  - {formula_id: dose_liquid_chlorine_floz, inputs: {gallons: 33000, ppm_rise: 3, fraction_available: 0.125}, expected: 105.76, tolerance: 0.1}
+  - {formula_id: dilution_replacement_fraction, inputs: {total_gallons: 25000, current_ppm: 140, target_ppm: 40}, expected: 17857, tolerance: 10}
+  - {formula_id: ct_required_time, inputs: {required_ct_ppm_min: 15300, concentration_ppm: 20}, expected: 765, tolerance: 0.5}
+  - {formula_id: spa_water_replacement_interval, inputs: {spa_gallons: 500, avg_daily_bathers: 30}, expected: 5.56, tolerance: 0.01}
+  - {formula_id: dose_dry_chlorine_lb, inputs: {gallons: 33000, ppm_rise: 3, fraction_available: 0.70}, expected: 1.18, tolerance: 0.01}
+  - {formula_id: dose_dry_chlorine_oz, inputs: {gallons: 33000, ppm_rise: 3, fraction_available: 1.0}, expected: 13.21, tolerance: 0.05}
+  - {formula_id: salt_addition_lb, inputs: {gallons: 20000, target_ppm: 3200, current_ppm: 0}, expected: 533.8, tolerance: 0.5}
+  - {formula_id: heater_btu_to_raise_temp, inputs: {gallons: 20000, delta_T_F: 10}, expected: 1668000, tolerance: 100}
+  - {formula_id: heater_temp_rise_time, inputs: {gallons: 20000, delta_T_F: 10, heater_btu_per_hr: 400000}, expected: 4.17, tolerance: 0.01}
+  - {formula_id: required_filter_area, inputs: {flow_gpm: 180, max_rate_gpm_sqft: 15}, expected: 12.0, tolerance: 0.01}
+  - {formula_id: spa_turnover_required_flow, inputs: {spa_gallons: 500}, expected: 16.67, tolerance: 0.05}
+
+# =============================================================================
+# ROLLOUT — staged from the source document's recommendations
+# =============================================================================
+
+rollout:
+  stage_1_ship_now:
+    description: "core-tier universal math, no jurisdictional risk"
+    formula_ids:
+      - volume_rectangular
+      - volume_circular
+      - area_circular
+      - average_depth_two_point
+      - volume_irregular_grid
+      - volume_constant_depth
+      - turnover_time_hours
+      - flow_gpm_to_gph
+      - flow_gpm_to_gpd
+      - flow_cfs_to_gpm
+      - dose_liquid_chlorine_floz
+      - dose_dry_chlorine_lb
+      - dose_generic_ppm_lb
+      - dilution_replacement_fraction
+      - percent_to_ppm
+      - stock_solution_dilution
+      - bromine_chlorine_equivalence
+      - lsi_langelier
+      - carbonate_alkalinity_correction
+      - filtration_rate
+      - required_filter_area
+      - sand_filter_area_from_diameter
+      - cartridge_area_and_rate
+      - pipe_velocity
+      - flow_from_velocity
+      - heater_btu_to_raise_temp
+      - heater_temp_rise_time
+      - temp_rise_rate_per_hour
+      - spa_bather_capacity_area
+      - spa_water_replacement_interval
+      - spa_turnover_required_flow
+      - ct_value
+      - ct_required_time
+      - ct_crypto_diarrheal
+    gate: "Every stage-1 formula must reproduce its worked example within tolerance."
+
+  stage_2_blocked_on_verification:
+    description: "category-c limits and Taylor tables — require primary-source confirmation"
+    verify_against:
+      - "MAHC 2024 §4.7 — turnover maxima and filtration rates"
+      - "MAHC 2024 §5.7 and Annex — chemical limits, spa replacement, bather load"
+      - "CDC hyperchlorination table — Cryptosporidium CT and the CYA adjustment"
+      - "ANSI/APSP-7 — suction and return velocity limits"
+      - "ANSI/APSP-11 — water quality ranges"
+      - "Taylor Water Balance card — current TF / CF / AF factor tables"
+    gate: "No category-c value ships without a confirmed section citation."
+
+  policy:
+    - "Route cubic-foot conversions: gal_per_cuft_industry (7.5) for volume-from-dimensions; gal_per_cuft_exact (7.4805) for explicit ft3<->gal conversions."
+    - "Use pi = 3.14159 (canonical) everywhere; pi_legacy only under an explicit legacy_reproduction flag. Never mix the two."
+    - "Prefer dose_liquid_chlorine_sg (density-corrected) over the legacy CPO constant for all precision dosing, hyperchlorination, and cost work."
+    - "lsi_langelier is canonical; lsi_full_analytic is a hidden audit cross-check only."
+    - "Every category-c value must resolve through the ahj_override layer before use."
+    - "Agent must state which direction it rounded whenever conservative_direction is set."
+    - "When a formula carries preferred_alternative, surface that alternative to the operator."
