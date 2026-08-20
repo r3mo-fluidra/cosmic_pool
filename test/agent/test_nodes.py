@@ -57,7 +57,7 @@ from src.agent.state import ExecutionStep, AgentResult
 
 def make_step(step=1, agent="diagnosis", task="do something", oos=False) -> ExecutionStep:
     """Nota: `agent` debe ser uno de los AgentName válidos:
-    diagnosis | dosage | equipment | maintenance | ooo
+    diagnosis | dosage | equipment | maintenance | oos
     ("general" NO es válido para ExecutionStep aunque exista como agente registrado
     en agents.py — no usarlo aquí o pydantic lo rechazará en el proyecto real)."""
     return ExecutionStep(step=step, task=task, assigned_agent=agent, oos=oos)
@@ -96,7 +96,7 @@ class TestExtractText:
 
 class TestIsOos:
     def test_single_step_oos_true(self):
-        plan = [make_step(agent="ooo", oos=True)]
+        plan = [make_step(agent="oos", oos=True)]
         assert nodes._is_oos(plan) is True
 
     def test_single_step_oos_false(self):
@@ -104,7 +104,7 @@ class TestIsOos:
         assert nodes._is_oos(plan) is False
 
     def test_multi_step_plan_is_never_oos(self):
-        plan = [make_step(agent="ooo", oos=True), make_step(step=2)]
+        plan = [make_step(agent="oos", oos=True), make_step(step=2)]
         assert nodes._is_oos(plan) is False
 
     def test_empty_plan_is_not_oos(self):
@@ -280,7 +280,7 @@ class TestPlanner:
 
         assert result.update["detected_language"] == "es"
 
-    def test_includes_last_izel_message_and_user_reply_in_context(self, monkeypatch):
+    def test_includes_last_marlin_message_and_user_reply_in_context(self, monkeypatch):
         captured = {}
 
         def fake_invoke(messages):
@@ -292,7 +292,7 @@ class TestPlanner:
         state = {
             "messages": [
                 HumanMessage(content="first question"),
-                AIMessage(content="previous answer", name="Izel"),
+                AIMessage(content="previous answer", name="marlin"),
                 HumanMessage(content="follow up"),
             ]
         }
@@ -301,7 +301,7 @@ class TestPlanner:
         assert "previous answer" in captured["context"]
         assert "follow up" in captured["context"]
 
-    def test_ignores_ai_messages_not_authored_by_izel(self, monkeypatch):
+    def test_ignores_ai_messages_not_authored_by_marlin(self, monkeypatch):
         captured = {}
 
         def fake_invoke(messages):
@@ -312,7 +312,7 @@ class TestPlanner:
 
         state = {
             "messages": [
-                AIMessage(content="not izel", name="OtherBot"),
+                AIMessage(content="not marlin", name="OtherBot"),
                 HumanMessage(content="user text"),
             ]
         }
@@ -437,14 +437,14 @@ class TestSynthesizer:
         fake_llm.invoke.return_value = AIMessage(content="Lo siento, eso está fuera de mi alcance.")
         monkeypatch.setattr(nodes, "_get_llm", lambda: fake_llm)
 
-        plan = [make_step(step=1, agent="ooo", oos=True)]
+        plan = [make_step(step=1, agent="oos", oos=True)]
         state = {"execution_plan": plan, "agent_results": {}, "detected_language": "es"}
 
         result = nodes.synthesizer(state)
 
         system_msg = fake_llm.invoke.call_args.args[0][0]
         assert "OUT OF SCOPE" in system_msg.content
-        assert result["messages"][0].name == "Izel"
+        assert result["messages"][0].name == "marlin"
         assert result["messages"][0].content == "Lo siento, eso está fuera de mi alcance."
 
     def test_non_oos_plan_uses_normal_instruction_and_includes_raw_content(self, monkeypatch):
@@ -502,7 +502,7 @@ class TestSynthesizer:
         result = nodes.synthesizer(state)
 
         assert result["messages"][0].content == "part one part two"
-        assert result["messages"][0].name == "Izel"
+        assert result["messages"][0].name == "marlin"
 
 
 if __name__ == "__main__":

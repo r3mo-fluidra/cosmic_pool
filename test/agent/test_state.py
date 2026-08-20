@@ -57,7 +57,7 @@ def _resolved_notrequired_keys(typed_dict_cls) -> set[str]:
     return {key for key, hint in hints.items() if get_origin(hint) is NotRequired}
 
 
-VALID_AGENT_NAMES = ["diagnosis", "dosage", "equipment", "maintenance", "ooo"]
+VALID_AGENT_NAMES = ["diagnosis", "dosage", "equipment", "maintenance", "oos"]
 
 
 @pytest.fixture
@@ -102,14 +102,14 @@ class TestExecutionStep:
 
     def test_oos_can_be_explicitly_true(self, valid_step_kwargs):
         valid_step_kwargs["oos"] = True
-        valid_step_kwargs["assigned_agent"] = "ooo"
+        valid_step_kwargs["assigned_agent"] = "oos"
         step = ExecutionStep(**valid_step_kwargs)
         assert step.oos is True
 
-    def test_oos_true_does_not_currently_enforce_ooo_agent(self, valid_step_kwargs):
+    def test_oos_true_does_not_currently_enforce_oos_agent(self, valid_step_kwargs):
         """
         Documenta un GAP del modelo actual: el docstring de `oos` dice que
-        `oos=True` DEBE implicar `assigned_agent='ooo'`, pero no existe
+        `oos=True` DEBE implicar `assigned_agent='oos'`, pero no existe
         ningún validador que lo obligue. Este test hoy PASA justamente
         porque la regla no se aplica. Si en el futuro agregan un validador
         (@model_validator / @root_validator), este test debería cambiarse
@@ -156,12 +156,12 @@ class TestPlannerOutput:
 
     def test_oos_query_single_step_shape(self):
         oos_step = ExecutionStep(
-            step=1, task="Irrelevant request", assigned_agent="ooo", oos=True
+            step=1, task="Irrelevant request", assigned_agent="oos", oos=True
         )
         output = PlannerOutput(detected_language="en", execution_plan=[oos_step])
         assert len(output.execution_plan) == 1
         assert output.execution_plan[0].oos is True
-        assert output.execution_plan[0].assigned_agent == "ooo"
+        assert output.execution_plan[0].assigned_agent == "oos"
 
 
 # =====================================================================

@@ -23,7 +23,7 @@ FACILITY_DESIGN, SAFETY, RECOVERY, RECORDS, MATH, OOS, GENERAL.
 Old-row remapping applied: diagnosis -> CHEMISTRY, dosage -> MATH,
 maintenance -> OPERATIONS (routine/procedural tasks like winterizing or backwashing,
 as distinct from EQUIPMENT which is for diagnosing hardware failure), general -> GENERAL,
-ooo -> OOS.
+ oos-> OOS.
 """
 
 data = {

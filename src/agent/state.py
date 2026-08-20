@@ -103,7 +103,7 @@ class ExecutionStep(BaseModel):
             "CRITICAL: Set to True if this step handles out-of-scope topics "
             "(e.g., human health advice, treating chemical contact, industrial "
             "waste processing, dangerous chemical synthesis, or general chit-chat). "
-            "If True, assigned_agent MUST be set to 'ooo'."
+            "If True, assigned_agent MUST be set to 'oos'."
         ),
     )
 

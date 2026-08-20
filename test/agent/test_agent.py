@@ -100,7 +100,7 @@ def test_initialize(
 
     assert agents._agents == {
         "general": general_agent,
-        "ooo": oos_agent,
+        "oos": oos_agent,
         "diagnosis": diagnosis_agent,
         "dosage": dosage_agent,
         "equipment": equipment_agent,

@@ -1,6 +1,6 @@
 # prompts_sub_agents.py
 from dataclasses import dataclass
-
+from .prompt_tools import tool_instructions_AA, tool_instructions_math
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -51,72 +51,7 @@ RECORDS = "Pool Records Agent"
 RECOVERY = "Pool Recovery & Environmental Agent"
 MATH = "Pool Math Agent"
 
-tool_instructions_AA = """
-### How to use the authorized tools
 
-You have three tools to build accurate, evidence-based answers about aquatic facilities, pools, spas, water chemistry, disinfection, risks, procedures and venue-specific operations.
-
-#### 1. vector_search
-- Use this tool **FIRST** for almost every user question.
-- Purpose: retrieve the most semantically relevant text chunks from the knowledge base.
-- Call it with the user’s original question (keep the original language; do not translate unless necessary).
-- The results give you domain vocabulary, possible entity names, synonyms and textual evidence.
-- Always inspect the returned chunks before deciding the next step.
-- If the question is very short or ambiguous, you may enrich it slightly with key terms discovered in the first results and call the tool a second time.
-
-#### 2. search_seed_nodes
-- Use this tool **AFTER** vector_search (or directly only when the question already contains very clear, specific entity names).
-- Purpose: locate the best starting nodes (seed nodes) in the Neo4j knowledge graph.
-- Pass both:
-  - the original user question, and
-  - the most relevant entity names / concepts extracted from the vector chunks.
-- The tool returns candidate nodes with id, label, name and short description.
-- Select the most relevant seed nodes (normally 2–6). Prefer nodes that are:
-  - high-quality (non-stub),
-  - central to the question intent,
-  - of useful labels (Venue, Chemical, Procedure, Hazard, WaterParameter, OperationalFocus, Requirement, etc.).
-
-#### 3. expand_subgraph
-- Use this tool **AFTER** you have chosen solid seed nodes.
-- Purpose: retrieve a controlled neighborhood (subgraph) around the seed nodes so you can see relationships, related chemicals, procedures, risks, requirements and operational priorities.
-- Always limit the expansion:
-  - Prefer **1 hop**. Use 2 hops only when the first expansion is clearly insufficient.
-  - Never exceed 2 hops.
-- Focus the expansion on the relationship types most useful for the question type:
-
-  | Question intent              | Preferred relationships                                      |
-  |-----------------------------|--------------------------------------------------------------|
-  | Chemicals / dosing / treatment | USES, REQUIRES, TREATS, PART_OF, HAS_THRESHOLD, INCREASES, DECREASES |
-  | Risks / problems / failures  | HAS_RISK, CAUSES, INDICATES, PREVENTS, AFFECTS               |
-  | Procedures / operations      | REQUIRES, PRECEDES, PERFORMED_BY, PART_OF, REQUIRES_FOCUS    |
-  | Venue-specific advice        | HAS_RISK, REQUIRES_FOCUS, SERVES, IS_A, PART_OF, AFFECTS     |
-  | Water balance / parameters   | AFFECTS, MEASURES, HAS_THRESHOLD, INCREASES, DECREASES       |
-
-- The tool returns nodes + relationships with descriptions. This is your structured evidence.
-
-### Recommended workflow
-1. Call **vector_search** with the user question.
-2. From the chunks + question, identify the main entities, intent and key vocabulary.
-3. Call **search_seed_nodes** using the question + extracted entities.
-4. Select the best 2–6 seed nodes (discard stubs or clearly irrelevant nodes).
-5. Call **expand_subgraph** with those seeds and the appropriate relationship focus.
-6. If the subgraph is too thin, you may:
-   - refine the seed list, or
-   - run a second expansion with a complementary relationship set.
-7. Combine:
-   - Textual evidence from vector_search
-   - Structured facts and relations from the subgraph
-8. Only then generate the final answer.
-
-### Important rules
-- Never skip vector_search on open or natural-language questions.
-- Never invent nodes, relationships, chemical recommendations, dosages or procedures that do not appear in the tool results.
-- If the tools return little or no relevant information, say so clearly instead of guessing.
-- Prefer precise, evidence-based answers grounded in the retrieved nodes and relationships over long generic explanations.
-- When the question is about a specific venue type (spa, wading pool, therapy pool, wave pool, etc.), always try to include the corresponding Venue node and its HAS_RISK / REQUIRES_FOCUS relations.
-- You may call the same tool more than once if the first results are insufficient.
-- In the final answer, prioritize information that comes from high-confidence or explicit relationships over inferred or stub nodes.
-"""
 
 # Escalated out of the system entirely -- no agent owns these.
 OUT_OF_SCOPE = (
@@ -196,8 +131,7 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         f"the {COMPLIANCE} and the {RECORDS} respectively.",
     ),
     tools=( 
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
@@ -240,8 +174,7 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
         OUT_OF_SCOPE,
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
@@ -285,8 +218,7 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
         OUT_OF_SCOPE,
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+            'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA,
     output_contract=_contract(
@@ -329,10 +261,14 @@ MATH_AGENT_CONFIG = AgentConfig(
         "Estimating a result when inputs are missing. Never guess a number.",
     ),
     tools=(
-        "neo4j",
-        "calculator",
+    'resolve_formula',
+    'get_constant',
+    'convert_units',
+    'lookup_product',
+    'calculate',
+    'check_plausibility',
     ),
-    tool_instructions=tool_instructions_AA,
+    tool_instructions=tool_instructions_math,
     output_contract=_contract(
         "formula_name",
         "formula_expression",
@@ -378,8 +314,7 @@ OPERATIONS_AGENT_CONFIG = AgentConfig(
         f"Whether a practice satisfies a code -- owned by the {COMPLIANCE}.",
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
@@ -429,8 +364,7 @@ COMPLIANCE_AGENT_CONFIG = AgentConfig(
         f"Flood and environmental incident recovery -- owned by the {RECOVERY}.",
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA,
     output_contract=_contract(
@@ -481,8 +415,7 @@ CONTAMINATION_AGENT_CONFIG = AgentConfig(
         OUT_OF_SCOPE,
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA,
 
@@ -532,8 +465,7 @@ FACILITY_DESIGN_AGENT_CONFIG = AgentConfig(
         OUT_OF_SCOPE,
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
@@ -580,8 +512,7 @@ SAFETY_AGENT_CONFIG = AgentConfig(
         f"{FACILITY_DESIGN}.",
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA,
     output_contract=_contract(
@@ -623,8 +554,7 @@ RECORDS_AGENT_CONFIG = AgentConfig(
         OUT_OF_SCOPE,
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA,
     output_contract=_contract(
@@ -669,8 +599,7 @@ RECOVERY_AGENT_CONFIG = AgentConfig(
         OUT_OF_SCOPE,
     ),
     tools=(
-        "neo4j",
-        "qdrant",
+        'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
     tool_instructions=tool_instructions_AA,
     output_contract=_contract(
