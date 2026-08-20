@@ -23,8 +23,10 @@ import yaml
 # ---------------------------------------------------------------------------
 # Catalog loading
 # ---------------------------------------------------------------------------
+import os
 
-DEFAULT_CATALOG_PATH = r'fluidra_ai_pool-assistant_mvp/src/tools_math/pool_math_catalog_v2.yaml'
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CATALOG_PATH = os.path.join(_MODULE_DIR, 'pool_math_catalog_v2.yaml')
 
 _catalog: Optional[dict] = None
 _index: Optional[dict] = None
@@ -62,10 +64,35 @@ def _build_index(data: dict) -> dict:
     by_id: dict[str, dict] = {}
     by_alias: dict[str, list[str]] = {}
 
-    for f in data["formulas"]:
+    for i, f in enumerate(data["formulas"]):
+        # Validate required field exists
+        if "formula_id" not in f:
+            raise CatalogError(
+                f"Formula at index {i} is missing 'formula_id'. "
+                f"Keys present: {list(f.keys())}"
+            )
+        
         fid = f["formula_id"]
+        
+        # Validate formula_id is valid (string, non-empty)
+        if not isinstance(fid, str) or not fid.strip():
+            raise CatalogError(
+                f"Formula at index {i} has invalid formula_id: {fid!r} "
+                f"(must be non-empty string)"
+            )
+        
+        # Check for duplicates early
+        if fid in by_id:
+            raise CatalogError(
+                f"Duplicate formula_id '{fid}' found at indices "
+                f"{data['formulas'].index(by_id[fid])} and {i}"
+            )
+        
         by_id[fid] = f
-        for key in _alias_keys(fid) + [_norm(a) for a in f.get("aliases", [])]:
+        
+        # Build alias index
+        aliases = _alias_keys(fid) + [_norm(a) for a in f.get("aliases", [])]
+        for key in aliases:
             by_alias.setdefault(key, [])
             if fid not in by_alias[key]:
                 by_alias[key].append(fid)
@@ -86,7 +113,8 @@ def _group(items: list[dict], key: str) -> dict[str, list[str]]:
 
 def index() -> dict:
     load_catalog()
-    assert _index is not None
+    if _index is None:
+        raise CatalogError("Index failed to build; check YAML schema")
     return _index
 
 
