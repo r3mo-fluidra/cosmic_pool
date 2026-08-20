@@ -8,7 +8,7 @@ from langchain_core.tools import tool
 from langchain.agents import create_agent
 from langgraph_supervisor import create_supervisor
 
-from src.tools_math import MATH_TOOLS, load_catalog
+from ..tools_math.tools import MATH_TOOLS
 from .agent_names import AgentName
 from ..config.llm import create_llm, create_routing_llm, create_synthesizer_llm
 from ..prompts.prompts import (
@@ -36,7 +36,7 @@ from .tools import (
     search_seed_nodes,
     expand_subgraph,
     )
-from ..tools_math.tools import MATH_TOOLS
+
 
 # ================================================================
 # TOOLS
@@ -163,7 +163,7 @@ def _initialize():
 
     math_agent = create_agent(
         model=_synthesizer_llm,
-        tools=[MATH_TOOLS],
+        tools=MATH_TOOLS,
         name="math",
         system_prompt=build_agent_prompt(AGENT_REGISTRY[MATH]),
     )
