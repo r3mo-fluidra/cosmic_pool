@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from langchain_core.tools import tool
 
-from tools_math.catalog import (
+from .catalog import (
     DISAMBIGUATION,
     CalcResult,
     CatalogError,
