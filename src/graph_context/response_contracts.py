@@ -161,7 +161,7 @@ ARCHETYPE_CONTRACTS = {
 
     "calculation": {
         "shape": "Result with its unit in one sentence. Then 2-4 actions of ≤12 words.",
-        "budget": 80,
+        "budget": 800,
         "details": [
             "How it was calculated",
             "Formula and assumptions",
@@ -171,7 +171,7 @@ ARCHETYPE_CONTRACTS = {
     },
     "assessment": {
         "shape": "One-sentence verdict: what is out of range or what fails in the design. Then the first verification.",
-        "budget": 90,
+        "budget": 900,
         "details": [
             "Other possible causes",
             "How to confirm"
@@ -181,7 +181,7 @@ ARCHETYPE_CONTRACTS = {
 
     "procedure": {
         "shape": "3-5 numbered steps in execution order.",
-        "budget": 100,
+        "budget": 1000,
         "details": [
             "Required tools",
             "Common mistakes",
@@ -191,7 +191,7 @@ ARCHETYPE_CONTRACTS = {
     },
     "reference": {
         "shape": "List of fields or elements. No narrative between items.",
-        "budget": 90,
+        "budget": 900,
         "details": [
             "Retention and format",
             "Requirement that originates it"
@@ -201,7 +201,7 @@ ARCHETYPE_CONTRACTS = {
 
     "compliance": {
         "shape": "Verdict (required / permitted / not permitted) and the standard that establishes it.",
-        "budget": 70,
+        "budget": 700,
         "details": [
             "Standard text",
             "What the inspector verifies"
@@ -211,13 +211,13 @@ ARCHETYPE_CONTRACTS = {
 
     "conversational": {
         "shape": "One brief, warm paragraph.",
-        "budget": 35,
+        "budget": 350,
         "details": [],
         "safety_required": False,
     },
     "oos": {
         "shape": "Brief redirection to the pool domain.",
-        "budget": 30,
+        "budget": 300,
         "details": [],
         "safety_required": False,
     },
