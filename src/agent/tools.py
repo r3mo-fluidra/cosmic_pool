@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 import threading
-from typing import Optional, Sequence, Any, Iterable
+from typing import Optional, Sequence, Any, Literal
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool, ToolException
@@ -34,7 +35,19 @@ DEFAULT_PREFERRED_RELS = [
     "PART_OF", "CONTAINS", "APPLIES_TO",
     "PREVENTS", "INDICATES", "MEASURED_BY", "PROCEDURE_FOR",
 ]
- 
+INTENT_LABELS: dict[str, tuple[str, ...]] = {
+    "normative":   ("Requirement", "WaterParameter", "Threshold", "Standard", "Code"),
+    "procedural":  ("Procedure", "Operation", "Task", "Role"),
+    "diagnostic":  ("Hazard", "Symptom", "Cause", "Risk", "Chemical"),
+    "descriptive": ("Concept", "Chemical", "Equipment", "Venue"),
+    "any":         TOP_PRIORITY_LABELS,
+}
+
+# Un seed cuya etiqueta no puede responder la pregunta se degrada, no se elimina:
+# puede seguir siendo útil como contexto, pero no debe encabezar la lista.
+OFF_INTENT_PENALTY = 0.45
+ABSOLUTE_FLOOR = 0.35          # por debajo de esto, ningún seed es fiable
+NEIGHBOR_LIMIT = 8
 # Relaciones genéricas: se permiten a 1 hop pero explotan por hubs a 2+.
 # Se bloquean en expansión multi-hop, no en la lista de preferidas.
 GENERIC_RELS = ["RELATED_TO", "MENTIONED_IN", "SEE_ALSO"]
@@ -513,51 +526,83 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
 # TOOL 1 — search_seed_nodes
 # ---------------------------------------------------------------------------
  
+
+@lru_cache(maxsize=1)
+def _fulltext_available() -> bool:
+    # _has_fulltext_index hacía un round-trip a Neo4j en cada invocación.
+    return _has_fulltext_index(get_neo4j_driver())
+
+
+_NEIGHBOR_CYPHER = """
+MATCH (s) WHERE s.id IN $seed_ids
+MATCH (s)-[r]-(n)
+WHERE any(l IN labels(n) WHERE l IN $intent_labels)
+  AND NOT n.id IN $seed_ids
+RETURN DISTINCT n.id AS id,
+       labels(n) AS labels,
+       n.name AS name,
+       type(r) AS rel,
+       coalesce(n.description, n.summary, '') AS description
+LIMIT $limit
+"""
+
+
 @tool
 def search_seed_nodes(
     query: str,
+    intent: Literal["normative", "procedural", "diagnostic", "descriptive", "any"] = "any",
     vector_chunks: str = "",
     top_k: int = 5,
 ) -> str:
     """
-    Find the most relevant seed nodes in the Neo4j graph for a question.
- 
-    Scores nodes by how much of the QUESTION they cover (name > aliases >
-    keywords > description), normalized so that nodes with long keyword lists
-    do not win by surface area alone.
- 
-    Returns up to top_k seeds with id, labels, aliases, keywords and
-    description. Returns an explicit NO_GRAPH_COVERAGE marker when the graph
-    has nothing relevant — in that case do NOT invent node ids.
+    Find the most relevant seed nodes in the Neo4j graph for a question, plus
+    the normative/procedural nodes one hop away from them.
+
+    Pass `intent` so that node labels capable of answering the question are
+    ranked first. Use "normative" for any question about a threshold, range,
+    limit, requirement or code provision — otherwise an Equipment or Concept
+    node may outrank the Requirement node that holds the actual answer.
+
+    The first line of the result is a machine-readable STATUS:
+      OK                 usable seeds found; related nodes listed
+      WEAK               seeds found but confidence is low; treat as unconfirmed
+      NO_GRAPH_COVERAGE  nothing relevant. STOP retrieving on this topic.
+
+    When related nodes are returned they are already answer candidates: if one
+    of them states the value asked for, call expand_subgraph on it once, or
+    answer directly. Do not run further vector searches to confirm it.
     """
     driver = get_neo4j_driver()
     tok = _tokenize(query, vector_chunks)
     terms = tok["terms"]
- 
+
     if not terms:
         return (
-            "NO_GRAPH_COVERAGE: la consulta no contiene términos buscables.\n"
-            "No hay seeds. No inventes ids de nodo."
+            "STATUS: NO_GRAPH_COVERAGE\n"
+            "La consulta no contiene términos buscables. No hay seeds.\n"
+            "No inventes ids de nodo. Reporta insufficient_evidence y detente."
         )
- 
+
+    intent_labels = INTENT_LABELS.get(intent, INTENT_LABELS["any"])
     min_score = MIN_SCORE_MULTI if len(terms) >= 2 else MIN_SCORE_SINGLE
- 
+
     params: dict[str, Any] = {
         "terms": terms,
         "bigrams": tok["bigrams"],
         "numeric_terms": tok["numeric_terms"],
         "phrase": tok["phrase"],
         "structural_labels": STRUCTURAL_LABELS,
-        "top_priority_labels": TOP_PRIORITY_LABELS,
+        "top_priority_labels": list(intent_labels),   # ← antes: constante global
         "w_name": W_NAME, "w_alias": W_ALIAS,
         "w_keyword": W_KEYWORD, "w_desc": W_DESC,
         "w_bigram": W_BIGRAM, "bigram_cap": BIGRAM_CAP,
         "w_numeric": W_NUMERIC, "w_label": W_LABEL,
         "min_score": min_score,
-        "top_k": max(1, min(int(top_k), 10)),
+        # se sobre-recupera para que el re-rank por intención tenga con qué trabajar
+        "top_k": max(1, min(int(top_k), 10)) * 3,
     }
- 
-    use_ft = _has_fulltext_index(driver)
+
+    use_ft = _fulltext_available()
     if use_ft:
         cypher = _FULLTEXT_HEAD + _SCORING_BODY
         params["ft_index"] = FULLTEXT_INDEX
@@ -565,37 +610,60 @@ def search_seed_nodes(
         params["candidate_limit"] = CANDIDATE_LIMIT
     else:
         cypher = _SCAN_HEAD + _SCORING_BODY
- 
+
     try:
         with driver.session() as session:
             rows = list(session.run(cypher, **params))
     except Exception as e:
-        raise ToolException(
-            f"search_seed_nodes falló: {type(e).__name__}: {e}"
-        ) from e
- 
+        raise ToolException(f"search_seed_nodes falló: {type(e).__name__}: {e}") from e
+
     if not rows:
         return (
-            "NO_GRAPH_COVERAGE: ningún nodo del grafo cubre esta consulta.\n"
-            f"Términos buscados: {', '.join(terms)}\n"
-            "No hay seeds. No inventes ids de nodo ni llames a expand_subgraph."
+            "STATUS: NO_GRAPH_COVERAGE\n"
+            f"Ningún nodo del grafo cubre esta consulta. Términos: {', '.join(terms)}\n"
+            "No inventes ids de nodo ni llames a expand_subgraph.\n"
+            "No reformules esta búsqueda. Reporta insufficient_evidence y detente."
         )
- 
-    # Gate relativo: si el top saca 0.82, los de 0.40 son ruido, no seeds débiles
-    top_score = rows[0]["score"]
-    kept = [r for r in rows if r["score"] >= RELATIVE_GATE * top_score]
- 
+
+    # Re-rank por intención ANTES del gate relativo. Sin esto el gate se ancla
+    # al top_score de un nodo con la etiqueta equivocada y arrastra a todos.
+    scored = []
+    for r in rows:
+        node = r["node"]
+        on_intent = bool(set(node.labels) & set(intent_labels))
+        adj = r["score"] if (on_intent or intent == "any") else r["score"] * OFF_INTENT_PENALTY
+        scored.append((adj, r["score"], node, on_intent))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    limit = max(1, min(int(top_k), 10))
+    top_adj = scored[0][0]
+    kept = [s for s in scored if s[0] >= RELATIVE_GATE * top_adj][:limit]
+
+    status = "OK"
+    if top_adj < ABSOLUTE_FLOOR or not any(s[3] for s in kept):
+        status = "WEAK"
+
     parts: list[str] = [
-        f"=== {len(kept)} seed(s) | términos: {', '.join(terms)} "
-        f"| modo: {'fulltext' if use_ft else 'scan'} ===\n"
+        f"STATUS: {status}",
+        f"=== {len(kept)} seed(s) | intent: {intent} | términos: {', '.join(terms)} "
+        f"| modo: {'fulltext' if use_ft else 'scan'} ===\n",
     ]
-    for i, record in enumerate(kept, 1):
-        node = record["node"]
+    if status == "WEAK":
+        parts.append(
+            f"AVISO: ningún seed con etiqueta capaz de responder una pregunta "
+            f"'{intent}'. El grafo probablemente no modela esto. Una búsqueda "
+            f"más como máximo, después reporta insufficient_evidence.\n"
+        )
+
+    seed_ids: list[str] = []
+    for i, (adj, raw, node, on_intent) in enumerate(kept, 1):
         node_id = node.get("id") or node.element_id
+        seed_ids.append(node_id)
         aliases = _as_list(node.get("aliases"))
         keywords = _as_list(node.get("keywords"))
+        flag = "" if on_intent else "  [off-intent: contexto, no respuesta]"
         parts.append(
-            f"--- Seed {i} (score: {record['score']:.3f}) ---\n"
+            f"--- Seed {i} (score: {adj:.3f}{'' if adj == raw else f' / raw {raw:.3f}'}){flag} ---\n"
             f"ID: {node_id}\n"
             f"Name: {node.get('name') or node_id}\n"
             f"Label(s): {', '.join(node.labels)}\n"
@@ -604,9 +672,37 @@ def search_seed_nodes(
             f"Description: "
             f"{_truncate(node.get('description') or node.get('summary') or '', MAX_DESC_CHARS) or '—'}\n"
         )
- 
+
+    # Un salto hacia las etiquetas que responden la pregunta. Esto es lo que
+    # evita el viaje extra a expand_subgraph — y lo que hace innecesario que el
+    # agente adivine slugs.
+    try:
+        with driver.session() as session:
+            neighbors = list(session.run(
+                _NEIGHBOR_CYPHER,
+                seed_ids=seed_ids,
+                intent_labels=list(intent_labels),
+                limit=NEIGHBOR_LIMIT,
+            ))
+    except Exception:
+        neighbors = []   # degradación silenciosa: los seeds ya son útiles
+
+    if neighbors:
+        parts.append(f"\n=== {len(neighbors)} nodo(s) {intent} a 1 salto ===\n")
+        for n in neighbors:
+            parts.append(
+                f"  [{'/'.join(n['labels'])}] {n['name'] or n['id']} (id: {n['id']}) "
+                f"vía {n['rel']}\n"
+                f"    {_truncate(n['description'], MAX_DESC_CHARS)}\n"
+            )
+        parts.append(
+            "\nEstos nodos son candidatos a respuesta. Si uno de ellos contiene "
+            "el valor pedido, ya tienes la respuesta: cítalo y detente. No "
+            "busques confirmación en prosa.\n"
+        )
+
     parts.append(
-        "\nUsa EXACTAMENTE los valores de ID de arriba en expand_subgraph. "
+        "Usa EXACTAMENTE los IDs de arriba en expand_subgraph. "
         "No construyas ids que no aparezcan en esta lista."
     )
     return "\n".join(parts)
