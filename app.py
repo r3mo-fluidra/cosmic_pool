@@ -8,8 +8,8 @@ from langfuse.langchain import CallbackHandler
 from langchain_core.messages import HumanMessage, AIMessage
 
 # Import your compiled LangGraph workflow
-from .src.agent.graph import graph
-from .src.ui.theme import (
+from src.agent.graph import graph
+from src.ui.theme import (
     SCREEN_HEIGHT_PX,
     assistant_label,
     inject_theme,
