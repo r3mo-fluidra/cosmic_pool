@@ -12,7 +12,7 @@ from langchain_core.tools import tool, ToolException
 from neo4j import GraphDatabase, Driver
 from streamlit import secrets
 
-from ...src.qdrant_vector_store import cargar_vector_store, VectorStoreConfigError
+from ..qdrant_vector_store import cargar_vector_store, VectorStoreConfigError
 
 load_dotenv()
 
