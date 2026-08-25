@@ -70,7 +70,7 @@ from .state import PoolAgentState
 from .nodes import (
     planner,
     orchestrator,
-    run_step,
+    run_step_node,
     synthesizer,
     build_context_node,
     summarize_memory_node,
@@ -126,7 +126,7 @@ def build_graph(checkpointer=None):
 
     builder.add_node(
         "run_step",
-        run_step,
+        run_step_node,
         destinations=["orchestrator"],
     )
 

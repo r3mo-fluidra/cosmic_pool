@@ -400,54 +400,6 @@ def planner(state: PoolAgentState, config: RunnableConfig):
 # ORCHESTRATOR NODE
 # ================================================================
 
-# @observe(as_type="agent", name="Orchestrator Node")
-# def orchestrator(state: PoolAgentState) -> Command:
-#     execution_plan = state.get("execution_plan", [])
-#     agent_results  = dict(state.get("agent_results") or {})
-#     current_idx    = state.get("current_step", 0)
-
-#     if not execution_plan:
-#         return Command(
-#             update={"error": "execution_plan is empty; cannot orchestrate."},
-#             goto="synthesizer",
-#         )
-
-#     if current_idx >= len(execution_plan):
-#         return Command(goto="synthesizer")
-
-#     step     = execution_plan[current_idx]
-#     step_key = f"step_{step.step}"
-
-#     messages = state.get("messages", [])
-#     user_message = ""
-#     for msg in reversed(messages):
-#         if hasattr(msg, "type") and msg.type == "human":
-#             user_message = _extract_text(msg.content)
-#             break
-
-#     try:
-#         agent_result = _run_step(step, user_message)
-#     except Exception as exc:
-#         agent_result = AgentResult(
-#             agent=step.assigned_agent,
-#             step=step.step,
-#             output="",
-#             error=str(exc),
-#         )
-
-#     agent_results[step_key] = agent_result
-
-#     next_idx = current_idx + 1
-#     goto = "orchestrator" if next_idx < len(execution_plan) else "synthesizer"
-
-#     return Command(
-#         update={
-#             "agent_results": agent_results,
-#             "current_step": next_idx,
-#         },
-#         goto=goto,
-#     )
-
 @observe(as_type="agent", name="Orchestrator Node")
 def orchestrator(state: PoolAgentState) -> Command:
     execution_plan = state.get("execution_plan", [])
@@ -462,8 +414,16 @@ def orchestrator(state: PoolAgentState) -> Command:
     done_keys = set(agent_results.keys())
     pending   = [s for s in execution_plan if f"step_{s.step}" not in done_keys]
 
+    # ── Fan-out terminal ──────────────────────────────────────────────────
     if not pending:
-        return Command(goto="synthesizer")
+        # El archetype se resuelve AQUÍ, no en el synthesizer: es el único
+        # punto donde ambas ramas lo ven, y suggester lo necesita para su
+        # gate de supresión.
+        archetype = resolve_archetype(execution_plan, agent_results)
+        return Command(
+            update={"archetype": archetype},
+            goto=["synthesizer", "suggester"],
+        )
 
     ready = [
         s for s in pending
@@ -471,8 +431,6 @@ def orchestrator(state: PoolAgentState) -> Command:
     ]
 
     if not ready:
-        # hay steps pendientes pero ninguno con dependencias resueltas
-        # -> plan mal formado (ciclo o depends_on inválido)
         return Command(
             update={"error": f"Deadlock in execution_plan: {[s.step for s in pending]} blocked."},
             goto="synthesizer",
