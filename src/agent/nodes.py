@@ -356,26 +356,8 @@ def planner(state: PoolAgentState, config: RunnableConfig):
 
     fallback_language = state.get("detected_language") or "es"
 
-    # ── Frontera de turno ─────────────────────────────────────────────────
-    # El planner es el único punto donde el turno anterior está garantizado
-    # cerrado. Todo lo que sea per-turn se resetea AQUÍ y en ningún otro sitio.
-    #
-    # agent_results = None es un sentinel, no un valor: el reducer
-    # merge_agent_results lo interpreta como RESET. Un {} sería un no-op,
-    # porque {...previo} | {} == {...previo}, y los resultados del turno
-    # anterior sobrevivirían al fan-out (bug: respuesta de España servida
-    # a una pregunta sobre celda salina).
-    turn_reset = {
-        "agent_results": None,
-        "archetype": None,
-        "response": None,
-        "validation": None,
-        "suggestions": [],
-        "error": None,
-        "planner_error": None,
-    }
-
     try:
+        # ✅ Lazy — planner chain se inicializa solo aquí
         plan = _get_planner_chain().invoke([
             {"role": "system", "content": PLANNER_PROMPT},
             {"role": "user",   "content": context_for_planner},
@@ -388,16 +370,16 @@ def planner(state: PoolAgentState, config: RunnableConfig):
         fallback_step = ExecutionStep(
             step=1, task=user_input, assigned_agent="general", oos=False
         )
-        # El error NO va en agent_results: esa clave se está reseteando en
-        # este mismo Command y el sentinel lo borraría. Va en planner_error,
-        # que el synthesizer lee para su rama degradada.
         return Command(
             update={
-                **turn_reset,
                 "detected_language": fallback_language,
                 "execution_plan": [fallback_step],
                 "current_step": 1,
-                "planner_error": str(e),
+                "agent_results": {
+                    "step_1": AgentResult(
+                        agent="planner", step=1, output="", error=str(e)
+                    )
+                },
             },
             goto="synthesizer",
         )
@@ -406,10 +388,10 @@ def planner(state: PoolAgentState, config: RunnableConfig):
 
     return Command(
         update={
-            **turn_reset,
             "detected_language": detected_language,
             "execution_plan": plan.execution_plan,
             "current_step": 0,
+            "agent_results": {},
         },
         goto="orchestrator",
     )
@@ -417,6 +399,54 @@ def planner(state: PoolAgentState, config: RunnableConfig):
 # ================================================================
 # ORCHESTRATOR NODE
 # ================================================================
+
+# @observe(as_type="agent", name="Orchestrator Node")
+# def orchestrator(state: PoolAgentState) -> Command:
+#     execution_plan = state.get("execution_plan", [])
+#     agent_results  = dict(state.get("agent_results") or {})
+#     current_idx    = state.get("current_step", 0)
+
+#     if not execution_plan:
+#         return Command(
+#             update={"error": "execution_plan is empty; cannot orchestrate."},
+#             goto="synthesizer",
+#         )
+
+#     if current_idx >= len(execution_plan):
+#         return Command(goto="synthesizer")
+
+#     step     = execution_plan[current_idx]
+#     step_key = f"step_{step.step}"
+
+#     messages = state.get("messages", [])
+#     user_message = ""
+#     for msg in reversed(messages):
+#         if hasattr(msg, "type") and msg.type == "human":
+#             user_message = _extract_text(msg.content)
+#             break
+
+#     try:
+#         agent_result = _run_step(step, user_message)
+#     except Exception as exc:
+#         agent_result = AgentResult(
+#             agent=step.assigned_agent,
+#             step=step.step,
+#             output="",
+#             error=str(exc),
+#         )
+
+#     agent_results[step_key] = agent_result
+
+#     next_idx = current_idx + 1
+#     goto = "orchestrator" if next_idx < len(execution_plan) else "synthesizer"
+
+#     return Command(
+#         update={
+#             "agent_results": agent_results,
+#             "current_step": next_idx,
+#         },
+#         goto=goto,
+#     )
 
 @observe(as_type="agent", name="Orchestrator Node")
 def orchestrator(state: PoolAgentState) -> Command:
@@ -432,16 +462,8 @@ def orchestrator(state: PoolAgentState) -> Command:
     done_keys = set(agent_results.keys())
     pending   = [s for s in execution_plan if f"step_{s.step}" not in done_keys]
 
-    # ── Fan-out terminal ──────────────────────────────────────────────────
     if not pending:
-        # El archetype se resuelve AQUÍ, no en el synthesizer: es el único
-        # punto donde ambas ramas lo ven, y suggester lo necesita para su
-        # gate de supresión.
-        archetype = resolve_archetype(execution_plan, agent_results)
-        return Command(
-            update={"archetype": archetype},
-            goto=["synthesizer", "suggester"],
-        )
+        return Command(goto="synthesizer")
 
     ready = [
         s for s in pending
@@ -449,6 +471,8 @@ def orchestrator(state: PoolAgentState) -> Command:
     ]
 
     if not ready:
+        # hay steps pendientes pero ninguno con dependencias resueltas
+        # -> plan mal formado (ciclo o depends_on inválido)
         return Command(
             update={"error": f"Deadlock in execution_plan: {[s.step for s in pending]} blocked."},
             goto="synthesizer",
