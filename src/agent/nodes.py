@@ -2,7 +2,7 @@ from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, Base
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 import logging
-from langfuse import observe
+from langfuse import observe, langfuse_context
 from typing import List, Literal
 import concurrent.futures
 from .state import PoolAgentState, ExecutionStep, AgentResult
@@ -70,6 +70,20 @@ def _flatten(content) -> str:
         ).strip()
     return str(content).strip()
 
+_SERVICE_UNAVAILABLE_TEXT = {
+    "es": "Lo siento, nuestro asistente está experimentando una interrupción temporal por alta demanda. Probá de nuevo en unos minutos.",
+    "en": "Sorry, our assistant is experiencing a temporary service interruption due to high demand. Please try again in a few minutes.",
+}
+
+def static_service_unavailable_payload(output_cls, language_code: str):
+    text = _SERVICE_UNAVAILABLE_TEXT.get(language_code, _SERVICE_UNAVAILABLE_TEXT["es"])
+    return output_cls(
+        archetype="conversational",
+        answer=text,
+        actions=[],
+        safety=None,
+        details=[],
+    )
 
 def _attach_sources(payload: SynthesizerOutput, results: list) -> None:
     seen, srcs = set(), []
@@ -319,7 +333,7 @@ def summarize_memory_node(state: PoolAgentState) -> Command[Literal["planner"]]:
 @observe(as_type='agent', name="Planner Node")
 def planner(state: PoolAgentState, config: RunnableConfig):
     thread_id = config["configurable"]["thread_id"]
-    reset_turn(thread_id)  
+    reset_turn(thread_id)
     user_input = state["messages"][-1].content
 
     agent_messages = [
@@ -340,13 +354,37 @@ def planner(state: PoolAgentState, config: RunnableConfig):
         else user_input
     )
 
-    # ✅ Lazy — planner chain se inicializa solo aquí
-    plan = _get_planner_chain().invoke([
-        {"role": "system", "content": PLANNER_PROMPT},
-        {"role": "user",   "content": context_for_planner},
-    ])
+    fallback_language = state.get("detected_language") or "es"
 
-    detected_language = plan.detected_language or state.get("detected_language") or "es"
+    try:
+        # ✅ Lazy — planner chain se inicializa solo aquí
+        plan = _get_planner_chain().invoke([
+            {"role": "system", "content": PLANNER_PROMPT},
+            {"role": "user",   "content": context_for_planner},
+        ])
+    except Exception as e:
+        langfuse_context.update_current_observation(
+            level="WARNING",
+            status_message=f"planner_llm_failed: {e}",
+        )
+        fallback_step = ExecutionStep(
+            step=1, task=user_input, assigned_agent="general", oos=False
+        )
+        return Command(
+            update={
+                "detected_language": fallback_language,
+                "execution_plan": [fallback_step],
+                "current_step": 1,
+                "agent_results": {
+                    "step_1": AgentResult(
+                        agent="planner", step=1, output="", error=str(e)
+                    )
+                },
+            },
+            goto="synthesizer",  # sin plan real, no tiene sentido pasar por orchestrator
+        )
+
+    detected_language = plan.detected_language or fallback_language
 
     return Command(
         update={
