@@ -96,7 +96,7 @@ the history must not carry Tier 2 content that the user never read.
         if self.actions:
             parts.append("\n".join(f"- {a}" for a in self.actions))
         if self.safety:
-            parts.append(f"⚠️ {self.safety.strip()}")
+            parts.append(f"!!! {self.safety.strip()}")
         return "\n\n".join(p for p in parts if p)
 
     def to_markdown(self) -> str:

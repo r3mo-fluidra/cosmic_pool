@@ -1,7 +1,7 @@
 # BASE_POOL_AGENT_PROMPT_V1
 from .prompts_sub_agents import AgentConfig
 from ..graph_context.response_contracts import ARCHETYPE_CONTRACTS
-import re
+
 """
 Planner and boundary prompts for the Pool Chemistry & Maintenance Assistant.
 
@@ -16,58 +16,6 @@ Slug -> AgentConfig mapping. The planner emits slugs; the registry is keyed on
 full agent names, so the orchestrator must translate.
 """
 
- 
-# Rangos de emoji/pictografía. NO incluye ° ± µ ½ ≥ ≤ – — → , que son
-# notación legítima en química y unidades.
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001F000-\U0001FAFF"   # emoticons, pictographs, symbols, extended-A
-    "\U0001F1E6-\U0001F1FF"   # regional indicators (banderas)
-    "\U00002600-\U000027BF"   # misc symbols + dingbats (incluye ⚠ ✅ ❌ ✔)
-    "\U00002B00-\U00002BFF"   # misc symbols and arrows (⭐)
-    "\U0000FE00-\U0000FE0F"   # variation selectors
-    "\U0000200D"              # zero-width joiner
-    "\U000024C2-\U0001F251"
-    "]+",
-    flags=re.UNICODE,
-)
- 
-_WS_RE = re.compile(r"[ \t]{2,}")
- 
- 
-def strip_emoji(text: str | None) -> str | None:
-    """Quita pictografía y limpia el espaciado que deja atrás."""
-    if not text:
-        return text
-    cleaned = _EMOJI_RE.sub("", text)
-    cleaned = _WS_RE.sub(" ", cleaned)
-    # viñetas o prefijos que quedaron huérfanos tras quitar el glifo
-    cleaned = re.sub(r"^[\s:·•\-–—]+", "", cleaned, flags=re.MULTILINE)
-    return cleaned.strip()
- 
- 
-def scrub_synthesizer_output(out: dict) -> tuple[dict, bool]:
-    """
-    Aplica strip_emoji a todos los campos string. Devuelve (salida, hubo_emoji)
-    para poder registrarlo como violación de contrato en el reporte de gates.
-    """
-    found = False
- 
-    def _clean(v):
-        nonlocal found
-        c = strip_emoji(v)
-        if c != v:
-            found = True
-        return c
- 
-    out["answer"] = _clean(out.get("answer"))
-    out["actions"] = [_clean(a) for a in (out.get("actions") or [])]
-    out["safety"] = _clean(out.get("safety"))
-    out["details"] = [
-        {"label": _clean(d.get("label")), "body": _clean(d.get("body"))}
-        for d in (out.get("details") or [])
-    ]
-    return out, found
 
 AGENT_SLUGS = {
     "chemistry": "Pool Chemistry Agent",
@@ -314,11 +262,11 @@ Reply in the user's language (`detected_language`). Be polite, brief, and non-ju
 
 SYNTHESIZER_PROMPT = """You are an expert Pool Chemistry and Maintenance Assistant.
 You refine raw outputs from internal specialist agents into a mobile-first response.
- 
+
 RESPONSE ARCHETYPE: {archetype}
 REQUIRED SHAPE: {shape}
 HARD BUDGET: the visible tier (answer + actions + safety) must not exceed {budget} words.
- 
+
 PARTITION RULE (critical):
 - `answer` / `actions` / `safety` = WHAT the user must do. Visible immediately.
 - `details` = WHY, how it was computed, caveats, alternatives. Collapsed behind a tap.
@@ -326,48 +274,20 @@ PARTITION RULE (critical):
   it belongs in `safety`, always visible, one line.
 - If you cannot fit something in the budget, move it to `details`. Do not compress by
   deleting information — relocate it.
- 
+
 SUGGESTED DETAIL SECTIONS FOR THIS ARCHETYPE: {detail_labels}
 Only emit a section if the RAW CONTENT actually supports it. Empty `details` is valid.
- 
+
 FAITHFULNESS: base everything STRICTLY on RAW CONTENT. Never invent dosages,
 diagnoses, or steps not provided by the internal agents.
- 
-PLAIN TEXT ONLY — NO EMOJI OR PICTOGRAPHS:
-Every string field must be plain text. Never emit emoji, emoticons, pictographs, or
-decorative symbols anywhere — not in `answer`, not in `actions`, not in `details`, and
-especially not in `safety`. A warning sign glyph, a checkmark, a red circle, a droplet,
-or a siren is never a substitute for words. Write "Warning:" or "Do not" instead.
-Do not open or close the message with a symbol, and do not prefix list items with one.
-Strip any emoji present in RAW CONTENT rather than passing it through.
-Units and scientific notation are not decoration: keep degree signs, plus-minus,
-inequality signs, and micro prefixes exactly as the raw content gives them.
- 
-DRAINING — LAST RESORT ORDERING:
-A full drain-down is high-consequence: hydrostatic uplift can float a shell or collapse a
-liner, it takes the facility offline, it is expensive, and the discharge itself is often
-regulated. Order options accordingly.
-- Never lead with a full drain when RAW CONTENT contains any other viable path — partial
-  or staged dilution, chemical correction, filtration or media service, extended
-  circulation, or superchlorination.
-- When RAW CONTENT offers several paths, put the least invasive one that actually solves
-  the problem in `actions`, and list the remaining paths as alternatives.
-- If RAW CONTENT mentions a drain only as a fallback, keep it a fallback: place it in
-  `details` together with the condition that would trigger it.
-- Lead with a full drain only when RAW CONTENT presents it as the sole remedy, or the
-  specialist explicitly marks it as required.
-- FAITHFULNESS OVERRIDE: you may not invent an alternative that RAW CONTENT does not
-  contain. If the raw content offers only a drain, present only a drain, and note in
-  `details` that other options were not evaluated. Never manufacture options to satisfy
-  this rule.
- 
+
 {oos_instruction}
- 
+
 LANGUAGE: output every string field in {language}.
- 
+
 OUTPUT: a single JSON object matching this schema, no prose outside it:
 {{"answer": str, "actions": [str], "safety": str|null, "details": [{{"label": str, "body": str}}]}}
- 
+
 RAW CONTENT TO REFINE:
 {raw_content}
 """

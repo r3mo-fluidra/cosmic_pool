@@ -15,7 +15,7 @@ def create_llm():
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=40,
         temperature=0.2,
-        max_retries=1,  # evita que el cliente subdivida el deadline < 10s
+        max_retries=3,  # evita que el cliente subdivida el deadline < 10s
     )
 
 def create_routing_llm():
@@ -24,7 +24,7 @@ def create_routing_llm():
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=40,
         temperature=0.0,
-        max_retries=1,
+        max_retries=3,
     )
 
 def create_synthesizer_llm():
@@ -33,7 +33,7 @@ def create_synthesizer_llm():
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=40,
         temperature=0.4,
-        max_retries=1,
+        max_retries=3,
     )
 
 def create_suggester_llm():
@@ -42,5 +42,5 @@ def create_suggester_llm():
         google_api_key=_get_secret("GEMINI_API_KEY"),
         temperature=0.3,
         timeout=40,        # se corta solo, no hace falta wrapper externo
-        max_retries=1      # sin retry en 429 — degradamos a [] nosotros
+        max_retries=3      # sin retry en 429 — degradamos a [] nosotros
     )
