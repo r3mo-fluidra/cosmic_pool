@@ -2,7 +2,7 @@
 utils/
 old/
 .utils/
-
+.sandbox/
 https://github.com/Zodiac-Engineering/fluidra_ai_pool-assistant_mvp.git
 
 git config --global user.name "Javier Hernandez"
