@@ -374,14 +374,11 @@ def planner(state: PoolAgentState, config: RunnableConfig):
             update={
                 "detected_language": fallback_language,
                 "execution_plan": [fallback_step],
-                "current_step": 1,
-                "agent_results": {
-                    "step_1": AgentResult(
-                        agent="planner", step=1, output="", error=str(e)
-                    )
-                },
+                "current_step": 0,          # ← 0, no 1: el orchestrator cuenta desde cero
+                "agent_results": {},        # ← vacío; step_1 aún no corrió
+                "planner_error": str(e),
             },
-            goto="synthesizer",
+            goto="orchestrator",            # ← que el plan de fallback SÍ se ejecute
         )
 
     detected_language = plan.detected_language or fallback_language
