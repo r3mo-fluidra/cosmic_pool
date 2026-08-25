@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Dict, List, Literal, Optional, TypedDict
 from typing_extensions import NotRequired
+import operator
 
 from pydantic import BaseModel, Field
 from langchain_core.messages import BaseMessage, AIMessage
@@ -105,6 +106,15 @@ class ExecutionStep(BaseModel):
             "waste processing, dangerous chemical synthesis, or general chit-chat). "
             "If True, assigned_agent MUST be set to 'oos'."
         ),
+    ),
+    depends_on: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Step numbers this step must wait for. Leave empty if this step "
+            "is independent and can run in parallel with other steps. Only "
+            "populate when this step genuinely needs the OUTPUT of another "
+            "step (not just related topic area)."
+        ),
     )
 
 
@@ -160,7 +170,7 @@ class PoolAgentState(TypedDict):
     current_step: NotRequired[int]          # 0-based index
 
     # ── Sub-agent results (dual-track pattern) ───────────────────────
-    agent_results: NotRequired[Dict[str, AgentResult]]
+    agent_results: NotRequired[Annotated[Dict[str, AgentResult], operator.or_]]
     # Keys: "step_1", "step_2", ...
     # ── Response contract (NUEVO) ────────────────────────────────────
     archetype: NotRequired[str]

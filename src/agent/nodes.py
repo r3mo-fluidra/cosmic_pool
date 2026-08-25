@@ -1,6 +1,6 @@
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, BaseMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.types import Command
+from langgraph.types import Command, Send
 import logging
 from langfuse import observe, get_client
 from typing import List, Literal
@@ -33,7 +33,7 @@ from ..graph_context.turn_cache import get_touched
 
 logger = logging.getLogger(__name__)
 
-TOKEN_LIMIT = 4_000
+TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
 _SUGGESTER_DEADLINE_S = 1.2
 
@@ -400,11 +400,58 @@ def planner(state: PoolAgentState, config: RunnableConfig):
 # ORCHESTRATOR NODE
 # ================================================================
 
+# @observe(as_type="agent", name="Orchestrator Node")
+# def orchestrator(state: PoolAgentState) -> Command:
+#     execution_plan = state.get("execution_plan", [])
+#     agent_results  = dict(state.get("agent_results") or {})
+#     current_idx    = state.get("current_step", 0)
+
+#     if not execution_plan:
+#         return Command(
+#             update={"error": "execution_plan is empty; cannot orchestrate."},
+#             goto="synthesizer",
+#         )
+
+#     if current_idx >= len(execution_plan):
+#         return Command(goto="synthesizer")
+
+#     step     = execution_plan[current_idx]
+#     step_key = f"step_{step.step}"
+
+#     messages = state.get("messages", [])
+#     user_message = ""
+#     for msg in reversed(messages):
+#         if hasattr(msg, "type") and msg.type == "human":
+#             user_message = _extract_text(msg.content)
+#             break
+
+#     try:
+#         agent_result = _run_step(step, user_message)
+#     except Exception as exc:
+#         agent_result = AgentResult(
+#             agent=step.assigned_agent,
+#             step=step.step,
+#             output="",
+#             error=str(exc),
+#         )
+
+#     agent_results[step_key] = agent_result
+
+#     next_idx = current_idx + 1
+#     goto = "orchestrator" if next_idx < len(execution_plan) else "synthesizer"
+
+#     return Command(
+#         update={
+#             "agent_results": agent_results,
+#             "current_step": next_idx,
+#         },
+#         goto=goto,
+#     )
+
 @observe(as_type="agent", name="Orchestrator Node")
 def orchestrator(state: PoolAgentState) -> Command:
     execution_plan = state.get("execution_plan", [])
-    agent_results  = dict(state.get("agent_results") or {})
-    current_idx    = state.get("current_step", 0)
+    agent_results  = state.get("agent_results") or {}
 
     if not execution_plan:
         return Command(
@@ -412,11 +459,24 @@ def orchestrator(state: PoolAgentState) -> Command:
             goto="synthesizer",
         )
 
-    if current_idx >= len(execution_plan):
+    done_keys = set(agent_results.keys())
+    pending   = [s for s in execution_plan if f"step_{s.step}" not in done_keys]
+
+    if not pending:
         return Command(goto="synthesizer")
 
-    step     = execution_plan[current_idx]
-    step_key = f"step_{step.step}"
+    ready = [
+        s for s in pending
+        if all(f"step_{d}" in done_keys for d in s.depends_on)
+    ]
+
+    if not ready:
+        # hay steps pendientes pero ninguno con dependencias resueltas
+        # -> plan mal formado (ciclo o depends_on inválido)
+        return Command(
+            update={"error": f"Deadlock in execution_plan: {[s.step for s in pending]} blocked."},
+            goto="synthesizer",
+        )
 
     messages = state.get("messages", [])
     user_message = ""
@@ -424,6 +484,20 @@ def orchestrator(state: PoolAgentState) -> Command:
         if hasattr(msg, "type") and msg.type == "human":
             user_message = _extract_text(msg.content)
             break
+
+    return Command(
+        goto=[
+            Send("run_step", {"step": s, "user_message": user_message})
+            for s in ready
+        ]
+    )
+
+
+@observe(as_type="agent", name="Run Step Node")
+def run_step_node(payload: dict) -> Command:
+    step         = payload["step"]
+    user_message = payload["user_message"]
+    step_key     = f"step_{step.step}"
 
     try:
         agent_result = _run_step(step, user_message)
@@ -435,19 +509,10 @@ def orchestrator(state: PoolAgentState) -> Command:
             error=str(exc),
         )
 
-    agent_results[step_key] = agent_result
-
-    next_idx = current_idx + 1
-    goto = "orchestrator" if next_idx < len(execution_plan) else "synthesizer"
-
     return Command(
-        update={
-            "agent_results": agent_results,
-            "current_step": next_idx,
-        },
-        goto=goto,
+        update={"agent_results": {step_key: agent_result}},
+        goto="orchestrator",
     )
-
 # ================================================================
 # SYNTHESIZER NODE
 # ================================================================
@@ -464,12 +529,15 @@ def synthesizer(state: PoolAgentState) -> dict:
 
     usable    = usable_results(agent_results)
     agents    = [r.agent for r in usable]
+    # archetype ya viene resuelto del orchestrator (punto de fan-out)
     archetype = state.get("archetype", "conversational")
     contract  = get_contract(archetype)
 
     raw_content = _build_raw_content(agent_results)
     if not raw_content:
         raw_content = "(no prior content — generate a warm greeting and offer help)"
+        # fallback defensivo — no debería dispararse si el orchestrator hizo su parte,
+        # pero cubre la rama de error / cualquier estado inconsistente
         archetype, contract = "conversational", get_contract("conversational")
 
     system_content = SYNTHESIZER_PROMPT.format(
@@ -491,20 +559,12 @@ def synthesizer(state: PoolAgentState) -> dict:
                                            detail_cls=DetailSection)
         validation = report.to_dict()
     except Exception as exc:
-        try:
-            raw = _get_llm().invoke([
-                SystemMessage(content=system_content),
-                HumanMessage(content="Generate the final refined response now."),
-            ])
-            payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
-            validation = {"fallback": True, "reason": str(exc)}
-        except Exception as exc2:
-            get_client().update_current_generation(
-                level="WARNING",
-                status_message=f"synthesizer_static_fallback: {exc2}",
-            )
-            payload = static_service_unavailable_payload(SynthesizerOutput, language_code)
-            validation = {"fallback": "static", "reason": str(exc2)}
+        raw = _get_llm().invoke([
+            SystemMessage(content=system_content),
+            HumanMessage(content="Generate the final refined response now."),
+        ])
+        payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
+        validation = {"fallback": True, "reason": str(exc)}
 
     _attach_sources(payload, usable)
 
