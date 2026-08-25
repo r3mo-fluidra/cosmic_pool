@@ -2,7 +2,7 @@ from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, Base
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 import logging
-from langfuse import observe, langfuse_context
+from langfuse import observe, get_client
 from typing import List, Literal
 import concurrent.futures
 from .state import PoolAgentState, ExecutionStep, AgentResult
@@ -363,7 +363,7 @@ def planner(state: PoolAgentState, config: RunnableConfig):
             {"role": "user",   "content": context_for_planner},
         ])
     except Exception as e:
-        langfuse_context.update_current_observation(
+        get_client().update_current_span(
             level="WARNING",
             status_message=f"planner_llm_failed: {e}",
         )
@@ -381,7 +381,7 @@ def planner(state: PoolAgentState, config: RunnableConfig):
                     )
                 },
             },
-            goto="synthesizer",  # sin plan real, no tiene sentido pasar por orchestrator
+            goto="synthesizer",
         )
 
     detected_language = plan.detected_language or fallback_language
@@ -464,15 +464,12 @@ def synthesizer(state: PoolAgentState) -> dict:
 
     usable    = usable_results(agent_results)
     agents    = [r.agent for r in usable]
-    # archetype ya viene resuelto del orchestrator (punto de fan-out)
     archetype = state.get("archetype", "conversational")
     contract  = get_contract(archetype)
 
     raw_content = _build_raw_content(agent_results)
     if not raw_content:
         raw_content = "(no prior content — generate a warm greeting and offer help)"
-        # fallback defensivo — no debería dispararse si el orchestrator hizo su parte,
-        # pero cubre la rama de error / cualquier estado inconsistente
         archetype, contract = "conversational", get_contract("conversational")
 
     system_content = SYNTHESIZER_PROMPT.format(
@@ -494,12 +491,20 @@ def synthesizer(state: PoolAgentState) -> dict:
                                            detail_cls=DetailSection)
         validation = report.to_dict()
     except Exception as exc:
-        raw = _get_llm().invoke([
-            SystemMessage(content=system_content),
-            HumanMessage(content="Generate the final refined response now."),
-        ])
-        payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
-        validation = {"fallback": True, "reason": str(exc)}
+        try:
+            raw = _get_llm().invoke([
+                SystemMessage(content=system_content),
+                HumanMessage(content="Generate the final refined response now."),
+            ])
+            payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
+            validation = {"fallback": True, "reason": str(exc)}
+        except Exception as exc2:
+            get_client().update_current_generation(
+                level="WARNING",
+                status_message=f"synthesizer_static_fallback: {exc2}",
+            )
+            payload = static_service_unavailable_payload(SynthesizerOutput, language_code)
+            validation = {"fallback": "static", "reason": str(exc2)}
 
     _attach_sources(payload, usable)
 
