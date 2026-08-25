@@ -11,12 +11,21 @@ from langgraph.types import Command
 from ..graph_context.response_contracts import SynthesizerOutput
 from ..graph_context.suggestions import Suggestion
 from ..agent.agent_names import AgentName
-# =====================================================================
-# 0. AGENT NAMES (Centralized to avoid typos)
-# =====================================================================
 
 
+def merge_agent_results(left: dict | None, right: dict | None) -> dict:
+    """
+    Merge para el fan-out paralelo de run_step, con reset explícito.
 
+    right is None  → RESET (inicio de turno, lo emite el planner)
+    right is dict  → merge (escrituras concurrentes de run_step)
+
+    Sin el sentinel None no hay forma de vaciar el dict: {..} | {} == {..},
+    y los agent_results del turno anterior sobreviven al siguiente planner.
+    """
+    if right is None:
+        return {}
+    return {**(left or {}), **right}
 
 # =====================================================================
 # 1. PLANNER OUTPUT MODELS
@@ -170,7 +179,7 @@ class PoolAgentState(TypedDict):
     current_step: NotRequired[int]          # 0-based index
 
     # ── Sub-agent results (dual-track pattern) ───────────────────────
-    agent_results: NotRequired[Annotated[Dict[str, AgentResult], operator.or_]]
+    agent_results: Annotated[dict[str, AgentResult], merge_agent_results]
     # Keys: "step_1", "step_2", ...
     # ── Response contract (NUEVO) ────────────────────────────────────
     archetype: NotRequired[str]
