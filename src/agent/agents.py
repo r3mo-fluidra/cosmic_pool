@@ -90,10 +90,8 @@ def _create_agent_with_fallback(
     fallback_llm,
 ):
     """
-    Create an agent using the primary LLM with a fallback LLM.
-
-    If the primary model fails, LangChain will automatically retry
-    the same agent execution using the fallback model.
+    Creates an agent using the primary LLM and automatically
+    falls back to the fallback LLM if the primary invocation fails.
     """
 
     primary_agent = create_agent(
@@ -110,35 +108,34 @@ def _create_agent_with_fallback(
         system_prompt=system_prompt,
     )
 
-    return primary_agent.with_fallbacks([fallback_agent])
-
+    return primary_agent.with_fallbacks(
+        [fallback_agent]
+    )
 
 def _initialize():
-    global (
-        _initialized,
-        _llm,
-        _routing_llm,
-        _synthesizer_llm,
-        _fallback_llm,
-        _agents,
-        pool_supervisor,
-    )
+    global _initialized
+    global _llm
+    global _routing_llm
+    global _synthesizer_llm
+    global _fallback_llm
+    global _agents
+    global pool_supervisor
 
     if _initialized:
         return
 
-    # ------------------------------------------------------------
-    # LLMs
-    # ------------------------------------------------------------
+    # ============================================================
+    # INITIALIZE LLMs
+    # ============================================================
 
     _llm = create_llm()
     _routing_llm = create_routing_llm()
     _synthesizer_llm = create_synthesizer_llm()
     _fallback_llm = create_fallback_llm()
 
-    # ------------------------------------------------------------
-    # Common RAG tools
-    # ------------------------------------------------------------
+    # ============================================================
+    # COMMON TOOLS
+    # ============================================================
 
     RAG_TOOLS = [
         vector_search,
@@ -146,9 +143,9 @@ def _initialize():
         expand_subgraph,
     ]
 
-    # ------------------------------------------------------------
+    # ============================================================
     # GENERAL
-    # ------------------------------------------------------------
+    # ============================================================
 
     general_agent = _create_agent_with_fallback(
         name="general",
@@ -158,9 +155,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # OUT OF SCOPE
-    # ------------------------------------------------------------
+    # ============================================================
 
     oos_agent = _create_agent_with_fallback(
         name="oos",
@@ -170,9 +167,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # CHEMISTRY
-    # ------------------------------------------------------------
+    # ============================================================
 
     chemistry_agent = _create_agent_with_fallback(
         name="chemistry",
@@ -184,9 +181,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # EQUIPMENT
-    # ------------------------------------------------------------
+    # ============================================================
 
     equipment_agent = _create_agent_with_fallback(
         name="equipment",
@@ -198,9 +195,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # HYDRAULICS
-    # ------------------------------------------------------------
+    # ============================================================
 
     hydraulics_agent = _create_agent_with_fallback(
         name="hydraulics",
@@ -212,9 +209,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # OPERATIONS
-    # ------------------------------------------------------------
+    # ============================================================
 
     operations_agent = _create_agent_with_fallback(
         name="operations",
@@ -226,9 +223,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # COMPLIANCE
-    # ------------------------------------------------------------
+    # ============================================================
 
     compliance_agent = _create_agent_with_fallback(
         name="compliance",
@@ -240,9 +237,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # CONTAMINATION
-    # ------------------------------------------------------------
+    # ============================================================
 
     contamination_agent = _create_agent_with_fallback(
         name="contamination",
@@ -254,9 +251,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # FACILITY DESIGN
-    # ------------------------------------------------------------
+    # ============================================================
 
     facility_design_agent = _create_agent_with_fallback(
         name="facility_design",
@@ -268,9 +265,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # SAFETY
-    # ------------------------------------------------------------
+    # ============================================================
 
     safety_agent = _create_agent_with_fallback(
         name="safety",
@@ -282,9 +279,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # RECOVERY
-    # ------------------------------------------------------------
+    # ============================================================
 
     recovery_agent = _create_agent_with_fallback(
         name="recovery",
@@ -296,9 +293,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # RECORDS
-    # ------------------------------------------------------------
+    # ============================================================
 
     records_agent = _create_agent_with_fallback(
         name="records",
@@ -310,9 +307,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # MATH
-    # ------------------------------------------------------------
+    # ============================================================
 
     math_agent = _create_agent_with_fallback(
         name="math",
@@ -324,9 +321,9 @@ def _initialize():
         fallback_llm=_fallback_llm,
     )
 
-    # ------------------------------------------------------------
-    # AGENT REGISTRY
-    # ------------------------------------------------------------
+    # ============================================================
+    # REGISTER AGENTS
+    # ============================================================
 
     _agents = {
         "general": general_agent,
@@ -344,31 +341,11 @@ def _initialize():
         "math": math_agent,
     }
 
+    # ============================================================
+    # MARK INITIALIZED
+    # ============================================================
+
     _initialized = True
-
-
-# ================================================================
-# AGENT REGISTRY
-# ================================================================
-
-def get_agent_by_name(agent_name: AgentName):
-    """
-    Return the compiled agent graph for *agent_name*.
-    Raises ValueError if the agent is not yet registered.
-    """
-
-    _initialize()
-
-    agent = _agents.get(agent_name)
-
-    if agent is None:
-        raise ValueError(
-            f"Agent '{agent_name}' is not registered. "
-            f"Available agents: {list(_agents.keys())}"
-        )
-
-    return agent
-
 
 # ================================================================
 # SUPERVISOR
