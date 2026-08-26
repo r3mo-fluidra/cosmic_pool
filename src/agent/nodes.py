@@ -151,8 +151,8 @@ def _get_planner_chain():
 # Clasificación de errores
 # ---------------------------------------------------------------------------
  
-STEP_DEADLINE_S = 25.0    # techo por sub-agente
-TURN_DEADLINE_S = 60.0    # techo por turno completo
+STEP_DEADLINE_S = 120.0    # techo por sub-agente
+TURN_DEADLINE_S = 120.0    # techo por turno completo
 MIN_STEP_BUDGET_S = 8.0   # si queda menos que esto, no arranques otro paso
  
 # Pool dedicado: no compartir con el executor por defecto de LangGraph.
