@@ -2,8 +2,17 @@ from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, Base
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, Send
 import logging
-from langfuse import observe, get_client
+from langfuse import observe, get_client, update_currect
 from typing import List, Literal
+
+from __future__ import annotations
+
+import contextvars
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+
 import concurrent.futures
 from .state import PoolAgentState, ExecutionStep, AgentResult
 from ..prompts.prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
@@ -62,9 +71,111 @@ def _get_planner_chain():
         _planner_chain = create_planner_chain(_get_llm())
     return _planner_chain
 
+
+
+# ---------------------------------------------------------------------------
+# Clasificación de errores
+# ---------------------------------------------------------------------------
+ 
+STEP_DEADLINE_S = 25.0    # techo por sub-agente
+TURN_DEADLINE_S = 60.0    # techo por turno completo
+MIN_STEP_BUDGET_S = 8.0   # si queda menos que esto, no arranques otro paso
+ 
+# Pool dedicado: no compartir con el executor por defecto de LangGraph.
+_STEP_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="run_step")
+ 
+
+
+_INFRA_CODE_RE = re.compile(r"^\s*(429|500|502|503|504)\b")
+ 
+_INFRA_NAMES = (
+    "DEADLINE_EXCEEDED",
+    "UNAVAILABLE",
+    "RESOURCE_EXHAUSTED",
+    "INTERNAL",
+    "STEP_DEADLINE_EXCEEDED",
+    "TURN_DEADLINE_EXCEEDED",
+    "UPSTREAM_INFRA_FAILURE",
+)
+ 
+_INFRA_EXC_NAMES = (
+    "DeadlineExceeded",
+    "ServiceUnavailable",
+    "ResourceExhausted",
+    "InternalServerError",
+    "TooManyRequests",
+    "ReadTimeout",
+    "ConnectTimeout",
+    "APITimeoutError",
+    "APIConnectionError",
+)
+ 
+# Prefijos de error que NO son fallo del proveedor: son contratos de negocio.
+# Un paso con MISSING_INPUTS "falló" pero el sistema está sano.
+_SOFT_ERROR_PREFIXES = ("MISSING_INPUTS", "CANNOT_COMPUTE", "NO_GRAPH_COVERAGE")
+ 
+
 # ================================================================
 # HELPERS
 # ================================================================
+
+def is_infra_error(err: str | None, exc: BaseException | None = None) -> bool:
+    """True solo para fallos del proveedor / timeouts, no para contratos de negocio."""
+    if exc is not None and exc.__class__.__name__ in _INFRA_EXC_NAMES:
+        return True
+    if not err:
+        return False
+    if err.startswith(_SOFT_ERROR_PREFIXES):
+        return False
+    return bool(_INFRA_CODE_RE.match(err)) or any(n in err for n in _INFRA_NAMES)
+ 
+
+def _field(result, name: str, default=None):
+    if isinstance(result, dict):
+        return result.get(name, default)
+    return getattr(result, name, default)
+ 
+
+def _status(result) -> str:
+    """'ok' | 'failed' | 'skipped'. Usa result.status si existe, si no lo infiere."""
+    explicit = _field(result, "status")
+    if explicit in ("ok", "failed", "skipped"):
+        return explicit
+    err = _field(result, "error")
+    if not err:
+        return "ok" if _field(result, "output") else "failed"
+    if str(err).startswith("SKIPPED_"):
+        return "skipped"
+    return "failed"
+ 
+ 
+def _step_num(key: str) -> int | None:
+    try:
+        return int(str(key).split("_", 1)[1])
+    except (IndexError, ValueError):
+        return None
+ 
+
+def _skipped_result(step, reason: str):
+    from .state import AgentResult  # ajustá el import
+ 
+    return AgentResult(
+        agent=step.assigned_agent,
+        step=step.step,
+        output="",
+        sources=[],
+        error=reason,
+        status="skipped",
+    )
+ 
+
+def _remaining_budget(state) -> float:
+    started = state.get("turn_started_at")
+    if not started or started < time.time() - 3600:
+        # stale de un turno viejo, o nunca se seteó -> no confiar en el budget
+        return TURN_DEADLINE_S
+    return TURN_DEADLINE_S - (time.time() - float(started))
+
 def _flatten(content) -> str:
     """Tu lógica actual de parseo, ahora solo para el camino de fallback."""
     if isinstance(content, list):
@@ -284,6 +395,8 @@ def _get_llm_suggester():
 def build_context_node(
     state: PoolAgentState,
 ) -> Command[Literal["summarize_memory_node", "planner"]]:
+    # build_context_node — el update
+    {"turn_started_at": time.time()}
     next_node: Literal["summarize_memory_node", "planner"] = (
         "summarize_memory_node"
         if estimated_tokens(state["messages"]) > TOKEN_LIMIT
@@ -448,74 +561,214 @@ def planner(state: PoolAgentState, config: RunnableConfig):
 #         },
 #         goto=goto,
 #     )
+def _deps_ok(step, results) -> tuple[bool, str|None]:
+    for dep in step.get("depends_on", []):
+        r = results.get(f"step_{dep}")
+        if r is None:
+            return False, f"dependency step_{dep} did not run"
+        if r.get("error") or not r.get("output"):
+            return False, f"dependency step_{dep} failed: {r.get('error','empty output')}"
+    return True, None
+
+
 
 @observe(as_type="agent", name="Orchestrator Node")
 def orchestrator(state: PoolAgentState) -> Command:
     execution_plan = state.get("execution_plan", [])
-    agent_results  = state.get("agent_results") or {}
-
+    agent_results = state.get("agent_results") or {}
+ 
     if not execution_plan:
         return Command(
             update={"error": "execution_plan is empty; cannot orchestrate."},
             goto="synthesizer",
         )
-
-    done_keys = set(agent_results.keys())
-    pending   = [s for s in execution_plan if f"step_{s.step}" not in done_keys]
-
+ 
+    # --- 1. Clasificar lo ya ejecutado: éxito != "presente en agent_results" ---
+    ok_steps: set[int] = set()
+    failed_steps: set[int] = set()
+    for key, result in agent_results.items():
+        num = _step_num(key)
+        if num is None:
+            continue
+        if _status(result) == "ok":
+            ok_steps.add(num)
+        else:
+            failed_steps.add(num)
+ 
+    done = ok_steps | failed_steps
+    pending = [s for s in execution_plan if s.step not in done]
+ 
     if not pending:
         return Command(goto="synthesizer")
-
-    ready = [
-        s for s in pending
-        if all(f"step_{d}" in done_keys for d in s.depends_on)
-    ]
-
-    if not ready:
-        # hay steps pendientes pero ninguno con dependencias resueltas
-        # -> plan mal formado (ciclo o depends_on inválido)
+ 
+    # --- 2. Circuit breaker: un 504/503/429 no se recupera dentro del turno ---
+    infra_hit = next(
+        (
+            (num, _field(r, "error"))
+            for key, r in agent_results.items()
+            if (num := _step_num(key)) is not None
+            and is_infra_error(_field(r, "error"))
+        ),
+        None,
+    )
+    if infra_hit:
+        failed_num, failed_err = infra_hit
+        reason = f"SKIPPED_UPSTREAM_INFRA_FAILURE: step_{failed_num} -> {failed_err}"
         return Command(
-            update={"error": f"Deadlock in execution_plan: {[s.step for s in pending]} blocked."},
+            update={
+                "agent_results": {
+                    f"step_{s.step}": _skipped_result(s, reason) for s in pending
+                },
+                "error": f"UPSTREAM_INFRA_FAILURE at step_{failed_num}",
+            },
             goto="synthesizer",
         )
-
-    messages = state.get("messages", [])
-    user_message = ""
-    for msg in reversed(messages):
-        if hasattr(msg, "type") and msg.type == "human":
-            user_message = _extract_text(msg.content)
-            break
-
-    return Command(
-        goto=[
-            Send("run_step", {"step": s, "user_message": user_message})
-            for s in ready
-        ]
-    )
-
-
+ 
+    # --- 3. Presupuesto de turno ---
+    remaining = _remaining_budget(state)
+    if remaining <= MIN_STEP_BUDGET_S:
+        reason = f"SKIPPED_TURN_DEADLINE_EXCEEDED: {remaining:.1f}s left"
+        return Command(
+            update={
+                "agent_results": {
+                    f"step_{s.step}": _skipped_result(s, reason) for s in pending
+                },
+                "error": "TURN_DEADLINE_EXCEEDED",
+            },
+            goto="synthesizer",
+        )
+ 
+    # --- 4. Cascada de dependencias (punto fijo, resuelve cadenas 1->2->3) ---
+    blocked: dict[str, object] = {}
+    blocked_nums: set[int] = set()
+    poisoned = set(failed_steps)
+ 
+    changed = True
+    while changed:
+        changed = False
+        for s in pending:
+            if s.step in blocked_nums:
+                continue
+            bad = [d for d in (s.depends_on or []) if d in poisoned]
+            if not bad:
+                continue
+            src = bad[0]
+            src_err = _field(agent_results.get(f"step_{src}"), "error", "upstream skipped")
+            blocked[f"step_{s.step}"] = _skipped_result(
+                s, f"SKIPPED_DEPENDENCY_FAILED: step_{src} -> {src_err}"
+            )
+            blocked_nums.add(s.step)
+            poisoned.add(s.step)
+            changed = True
+ 
+    runnable = [
+        s
+        for s in pending
+        if s.step not in blocked_nums
+        and all(d in ok_steps for d in (s.depends_on or []))
+    ]
+    waiting = [s for s in pending if s.step not in blocked_nums and s not in runnable]
+ 
+    update: dict = {"agent_results": blocked} if blocked else {}
+ 
+    if runnable:
+        messages = state.get("messages", [])
+        user_message = ""
+        for msg in reversed(messages):
+            if getattr(msg, "type", None) == "human":
+                user_message = _extract_text(msg.content)
+                break
+ 
+        # El paso nunca puede durar más que lo que queda del turno.
+        step_budget = max(MIN_STEP_BUDGET_S, min(STEP_DEADLINE_S, remaining))
+ 
+        return Command(
+            update=update,
+            goto=[
+                Send(
+                    "run_step",
+                    {
+                        "step": s,
+                        "user_message": user_message,
+                        "deadline_s": step_budget,
+                    },
+                )
+                for s in runnable
+            ],
+        )
+ 
+    if waiting:
+        # Pendientes sin bloquear y sin poder correr -> ciclo o depends_on inválido.
+        update["error"] = (
+            f"Deadlock in execution_plan: {[s.step for s in waiting]} blocked."
+        )
+ 
+    return Command(update=update, goto="synthesizer")
+ 
+ 
+# ---------------------------------------------------------------------------
+# Run step
+# ---------------------------------------------------------------------------
+ 
+def _run_with_deadline(fn, deadline_s: float, *args):
+    """Ejecuta fn con techo de wall-clock, propagando el contexto de Langfuse.
+ 
+    copy_context() es obligatorio: sin él, los spans que _run_step abre dentro
+    del thread pierden el parent OTel y aparecen sueltos en el trace.
+    """
+    ctx = contextvars.copy_context()
+    future = _STEP_POOL.submit(ctx.run, fn, *args)
+    try:
+        return future.result(timeout=deadline_s)
+    except FuturesTimeout:
+        future.cancel()  # no mata el thread en curso; ver nota sobre timeout del cliente
+        raise
+ 
+ 
 @observe(as_type="agent", name="Run Step Node")
 def run_step_node(payload: dict) -> Command:
-    step         = payload["step"]
+    from .state import AgentResult  # ajustá el import
+ 
+    step = payload["step"]
     user_message = payload["user_message"]
-    step_key     = f"step_{step.step}"
-
+    deadline_s = float(payload.get("deadline_s", STEP_DEADLINE_S))
+    step_key = f"step_{step.step}"
+ 
     if step.assigned_agent == MATH and not math_inputs_present(user_message):
         # Gate determinista: sin ningún dígito en el turno, ninguna fórmula
-        # del catálogo tiene con qué calcular. Evita 5-9 llamadas al LLM
-        # que solo iban a terminar pidiendo el dato que ya sabíamos que faltaba.
-        agent_result = missing_inputs_result(step, user_message)
-    else:
-        try:
-            agent_result = _run_step(step, user_message)
-        except Exception as exc:
-            agent_result = AgentResult(
-                agent=step.assigned_agent,
-                step=step.step,
-                output="",
-                error=str(exc),
-            )
-
+        # del catálogo tiene con qué calcular.
+        return Command(
+            update={"agent_results": {step_key: missing_inputs_result(step, user_message)}},
+            goto="orchestrator",
+        )
+ 
+    started = time.monotonic()
+    try:
+        agent_result = _run_with_deadline(_run_step, deadline_s, step, user_message)
+ 
+    except FuturesTimeout:
+        agent_result = AgentResult(
+            agent=step.assigned_agent,
+            step=step.step,
+            output="",
+            sources=[],
+            error=f"STEP_DEADLINE_EXCEEDED after {deadline_s:.0f}s",
+            status="failed",
+        )
+ 
+    except Exception as exc:
+        err = str(exc).strip() or exc.__class__.__name__
+        if exc.__class__.__name__ in _INFRA_EXC_NAMES and not _INFRA_CODE_RE.match(err):
+            err = f"{exc.__class__.__name__}: {err}"
+        agent_result = AgentResult(
+            agent=step.assigned_agent,
+            step=step.step,
+            output="",
+            sources=[],
+            error=err,
+            status="failed",
+        )
+   
     return Command(
         update={"agent_results": {step_key: agent_result}},
         goto="orchestrator",

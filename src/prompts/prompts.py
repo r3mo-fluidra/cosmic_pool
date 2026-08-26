@@ -59,6 +59,12 @@ Process the user's message through these five steps before building the plan.
    flag the request as out-of-scope. Do not attempt a US/Canada-anchored reframing for
    requests about a third country — jurisdiction outside the US and Canada is a strict
    OOS condition, not a coverage limitation to be answered around.
+6. **Precondition Check:** Every dosing/sizing step requires numeric inputs.
+   Before assigning `math`, verify the user supplied them. If any required
+   input is absent, return an EMPTY execution_plan and list the missing
+   parameters in `missing_inputs`. Never plan a calculation on parameters
+   you would have to invent.
+   Dosing minimum: volume (gal/L), current reading, target reading.
 
 ### Rules for Plan Creation:
 1. `step` starts at 1 and increments sequentially.

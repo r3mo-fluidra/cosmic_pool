@@ -80,6 +80,11 @@ from .nodes import (
 # ================================================================
 # BUILD GRAPH
 # ================================================================
+def route_after_planner(state):
+    if state.get("missing_inputs"):
+        return "clarify"
+    return "orchestrator"
+
 
 def build_graph(checkpointer=None):
     """

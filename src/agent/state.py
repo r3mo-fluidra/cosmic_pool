@@ -143,8 +143,14 @@ class PlannerOutput(BaseModel):
         description=(
             "Ordered list of steps to fulfill the user's request. "
             "If the query is out of scope, return a single step with oos=True."
-        ),
-    )
+        )
+    ),
+    missing_inputs: list[str] = Field(
+        default_factory=list,
+        description="Required parameters absent from the user message. "
+                    "If non-empty, execution_plan MUST be empty."
+        )
+    
 
 
 # =====================================================================
@@ -159,7 +165,7 @@ class AgentResult(BaseModel):
     output: str                        # Processed text ready for Synthesizer
     sources: List[str] = Field(default_factory=list)
     error: Optional[str] = None
-
+    status: Literal["ok", "failed", "skipped"] = "ok"
 
 # =====================================================================
 # 3. GLOBAL GRAPH STATE
@@ -176,6 +182,7 @@ class PoolAgentState(TypedDict):
     execution_plan: NotRequired[List[ExecutionStep]]
 
     # ── Orchestrator control ─────────────────────────────────────────
+    turn_started_at: Annotated[float, lambda old, new: new]
     current_step: NotRequired[int]          # 0-based index
 
     # ── Sub-agent results (dual-track pattern) ───────────────────────
