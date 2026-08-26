@@ -3,7 +3,6 @@ agents.py
 =========
 Defines the sub-agents used inside the orchestrator pipeline.
 """
-from __future__ import annotations
 
 from langchain_core.tools import tool
 from langchain.agents import create_agent
