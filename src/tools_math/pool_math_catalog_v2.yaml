@@ -368,7 +368,7 @@ formulas:
     source_id: cpo_handbook_volume
     aliases: ["how many gallons in a rectangular pool", "rectangle pool volume", "tank capacity length times width"]
   
-    - formula_id: dose_dry_acid_ph_ta
+  - formula_id: dose_dry_acid_ph_ta
     name: Sodium bisulfate (dry acid) dose to lower pH / total alkalinity
     domain: dosing
     tier: extended
