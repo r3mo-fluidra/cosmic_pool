@@ -1,19 +1,24 @@
-from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, BaseMessage, RemoveMessage
+from __future__ import annotations
+
+from langchain_core.messages import (
+    AIMessage,
+    SystemMessage,
+    HumanMessage,
+    BaseMessage,
+    RemoveMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, Send
 import logging
-from langfuse import observe, get_client, update_currect
+from langfuse import observe, get_client
 from typing import List, Literal
-
-from __future__ import annotations
 
 import contextvars
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-
-
 import concurrent.futures
+
 from .state import PoolAgentState, ExecutionStep, AgentResult
 from ..prompts.prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
 from .chains import create_planner_chain
@@ -395,14 +400,17 @@ def _get_llm_suggester():
 def build_context_node(
     state: PoolAgentState,
 ) -> Command[Literal["summarize_memory_node", "planner"]]:
-    # build_context_node — el update
-    {"turn_started_at": time.time()}
+
     next_node: Literal["summarize_memory_node", "planner"] = (
         "summarize_memory_node"
         if estimated_tokens(state["messages"]) > TOKEN_LIMIT
         else "planner"
     )
-    return Command(goto=next_node)
+
+    return Command(
+        update={"turn_started_at": time.time()},
+        goto=next_node,
+    )
 
 # ================================================================
 # SUMMARIZE MEMORY NODE
