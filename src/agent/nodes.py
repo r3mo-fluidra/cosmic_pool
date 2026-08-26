@@ -71,18 +71,27 @@ _MISROUTE_AGENTS = frozenset({
 
 _MISROUTE_RE = re.compile(r"^\s*MISROUTE:\s*([A-Za-z_]+)\s*(.*)", re.DOTALL)
 
+def _normalize_agent(agent) -> str:
+    """AgentName puede ser str, Enum o None."""
+    if agent is None:
+        return ""
+    # Enum → value; str → str
+    value = getattr(agent, "value", agent)
+    return str(value).strip().lower()
+
 def _route_from_plan(execution_plan: list[ExecutionStep]) -> str:
-    """
-    Short-circuit. Un plan de un solo paso sin retrieval ni dependencias no
-    tiene nada que orquestar: pasar por orchestrator solo agrega una superstep,
-    un fan-out de un Send y un round-trip de vuelta.
-    """
+    if not execution_plan:
+        return "orchestrator"  # el orchestrator debe mirar missing_inputs en el state
+
     if len(execution_plan) != 1:
-        return "orchestrator"          # vacío → el orchestrator emite su error contract
+        return "orchestrator"
+
     step = execution_plan[0]
-    if step.oos:
+    agent = _normalize_agent(step.assigned_agent)
+
+    if bool(step.oos) or agent == "oos":
         return "oos"
-    if (step.assigned_agent or "").strip().lower() == GENERAL_AGENT:
+    if agent == "general":
         return "general"
     return "orchestrator"
 

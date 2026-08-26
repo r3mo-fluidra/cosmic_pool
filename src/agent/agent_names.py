@@ -26,4 +26,6 @@ AgentName = Literal[
     "recovery",
     "records",
     "math",
+    "general",
+    "oos"
 ]
