@@ -10,7 +10,7 @@ from langgraph_supervisor import create_supervisor
 
 from ..tools_math.tools import MATH_TOOLS
 from .agent_names import AgentName
-from ..config.llm import create_llm, create_routing_llm, create_synthesizer_llm
+from ..config.llm import create_llm, create_routing_llm, create_synthesizer_llm, create_fallback_llm
 from ..prompts.prompts import (
     GENERAL_PROMPT, 
     OOS_PROMPT, 
@@ -36,6 +36,7 @@ from .tools import (
     search_seed_nodes,
     expand_subgraph,
     )
+
 
 
 # ================================================================
@@ -67,6 +68,8 @@ _synthesizer_llm = None
 _agents: dict[str, object] = {}
 pool_supervisor = None
 
+
+
 def _initialize():
     global _initialized, _llm, _routing_llm, _synthesizer_llm, _agents, pool_supervisor
 
@@ -76,13 +79,21 @@ def _initialize():
     _llm            = create_llm()
     _routing_llm    = create_routing_llm()
     _synthesizer_llm = create_synthesizer_llm()
+    _fallback_llm = create_fallback_llm()
 
-    general_agent = create_agent(
-        model=_synthesizer_llm,
+    fallback_general_agent = create_agent(
+        model=_fallback_llm,
         tools=[pool_general_knowledge],
         name="general",
         system_prompt=GENERAL_PROMPT,
     )
+
+    general_agent = create_agent(
+            model=_synthesizer_llm,
+            tools=[pool_general_knowledge],
+            name="general",
+            system_prompt=GENERAL_PROMPT,
+        ).with_fallbacks([_fallback_llm])
 
     oos_agent = create_agent(
         model=_synthesizer_llm,
