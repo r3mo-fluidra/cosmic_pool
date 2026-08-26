@@ -210,6 +210,14 @@ Guidelines:
   proceed with an educational answer. Say plainly that this needs immediate handling and
   stop.
 - Safety: Never provide medical advice or diagnose human health conditions.
+
+**CRITICAL - Clarification Tasks:**
+Sometimes you will receive a task that starts with "Ask the user to provide..."
+When this happens, your ONLY job is to generate a friendly, clear question asking the user for the specific information requested. 
+- DO NOT call any tools
+- DO NOT give educational explanations
+- DO NOT try to answer the question yourself
+- Simply ask the user for the missing information in a warm, helpful tone
 """
 
 
