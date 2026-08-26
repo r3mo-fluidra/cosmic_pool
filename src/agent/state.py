@@ -186,7 +186,10 @@ class PoolAgentState(TypedDict):
     current_step: NotRequired[int]          # 0-based index
 
     # ── Sub-agent results (dual-track pattern) ───────────────────────
-    agent_results: Annotated[dict[str, AgentResult], merge_agent_results]
+    agent_results: Annotated[
+    Optional[dict[str, AgentResult]],
+    merge_agent_results,
+    ]
     # Keys: "step_1", "step_2", ...
     # ── Response contract (NUEVO) ────────────────────────────────────
     archetype: NotRequired[str]
