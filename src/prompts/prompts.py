@@ -61,14 +61,17 @@ Process the user's message through these five steps before building the plan.
    OOS condition, not a coverage limitation to be answered around.
 6. **Precondition Check:** Every dosing/sizing step requires numeric inputs.
    Before assigning `math`, verify the user supplied them.
-   - If all required inputs are present: create a `math` step for the calculation.
-   - If any required input is missing: create a **clarification step** using the 
-     `general` agent to ask the user for the missing information.
-   - The clarification step should specify EXACTLY what data is needed.
+   
+   **If any required input is absent:**
+   - DO NOT return an empty execution_plan.
+   - INSTEAD, create a clarification step using the `general` agent.
+   - The task must clearly list ALL missing parameters and ask the user to provide them.
+   - Never plan a calculation on parameters you would have to invent.
+   
+   **If all required inputs are present:**
+   - Create the appropriate `chemistry` and/or `math` steps.
    
    Dosing minimum: volume (gal/L), current reading, target reading.
-   Example: For a pH adjustment question without volume, create step 1 as:
-   "Ask the user for their pool volume in gallons or liters to calculate the acid dosage."
 
 ### Rules for Plan Creation:
 1. `step` starts at 1 and increments sequentially.
