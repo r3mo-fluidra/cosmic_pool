@@ -3,6 +3,7 @@ agents.py
 =========
 Defines the sub-agents used inside the orchestrator pipeline.
 """
+from __future__ import annotations
 
 from langchain_core.tools import tool
 from langchain.agents import create_agent
@@ -10,15 +11,10 @@ from langgraph_supervisor import create_supervisor
 
 from ..tools_math.tools import MATH_TOOLS
 from .agent_names import AgentName
-from ..config.llm import (
-    create_llm,
-    create_routing_llm,
-    create_synthesizer_llm,
-    create_fallback_llm,
-)
+from ..config.llm import create_llm, create_routing_llm, create_synthesizer_llm
 from ..prompts.prompts import (
-    GENERAL_PROMPT,
-    OOS_PROMPT,
+    GENERAL_PROMPT, 
+    OOS_PROMPT, 
     SUPERVISOR_PROMPT,
 )
 from ..prompts.prompt_archetype import build_agent_prompt
@@ -35,12 +31,12 @@ from ..prompts.prompts_sub_agents import (
     RECOVERY,
     RECORDS,
     MATH,
-)
+)  
 from .tools import (
     vector_search,
     search_seed_nodes,
     expand_subgraph,
-)
+    )
 
 
 # ================================================================
@@ -61,278 +57,125 @@ def pool_general_knowledge(topic: str) -> str:
         "Please provide a comprehensive, helpful explanation based on your training knowledge."
     )
 
-
 # ================================================================
 # LAZY INITIALIZATION
 # ================================================================
 
 _initialized = False
-
 _llm = None
 _routing_llm = None
 _synthesizer_llm = None
-_fallback_llm = None
-
 _agents: dict[str, object] = {}
 pool_supervisor = None
 
-
-# ================================================================
-# AGENT FACTORY
-# ================================================================
-
-def _create_agent_with_fallback(
-    *,
-    name: str,
-    system_prompt: str,
-    tools: list,
-    primary_llm,
-    fallback_llm,
-):
-    """
-    Creates an agent using the primary LLM and automatically
-    falls back to the fallback LLM if the primary invocation fails.
-    """
-
-    primary_agent = create_agent(
-        model=primary_llm,
-        tools=tools,
-        name=name,
-        system_prompt=system_prompt,
-    )
-
-    fallback_agent = create_agent(
-        model=fallback_llm,
-        tools=tools,
-        name=name,
-        system_prompt=system_prompt,
-    )
-
-    return primary_agent.with_fallbacks(
-        [fallback_agent]
-    )
-
 def _initialize():
-    global _initialized
-    global _llm
-    global _routing_llm
-    global _synthesizer_llm
-    global _fallback_llm
-    global _agents
-    global pool_supervisor
+    global _initialized, _llm, _routing_llm, _synthesizer_llm, _agents, pool_supervisor
 
     if _initialized:
         return
 
-    # ============================================================
-    # INITIALIZE LLMs
-    # ============================================================
-
-    _llm = create_llm()
-    _routing_llm = create_routing_llm()
+    _llm            = create_llm()
+    _routing_llm    = create_routing_llm()
     _synthesizer_llm = create_synthesizer_llm()
-    _fallback_llm = create_fallback_llm()
 
-    # ============================================================
-    # COMMON TOOLS
-    # ============================================================
-
-    RAG_TOOLS = [
-        vector_search,
-        search_seed_nodes,
-        expand_subgraph,
-    ]
-
-    # ============================================================
-    # GENERAL
-    # ============================================================
-
-    general_agent = _create_agent_with_fallback(
-        name="general",
+    general_agent = create_agent(
+        model=_synthesizer_llm,
         tools=[pool_general_knowledge],
+        name="general",
         system_prompt=GENERAL_PROMPT,
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
     )
 
-    # ============================================================
-    # OUT OF SCOPE
-    # ============================================================
-
-    oos_agent = _create_agent_with_fallback(
-        name="oos",
+    oos_agent = create_agent(
+        model=_synthesizer_llm,
         tools=[],
+        name="oos",
         system_prompt=OOS_PROMPT,
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
     )
 
-    # ============================================================
-    # CHEMISTRY
-    # ============================================================
-
-    chemistry_agent = _create_agent_with_fallback(
+    chemistry_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
         name="chemistry",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[CHEMISTRY]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[CHEMISTRY]),
     )
 
-    # ============================================================
-    # EQUIPMENT
-    # ============================================================
-
-    equipment_agent = _create_agent_with_fallback(
+    equipment_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],  
         name="equipment",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[EQUIPMENT]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[EQUIPMENT]),
     )
 
-    # ============================================================
-    # HYDRAULICS
-    # ============================================================
-
-    hydraulics_agent = _create_agent_with_fallback(
+    hydraulics_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
         name="hydraulics",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[HYDRAULICS]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[HYDRAULICS]),
     )
 
-    # ============================================================
-    # OPERATIONS
-    # ============================================================
-
-    operations_agent = _create_agent_with_fallback(
+    operations_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
         name="operations",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[OPERATIONS]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[OPERATIONS]),
     )
 
-    # ============================================================
-    # COMPLIANCE
-    # ============================================================
-
-    compliance_agent = _create_agent_with_fallback(
+    compliance_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
         name="compliance",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[COMPLIANCE]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[COMPLIANCE]),
     )
 
-    # ============================================================
-    # CONTAMINATION
-    # ============================================================
-
-    contamination_agent = _create_agent_with_fallback(
+    contamination_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
         name="contamination",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[CONTAMINATION]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[CONTAMINATION]),
     )
 
-    # ============================================================
-    # FACILITY DESIGN
-    # ============================================================
-
-    facility_design_agent = _create_agent_with_fallback(
+    facility_design_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
         name="facility_design",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[FACILITY_DESIGN]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[FACILITY_DESIGN]),
     )
 
-    # ============================================================
-    # SAFETY
-    # ============================================================
-
-    safety_agent = _create_agent_with_fallback(
+    safety_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
         name="safety",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[SAFETY]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[SAFETY]),
     )
 
-    # ============================================================
-    # RECOVERY
-    # ============================================================
-
-    recovery_agent = _create_agent_with_fallback(
+    recovery_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],
         name="recovery",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[RECOVERY]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[RECOVERY]),
     )
 
-    # ============================================================
-    # RECORDS
-    # ============================================================
-
-    records_agent = _create_agent_with_fallback(
+    records_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[vector_search, search_seed_nodes, expand_subgraph],  
         name="records",
-        tools=RAG_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[RECORDS]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[RECORDS]),
     )
 
-    # ============================================================
-    # MATH
-    # ============================================================
-
-    math_agent = _create_agent_with_fallback(
-        name="math",
+    math_agent = create_agent(
+        model=_synthesizer_llm,
         tools=MATH_TOOLS,
-        system_prompt=build_agent_prompt(
-            AGENT_REGISTRY[MATH]
-        ),
-        primary_llm=_synthesizer_llm,
-        fallback_llm=_fallback_llm,
+        name="math",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[MATH]),
     )
-
-    # ============================================================
-    # REGISTER AGENTS
-    # ============================================================
-
     _agents = {
-        "general": general_agent,
-        "oos": oos_agent,
-        "chemistry": chemistry_agent,
-        "equipment": equipment_agent,
-        "hydraulics": hydraulics_agent,
-        "operations": operations_agent,
-        "compliance": compliance_agent,
+        "general":     general_agent,
+        "oos":  oos_agent,
+        "chemistry":   chemistry_agent,
+        "equipment":   equipment_agent,
+        "hydraulics":  hydraulics_agent,
+        "operations":  operations_agent,
+        "compliance":  compliance_agent,
         "contamination": contamination_agent,
         "facility_design": facility_design_agent,
         "safety": safety_agent,
@@ -340,29 +183,34 @@ def _initialize():
         "records": records_agent,
         "math": math_agent,
     }
-
-    # ============================================================
-    # MARK INITIALIZED
-    # ============================================================
+    pool_supervisor = create_supervisor(
+        agents=list(_agents.values()),
+        model=_routing_llm,
+        prompt=SUPERVISOR_PROMPT,
+    ).compile()
 
     _initialized = True
 
 # ================================================================
-# SUPERVISOR
+# AGENT REGISTRY
 # ================================================================
 
+def get_agent_by_name(agent_name: AgentName):
+    """
+    Return the compiled agent graph for *agent_name*.
+    Raises ValueError if the agent is not yet registered.
+    """
+    _initialize()  # ✅ Solo se construye cuando se necesita por primera vez
+
+    agent = _agents.get(agent_name)
+    if agent is None:
+        raise ValueError(
+            f"Agent '{agent_name}' is not registered. "
+            f"Available agents: {list(_agents.keys())}"
+        )
+    return agent
+
 def get_supervisor():
-    """Return the compiled supervisor, constructing it lazily."""
-
-    global pool_supervisor
-
+    """Devuelve el supervisor compilado, inicializando si es necesario."""
     _initialize()
-
-    if pool_supervisor is None:
-        pool_supervisor = create_supervisor(
-            agents=list(_agents.values()),
-            model=_routing_llm,
-            prompt=SUPERVISOR_PROMPT,
-        ).compile()
-
     return pool_supervisor
