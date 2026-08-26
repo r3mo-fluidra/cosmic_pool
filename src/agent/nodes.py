@@ -786,7 +786,7 @@ def orchestrator(state: PoolAgentState) -> Command:
 # ---------------------------------------------------------------------------
 # Run step
 # ---------------------------------------------------------------------------
- 
+
 def _run_with_deadline(fn, deadline_s: float, *args):
     """Ejecuta fn con techo de wall-clock, propagando el contexto de Langfuse.
  
