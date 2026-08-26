@@ -75,6 +75,8 @@ from .nodes import (
     build_context_node,
     summarize_memory_node,
     suggester,
+    general,
+    oos,
 )
 
 # ================================================================
@@ -113,8 +115,20 @@ def build_graph(checkpointer=None):
     builder.add_node(
         "planner",
         planner,
-        destinations=["orchestrator"],
+        destinations=["orchestrator", "general", "oos"],
     )
+
+    builder.add_node(
+            "general",
+            general,
+            destinations=["synthesizer"],
+        )
+
+    builder.add_node(
+                "oos",
+                oos,
+                destinations=["synthesizer"],
+            )
 
     builder.add_node(
         "orchestrator",

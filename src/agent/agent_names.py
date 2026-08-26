@@ -15,8 +15,6 @@ from __future__ import annotations
 from typing import Literal
 
 AgentName = Literal[
-    "general",
-    "oos",
     "chemistry",
     "equipment",
     "hydraulics",

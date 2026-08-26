@@ -29,6 +29,7 @@ from .gates import (
     missing_inputs_result
 )
 from ..prompts.prompts_sub_agents import MATH
+from ..prompts.prompts import GENERAL_PROMPT , OOS_PROMPT
 # Graph context
 from ..graph_context.response_contracts import (
     SynthesizerOutput, get_contract, resolve_archetype,
@@ -56,6 +57,65 @@ MESSAGES_TO_KEEP = 6
 _SUGGESTER_DEADLINE_S = 1.2
 
 
+# ================================================================
+# ROUTING: planner → general | oos | orchestrator
+# ================================================================
+
+GENERAL_AGENT = "general"
+
+# Roster válido para recuperar un MISROUTE. Sin whitelist, un nombre
+# alucinado por el LLM explota adentro de get_agent_by_name en run_step.
+_MISROUTE_AGENTS = frozenset({
+    "contamination", "safety", "chemistry", "compliance", "general",
+})
+
+_MISROUTE_RE = re.compile(r"^\s*MISROUTE:\s*([A-Za-z_]+)\s*(.*)", re.DOTALL)
+
+def _route_from_plan(execution_plan: list[ExecutionStep]) -> str:
+    """
+    Short-circuit. Un plan de un solo paso sin retrieval ni dependencias no
+    tiene nada que orquestar: pasar por orchestrator solo agrega una superstep,
+    un fan-out de un Send y un round-trip de vuelta.
+    """
+    if len(execution_plan) != 1:
+        return "orchestrator"          # vacío → el orchestrator emite su error contract
+    step = execution_plan[0]
+    if step.oos:
+        return "oos"
+    if (step.assigned_agent or "").strip().lower() == GENERAL_AGENT:
+        return "general"
+    return "orchestrator"
+
+
+def _last_human_text(state: PoolAgentState) -> str:
+    for msg in reversed(state.get("messages", [])):
+        if getattr(msg, "type", None) == "human":
+            return _extract_text(msg.content)
+    return ""
+
+
+def _direct_answer(state: PoolAgentState, system_prompt: str) -> tuple[str, str | None]:
+    """
+    Una sola llamada al LLM: sin tools, sin ReAct loop, sin ThreadPool.
+    Estos dos nodos no hacen retrieval, así que el overhead de _run_step
+    (create_react_agent + iteración de tool calls) es puro costo.
+    """
+    plan = state.get("execution_plan") or []
+    user_message = _last_human_text(state)
+    task = plan[0].task if plan else user_message
+    language = _LANGUAGE_MAP.get(state.get("detected_language", "es"), _LANGUAGE_MAP["es"])
+
+    try:
+        raw = _get_llm().invoke([
+            SystemMessage(content=f"{system_prompt}\n\nRespond in: {language}"),
+            HumanMessage(content=f"Task: {task}\n\nUser context: {user_message}"),
+        ])
+        return _extract_text(raw.content), None
+    except Exception as exc:
+        err = str(exc).strip() or exc.__class__.__name__
+        if exc.__class__.__name__ in _INFRA_EXC_NAMES and not _INFRA_CODE_RE.match(err):
+            err = f"{exc.__class__.__name__}: {err}"
+        return "", err
 
 # ================================================================
 # LAZY LLM + PLANNER CHAIN
@@ -396,7 +456,7 @@ def _get_llm_suggester():
 # ================================================================
 # CONTEXT NODE
 # ================================================================
-
+@observe(as_type='agent', name="Context Node")
 def build_context_node(
     state: PoolAgentState,
 ) -> Command[Literal["summarize_memory_node", "planner"]]:
@@ -415,7 +475,7 @@ def build_context_node(
 # ================================================================
 # SUMMARIZE MEMORY NODE
 # ================================================================
-
+@observe(as_type='agent', name="Sumarize Node")
 def summarize_memory_node(state: PoolAgentState) -> Command[Literal["planner"]]:
     messages = state.get("messages", [])
     previous_summary = state.get("conversation_summary", "")
@@ -503,7 +563,7 @@ def planner(state: PoolAgentState, config: RunnableConfig):
                 "agent_results": None,
                 "planner_error": str(e),
             },
-            goto="orchestrator",            # ← que el plan de fallback SÍ se ejecute
+            goto=_route_from_plan([fallback_step]),          
         )
 
     detected_language = plan.detected_language or fallback_language
@@ -515,7 +575,7 @@ def planner(state: PoolAgentState, config: RunnableConfig):
             "current_step": 0,
             "agent_results": None,
         },
-        goto="orchestrator",
+        goto=_route_from_plan(plan.execution_plan),
     )
 
 # ================================================================
@@ -909,3 +969,51 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
         logger.info("suggester gates: %s", report)
 
     return {"suggestions": gated}
+
+@observe(as_type="agent", name="General Node")
+def general(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
+    plan = state.get("execution_plan") or []
+    step_num = plan[0].step if plan else 1
+
+    text, err = _direct_answer(state, GENERAL_PROMPT)
+
+    result = AgentResult(
+        agent=GENERAL_AGENT,
+        step=step_num,
+        output=text,
+        sources=[],
+        error=err,
+        status="ok" if text and not err else "failed",
+    )
+
+    return Command(
+        update={
+            "agent_results": {f"step_{step_num}": result},
+            "archetype": "conversational",
+        },
+        goto="synthesizer",
+    )
+
+@observe(as_type="agent", name="OOS Node")
+def oos(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
+    plan = state.get("execution_plan") or []
+    step_num = plan[0].step if plan else 1
+
+    text, err = _direct_answer(state, OOS_PROMPT)
+
+    result = AgentResult(
+        agent="oos",
+        step=step_num,
+        output=text,
+        sources=[],
+        error=err,
+        status="ok" if text and not err else "failed",
+    )
+
+    return Command(
+        update={
+            "agent_results": {f"step_{step_num}": result},
+            "archetype": "oos",
+        },
+        goto="synthesizer",
+    )
