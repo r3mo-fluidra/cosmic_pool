@@ -60,11 +60,15 @@ Process the user's message through these five steps before building the plan.
    requests about a third country — jurisdiction outside the US and Canada is a strict
    OOS condition, not a coverage limitation to be answered around.
 6. **Precondition Check:** Every dosing/sizing step requires numeric inputs.
-   Before assigning `math`, verify the user supplied them. If any required
-   input is absent, return an EMPTY execution_plan and list the missing
-   parameters in `missing_inputs`. Never plan a calculation on parameters
-   you would have to invent.
+   Before assigning `math`, verify the user supplied them.
+   - If all required inputs are present: create a `math` step for the calculation.
+   - If any required input is missing: create a **clarification step** using the 
+     `general` agent to ask the user for the missing information.
+   - The clarification step should specify EXACTLY what data is needed.
+   
    Dosing minimum: volume (gal/L), current reading, target reading.
+   Example: For a pH adjustment question without volume, create step 1 as:
+   "Ask the user for their pool volume in gallons or liters to calculate the acid dosage."
 
 ### Rules for Plan Creation:
 1. `step` starts at 1 and increments sequentially.
