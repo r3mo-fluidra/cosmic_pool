@@ -245,6 +245,44 @@ constants:
   ct_giardia: {value: 45, unit: ppm-min, category: c, verify: true, ahj_override: true}
   ct_formed_stool: {value: 50, unit: ppm-min, category: c, verify: true, ahj_override: true, range: [45, 60]}
 
+  # --- Acid strengths --------------------------------------------------------
+  muriatic_acid_fraction:
+    value: 0.3145
+    range: [0.145, 0.3145]
+    unit: fraction_HCl
+    category: b
+    verify: false
+    conservative_direction: use_high_end_for_dose
+    notes: >-
+      31.45% = 20 degrees Baume, the strength assumed by
+      muriatic_floz_per_10k_per_10ppm_TA. "Safer" / low-fume acid is commonly
+      14.5-15% and requires roughly 2.2x the volume for the same TA drop.
+      Assume the HIGH end when computing a dose: less product added is the
+      recoverable direction.
+
+  dry_acid_purity:
+    value: 0.932
+    range: [0.90, 0.98]
+    unit: fraction_NaHSO4
+    category: b
+    verify: true
+    conservative_direction: use_high_end_for_dose
+    notes: "Typical granular dry-acid product purity. Label controls."
+
+  dry_acid_lb_per_10k_per_10ppm_TA:
+    value: 2.1
+    unit: lb
+    category: b
+    verify: true
+    range: [2.0, 2.3]
+    conservative_direction: underdose
+    notes: >-
+      DERIVED, not sourced. Proton-equivalent to
+      muriatic_floz_per_10k_per_10ppm_TA: 26 fl oz of 31.45% HCl (SG 1.16)
+      = 0.618 lb HCl = 7.68 mol H+; NaHSO4 (MW 120.06, 1 H+/mol) = 2.03 lb
+      pure = 2.18 lb at 93.2% purity. Confirm against a Taylor/CPO dosing
+      table before compliance use.
+
 # =============================================================================
 # LOOKUP TABLES (Taylor-style water balance — ⚠VERIFY against current card)
 # =============================================================================
@@ -329,7 +367,27 @@ formulas:
     worked_example: {inputs: {length_ft: 40, width_ft: 20, avg_depth_ft: 5.5}, expected: 33000, tolerance: 1}
     source_id: cpo_handbook_volume
     aliases: ["how many gallons in a rectangular pool", "rectangle pool volume", "tank capacity length times width"]
-
+  
+    - formula_id: dose_dry_acid_ph_ta
+    name: Sodium bisulfate (dry acid) dose to lower pH / total alkalinity
+    domain: dosing
+    tier: extended
+    category: b
+    verify: true
+    expression: "(gallons / 10000) * dry_acid_lb_per_10k_per_10ppm_TA * (ta_drop_ppm / 10)"
+    result_unit: lb
+    product_spec: "~93% sodium bisulfate granular dry acid"
+    inputs:
+      - {name: gallons, unit: gal, min: 100, max: 2000000}
+      - {name: ta_drop_ppm, unit: ppm, min: 5, max: 100}
+    constants: [dry_acid_lb_per_10k_per_10ppm_TA]
+    conservative_direction: underdose
+    guards:
+      - {check: "ta_drop_ppm <= 50", severity: warn, message: "Stage large TA reductions across days with aeration."}
+      - {check: null, severity: warn, message: "Adds sulfate permanently; removable only by dilution. Sulfate attacks plaster and concrete over time. Prefer muriatic acid where sulfate buildup is a concern."}
+    source_id: derived_proton_equivalence
+    aliases: ["dry acid dose", "sodium bisulfate amount", "pH down granular"]
+    
   - formula_id: volume_circular
     name: Circular pool volume
     domain: volume

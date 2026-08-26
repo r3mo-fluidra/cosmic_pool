@@ -10,7 +10,11 @@ from ..prompts.prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT, SUGGESTER_PROM
 from .chains import create_planner_chain
 from ..config.llm import create_llm, create_suggester_llm
 from .agents import get_agent_by_name
-
+from .gates import (
+    math_inputs_present,
+    missing_inputs_result
+)
+from ..prompts.prompts_sub_agents import MATH
 # Graph context
 from ..graph_context.response_contracts import (
     SynthesizerOutput, get_contract, resolve_archetype,
@@ -496,15 +500,21 @@ def run_step_node(payload: dict) -> Command:
     user_message = payload["user_message"]
     step_key     = f"step_{step.step}"
 
-    try:
-        agent_result = _run_step(step, user_message)
-    except Exception as exc:
-        agent_result = AgentResult(
-            agent=step.assigned_agent,
-            step=step.step,
-            output="",
-            error=str(exc),
-        )
+    if step.assigned_agent == MATH and not math_inputs_present(user_message):
+        # Gate determinista: sin ningún dígito en el turno, ninguna fórmula
+        # del catálogo tiene con qué calcular. Evita 5-9 llamadas al LLM
+        # que solo iban a terminar pidiendo el dato que ya sabíamos que faltaba.
+        agent_result = missing_inputs_result(step, user_message)
+    else:
+        try:
+            agent_result = _run_step(step, user_message)
+        except Exception as exc:
+            agent_result = AgentResult(
+                agent=step.assigned_agent,
+                step=step.step,
+                output="",
+                error=str(exc),
+            )
 
     return Command(
         update={"agent_results": {step_key: agent_result}},

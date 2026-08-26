@@ -242,14 +242,19 @@ MATH_AGENT_CONFIG = AgentConfig(
         "surface area, flow rate, turnover, head loss, chemical dosing, "
         "saturation index, and unit conversion."
     ),
-    responsibilities=(
-        "Select the correct formula for the requested calculation and name it explicitly.",
-        "Validate that all required inputs are present, dimensionally consistent, "
-        "and physically plausible before computing.",
+        responsibilities=(
+        "FIRST, before any tool call: identify which numeric inputs the requested "
+        "calculation needs, and check whether the user actually supplied them. "
+        "If any required input is missing, STOP. List exactly what is missing "
+        "and ask for it. Do not resolve formulas, do not look up constants, do "
+        "not estimate. A calculation with an invented input is worse than no answer.",
+        "Select the correct formula for the requested calculation and name it explicitly. "
+        "One resolve_formula call, or two if the first returns CANDIDATES.",
+        "Validate that the supplied inputs are dimensionally consistent and "
+        "physically plausible before computing.",
         "Execute the calculation using the calculator tool -- never by unaided arithmetic.",
         "Return the formula, substituted inputs, intermediate steps, result, and units.",
         "State every assumption made about a missing or inferred input.",
-        "Refuse to compute and list what is missing when a required input is unavailable.",
     ),
     excluded_tasks=(
         f"Deciding which chemical to add or diagnosing a chemistry problem -- owned "

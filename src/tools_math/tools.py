@@ -174,9 +174,29 @@ def resolve_formula(
     is no semantic search: an intent that does not match is reported as not
     found, never approximated to the nearest formula.
 
+    BUDGET: at most two calls per calculation. One to resolve, and at most one
+    more to pick a formula_id from a CANDIDATES list. Rephrasing the intent
+    hits the same lookup table and returns the same result -- it never finds a
+    formula that the first call missed.
+
+    The first line of the result is a machine-readable STATUS:
+      RESOLVED    one formula matched. Your next action is either `calculate`
+                  or reporting the missing required_inputs -- never another
+                  resolve_formula call.
+      CANDIDATES  several matched. Call again with intent=<exact formula_id>
+                  from the list. Do not rephrase.
+      NOT_FOUND   nothing matched. Stop. Do not retry, do not reconstruct the
+                  formula from general knowledge.
+
+    When STATUS is RESOLVED, compare required_inputs against what the user
+    actually provided. If any is missing, stop and ask for it. Do not call
+    get_constant or lookup_product to work around a missing user input -- a
+    constant is not a substitute for the pool's volume.
+
     Args:
-        intent: The quantity to compute, in canonical English terms. Examples:
-            "pool volume", "turnover time", "required flow rate",
+        intent: The quantity to compute, in canonical English terms, OR the
+            exact formula_id returned by a previous CANDIDATES response.
+            Examples: "pool volume", "turnover time", "required flow rate",
             "liquid chlorine dose", "breakpoint chlorination target",
             "dilution volume", "spa water replacement interval",
             "saturation index", "filtration rate", "pipe velocity".
@@ -195,13 +215,27 @@ def resolve_formula(
         found" message when none do.
     """
     try:
+        # Salida directa del bucle: si `intent` es un formula_id literal --
+        # típicamente porque el modelo está respondiendo a un CANDIDATES
+        # anterior -- resuélvelo sin pasar por el fuzzy matcher. Sin esto,
+        # "acid demand" y "lower pH" siguen cayendo en el mismo matcher
+        # difuso que ya los desambiguó distinto la primera vez.
+        try:
+            direct = get_formula(intent)
+        except (CatalogError, KeyError, LookupError):
+            direct = None
+        if direct is not None:
+            return "STATUS: RESOLVED\n" + _fmt_formula(direct)
+
         matches = match_formulas(intent, limit=None)
 
         if not matches:
             domains = ", ".join(sorted(index()["by_domain"]))
             return (
-                f"NO FORMULA FOUND for intent '{intent}'.\n"
-                f"Do not reconstruct a formula from general knowledge. Report to the "
+                f"STATUS: NOT_FOUND\n"
+                f"No formula in the catalog computes '{intent}'.\n"
+                f"Do NOT retry with a synonym or a related term. Do not "
+                f"reconstruct a formula from general knowledge. Report to the "
                 f"user that the catalog has no entry for this calculation.\n"
                 f"Available domains: {domains}"
             )
@@ -223,12 +257,16 @@ def resolve_formula(
         if len(matches) == 1 or matches[0][1] >= 1.0:
             exact = [m for m in matches if m[1] >= 1.0] or matches[:1]
             if len(exact) == 1:
-                return _fmt_formula(get_formula(exact[0][0]))
+                return "STATUS: RESOLVED\n" + _fmt_formula(get_formula(exact[0][0]))
             matches = exact
 
         out = [
-            f"{len(matches)} CANDIDATES for '{intent}'. Disambiguate on geometry "
-            f"or venue before computing -- do not guess.\n"
+            f"STATUS: CANDIDATES ({len(matches)} matches for '{intent}')\n"
+            f"Pick ONE formula_id from the list below and call resolve_formula "
+            f"again with intent=<that exact formula_id>. Do NOT rephrase the "
+            f"intent -- re-querying with a synonym returns this same list.\n"
+            f"If none of these computes what was asked, stop and report "
+            f"insufficient_evidence.\n"
         ]
         for fid, score in matches:
             f = get_formula(fid)
@@ -241,9 +279,9 @@ def resolve_formula(
         return "\n".join(out)
 
     except CatalogError as e:
-        return f"Catalog error in resolve_formula: {e}"
+        return f"STATUS: NOT_FOUND\nCatalog error in resolve_formula: {e}"
     except Exception as e:  # pragma: no cover
-        return f"Error in resolve_formula: {type(e).__name__}: {e}"
+        return f"STATUS: NOT_FOUND\nError in resolve_formula: {type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -355,34 +393,39 @@ def convert_units(
 # 4. lookup_product
 # ---------------------------------------------------------------------------
 
-@tool
 def lookup_product(
     product_name: str,
     label_percent: Optional[float] = None,
 ) -> str:
     """
-    Retrieve available chlorine and cyanuric acid contribution for a chlorine
-    product. Call before any dosing calculation that names a product.
+    Retrieve dosing-relevant properties for a pool chemical: available chlorine
+    and CYA contribution for sanitizers, acid strength and dose-rate scaling for
+    acids, plus the handling hazards that must be surfaced with any dose.
+    Call before any dosing calculation that names a product.
 
     Args:
         product_name: Product as the user described it. Examples:
-            "sodium hypochlorite", "liquid chlorine", "cal hypo",
-            "calcium hypochlorite", "lithium hypochlorite", "dichlor", "trichlor".
-        label_percent: Available chlorine from the product label (as a percent,
-            e.g. 12.5), if the user supplied it. When present it overrides the
-            catalog range entirely and no safety factor is applied.
+            "sodium hypochlorite", "liquid chlorine", "cal hypo", "dichlor",
+            "trichlor", "muriatic acid", "dry acid", "sodium bisulfate".
+        label_percent: Strength from the product label (as a percent, e.g. 12.5
+            for hypochlorite, 31.45 for muriatic acid), if the user supplied it.
+            When present it overrides the catalog range entirely and no safety
+            factor is applied.
 
     Returns:
-        Available chlorine as a RANGE when label_percent is absent, the fraction
-        selected for computation, the CYA contribution per ppm FC where
-        applicable, the safety-factor direction applied, and an explicit
-        statement that the product label controls.
+        For sanitizers: available chlorine as a RANGE when label_percent is
+        absent, the fraction selected, CYA contribution per ppm FC, and the
+        safety-factor direction. For acids: the strength assumed by the catalog
+        dose rate, the scaling multiplier if the user's product differs, and the
+        formula_id to use. For every product: mandatory handling hazards and an
+        explicit statement that the product label controls.
     """
     try:
         canonical, spec = resolve_product(product_name)
         strength = get_constant_spec(spec["strength"])
+        product_class = spec.get("class", "sanitizer")
 
-        lines = [f"product: {canonical}"]
+        lines = [f"product: {canonical}", f"class: {product_class}"]
 
         if label_percent is not None:
             fraction = float(label_percent) / 100.0
@@ -391,33 +434,25 @@ def lookup_product(
                 "safety_factor: none applied -- label value supersedes the catalog range.",
             ]
         else:
+            fraction = strength.value
             if strength.value_range:
                 lo, hi = strength.value_range
-                lines.append(
-                    f"nominal_range: {lo * 100:.1f}% to {hi * 100:.1f}% available chlorine"
-                )
+                lines.append(f"nominal_range: {lo * 100:.1f}% to {hi * 100:.1f}%")
             lines += [
-                f"fraction_available: {strength.value} (CATALOG DEFAULT -- an assumption)",
+                f"fraction_available: {fraction} (CATALOG DEFAULT -- an assumption)",
                 f"safety_factor: {strength.conservative_direction or 'not declared'}",
                 "ASSUMPTION TO REPORT: no label strength was supplied. State the "
                 "value used and that the result changes if the label differs.",
             ]
 
-        if spec["cya"]:
-            cya = get_constant_spec(spec["cya"])
-            lines.append(
-                f"cya_contribution: {cya.value} ppm CYA per 1.0 ppm FC delivered "
-                f"-- FLAG THIS to the user even if they only asked about chlorine. "
-                f"CYA accumulates and is removable only by dilution."
-            )
+        if product_class == "acid":
+            lines += _acid_lines(spec, fraction, label_percent)
         else:
-            lines.append("cya_contribution: none")
+            lines += _sanitizer_lines(canonical, spec)
 
-        if canonical == "sodium hypochlorite":
-            lines.append(
-                "DEGRADATION: liquid chlorine loses strength in storage. Stored "
-                "product is weaker than its label. Prefer a measured strength."
-            )
+        for hazard in spec.get("hazards", []):
+            lines.append(f"HAZARD (surface this with any dose): {hazard}")
+
         if strength.notes:
             lines.append(f"notes: {strength.notes}")
 
@@ -425,9 +460,64 @@ def lookup_product(
         return "\n".join(lines)
 
     except CatalogError as e:
-        return f"PRODUCT NOT FOUND: {e}\nDo not assume a strength. Ask the user for the label percentage."
+        return (
+            f"PRODUCT NOT FOUND: {e}\n"
+            "Do not assume a strength or a dose rate. Ask the user for the "
+            "product's full name and its label strength."
+        )
     except Exception as e:  # pragma: no cover
         return f"Error in lookup_product: {type(e).__name__}: {e}"
+
+
+def _sanitizer_lines(canonical: str, spec: dict) -> list[str]:
+    lines = []
+    if spec.get("cya"):
+        cya = get_constant_spec(spec["cya"])
+        lines.append(
+            f"cya_contribution: {cya.value} ppm CYA per 1.0 ppm FC delivered "
+            f"-- FLAG THIS to the user even if they only asked about chlorine. "
+            f"CYA accumulates and is removable only by dilution."
+        )
+    else:
+        lines.append("cya_contribution: none")
+
+    if canonical == "sodium hypochlorite":
+        lines.append(
+            "DEGRADATION: liquid chlorine loses strength in storage. Stored "
+            "product is weaker than its label. Prefer a measured strength."
+        )
+    return lines
+
+
+def _acid_lines(spec: dict, fraction: float, label_percent: Optional[float]) -> list[str]:
+    rate = get_constant_spec(spec["dose_rate"])
+    reference = spec["reference_strength"]
+    lines = [
+        "cya_contribution: not applicable (this is an acid, not a sanitizer).",
+        f"dose_formula: {spec['dose_formula']}",
+        f"dose_rate: {rate.value} {spec['dose_unit']} per 10,000 gal per 10 ppm TA drop, "
+        f"AT A REFERENCE STRENGTH OF {reference * 100:.1f}%",
+    ]
+
+    scaling = reference / fraction if fraction else None
+    if scaling is not None and abs(scaling - 1.0) > 0.02:
+        lines.append(
+            f"STRENGTH SCALING REQUIRED: the user's product is {fraction * 100:.1f}%, "
+            f"not the {reference * 100:.1f}% the dose rate assumes. Multiply the "
+            f"computed dose by {scaling:.2f}. Do not report the unscaled figure."
+        )
+    else:
+        lines.append("strength_scaling: 1.00 (product matches the reference strength)")
+
+    if label_percent is None:
+        lines.append(
+            "Assumed the HIGH end of the strength range, which UNDERSTATES the "
+            "dose. Underdosing is the recoverable direction: low-pH overshoot is "
+            "corrosive and slow to reverse. Add incrementally, retest, repeat."
+        )
+    if rate.verify:
+        lines.append(f"VERIFY: {rate.notes}")
+    return lines
 
 
 # ---------------------------------------------------------------------------

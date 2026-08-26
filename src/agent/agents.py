@@ -181,12 +181,7 @@ def _initialize():
         "recovery": recovery_agent,
         "records": records_agent,
         "math": math_agent,
-    }
-    pool_supervisor = create_supervisor(
-        agents=list(_agents.values()),
-        model=_routing_llm,
-        prompt=SUPERVISOR_PROMPT,
-    ).compile()
+    }    
 
     _initialized = True
 
@@ -210,6 +205,13 @@ def get_agent_by_name(agent_name: AgentName):
     return agent
 
 def get_supervisor():
-    """Devuelve el supervisor compilado, inicializando si es necesario."""
-    _initialize()
+    """Devuelve el supervisor compilado, construyéndolo bajo demanda."""
+    global pool_supervisor
+    _initialize()  # agentes base, sin supervisor
+    if pool_supervisor is None:
+        pool_supervisor = create_supervisor(
+            agents=list(_agents.values()),
+            model=_routing_llm,
+            prompt=SUPERVISOR_PROMPT,
+        ).compile()
     return pool_supervisor

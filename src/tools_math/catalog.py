@@ -32,6 +32,44 @@ _catalog: Optional[dict] = None
 _index: Optional[dict] = None
 _lock = threading.Lock()
 
+_HAS_DIGIT = re.compile(r"\d")
+
+def math_inputs_present(user_message: str) -> bool:
+    """
+    Check whether the current turn has any numeric quantity to compute with.
+
+    Args:
+        user_message: The user's raw message for this turn.
+
+    Returns:
+        True if a calculation is plausible (a digit appears in the message).
+        False only when the message has no digits at all -- i.e. the request
+        cannot possibly be computed yet, since every formula in the catalog
+        needs at least one numeric input.
+    """
+    return bool(_HAS_DIGIT.search(user_message or ""))
+
+
+def missing_inputs_result(step, user_message: str) -> "AgentResult":
+    """
+    Build the AgentResult returned when the MATH gate short-circuits.
+
+    The output is a machine-readable marker, not prose: the synthesizer
+    still owns phrasing, language, and archetype selection. Passing it
+    already-written prose here would make the synthesizer paraphrase work
+    that was already done, wasting a generation pass.
+    """
+    return AgentResult(
+        agent=MATH,
+        step=step.step,
+        output=(
+            "STATUS: MISSING_INPUTS\n"
+            "The requested calculation needs numeric inputs that were not "
+            "provided in this turn. Ask the user for: pool volume (gallons), "
+            "current value of the parameter, and target value."
+        ),
+        sources=[],
+    )
 
 class CatalogError(RuntimeError):
     """Raised when the catalog is missing, malformed, or an entry is absent."""
@@ -509,6 +547,37 @@ PRODUCT_MAP: dict[str, dict[str, Any]] = {
                 "synonyms": ["sodium dichloroisocyanurate", "di-chlor"]},
     "trichlor": {"strength": "trichlor_fraction", "cya": "trichlor_cya_ratio",
                  "synonyms": ["trichloroisocyanuric acid", "tri-chlor", "tabs", "pucks"]},
+
+    "muriatic acid": {
+        "class": "acid",
+        "strength": "muriatic_acid_fraction",
+        "reference_strength": 0.3145,
+        "cya": None,
+        "dose_formula": "dose_muriatic_acid_ph_ta",
+        "dose_rate": "muriatic_floz_per_10k_per_10ppm_TA",
+        "dose_unit": "fl oz",
+        "synonyms": ["muriatic", "hydrochloric acid", "hcl", "pool acid", "acido muriatico"],
+        "hazards": [
+            "NEVER mix with hypochlorite or any chlorine product -- releases chlorine gas.",
+            "ALWAYS add acid to water, never water to acid.",
+            "Broadcast slowly over the deep end with the pump running; never pour into a skimmer.",
+        ],
+    },
+    "sodium bisulfate": {
+        "class": "acid",
+        "strength": "dry_acid_purity",
+        "reference_strength": 0.932,
+        "cya": None,
+        "dose_formula": "dose_dry_acid_ph_ta",
+        "dose_rate": "dry_acid_lb_per_10k_per_10ppm_TA",
+        "dose_unit": "lb",
+        "synonyms": ["dry acid", "sodium hydrogen sulfate", "nahso4", "ph down", "ph minus", "bisulfate"],
+        "hazards": [
+            "NEVER mix with any chlorine product, wet or dry -- releases chlorine gas.",
+            "Pre-dissolve in a clean bucket of water, adding acid to water.",
+            "Dust is a respiratory and eye irritant; do not broadcast into wind.",
+        ],
+    },
 }
 
 
