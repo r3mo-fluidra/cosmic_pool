@@ -5,6 +5,7 @@ from typing_extensions import NotRequired
 import operator
 
 from pydantic import BaseModel, Field, model_validator
+
 from langchain_core.messages import BaseMessage, AIMessage
 from langgraph.graph.message import add_messages
 from langgraph.types import Command
@@ -214,13 +215,14 @@ class PoolAgentState(TypedDict):
     ]
 
     # ── Response contract ────────────────────────────────────────────
-    archetype: NotRequired[str]
+    archetype: Annotated[str | None, lambda a, b: b]
     response: NotRequired[SynthesizerOutput]
     validation: NotRequired[dict]
 
     # ── Sugerencias (chips) ──────────────────────────────────────────
     suggestions: NotRequired[List[Suggestion]]
-    ignored_chip_streak: NotRequired[int]
+    misroute_retries: Annotated[int, lambda a, b: b] 
+    ignored_chip_streak: Annotated[int, lambda a, b: b]
 
     # ── Error handling ───────────────────────────────────────────────
     error: NotRequired[Optional[str]]

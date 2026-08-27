@@ -23,32 +23,45 @@ Node topology
                  ┌──────▼──────┐
                  │   planner   │
                  └──────┬──────┘
-                        │ Command(goto="orchestrator")
-                 ┌──────▼──────┐ ◄─────────────────────────┐
-                 │ orchestrator│                            │
-                 └──────┬──────┘                            │
-                        │ Command(goto=[Send("run_step", …), …])
-                        │ fan-out: uno o más steps "ready"   │
-                        │ despachados en el mismo superstep  │
-                 ┌──────▼──────┐                            │
-                 │  run_step   │ ── Command(goto="orchestrator") ──┘
-                 └─────────────┘   (cada Send vuelve por su lado;
+                        │
+               ┌────────┼────────┐
+               │        │        │
+               ▼        ▼        ▼
+          ┌────────┐ ┌────────┐ ┌────────┐
+          │general │ │  oos   │ │orchestr│
+          └───┬────┘ └───┬────┘ └───┬────┘
+              │          │          │
+              └──────────┼──────────┘
+                         │
+                         │ Command(goto=[Send("run_step", …), …])
+                         │ fan-out: uno o más steps "ready"
+                         │ despachados en el mismo superstep
+                  ┌──────▼──────┐
+                  │  run_step   │ ── Command(goto="orchestrator") ──┘
+                  └─────────────┘   (cada Send vuelve por su lado;
                                     agent_results se mergea vía
-                                    operator.or_, no se pisa)
-                        │
-                        │ orchestrator: cuando ya no quedan
-                        │ steps pendientes → Command(goto="synthesizer")
-                 ┌──────▼──────┐
-                 │ synthesizer │
-                 └──────┬──────┘
-                        │
-                       END
+                                    merge_agent_results con centinela
+                                    None, no se pisa)
+                         │
+                         │ orchestrator: cuando ya no quedan
+                         │ steps pendientes, puede hacer:
+                         │ - Fan-out a ["synthesizer", "suggester"]
+                         │ - O ir solo a "synthesizer"
+                         │
+                  ┌──────┴──────┐
+                  │             │
+           ┌──────▼──────┐ ┌───▼──────┐
+           │ synthesizer │ │ suggester│ (paralelo, opcional)
+           └──────┬──────┘ └───┬──────┘
+                  │            │
+                 END          END
 
 Routing notes
 ─────────────
 - build_context_node returns a Command with goto, bypassing any memory_router.
 - summarize_memory_node returns Command(goto="planner") after trimming messages.
-- planner returns Command(goto="orchestrator").
+- planner returns Command(goto="orchestrator") by default, but may route to
+  "general" or "oos" if execution_plan has a single step assigned to those nodes.
 - orchestrator no longer executes agents itself: it computes which steps in
   execution_plan are "ready" (their depends_on are already present in
   agent_results) and dispatches them via Send("run_step", ...). Multiple
@@ -56,11 +69,31 @@ Routing notes
 - run_step executes exactly one ExecutionStep (whatever LangGraph handed it
   via Send) and always routes back to orchestrator with Command(goto=...).
 - orchestrator re-evaluates on every return; once execution_plan has no
-  pending steps left, it routes to synthesizer instead of dispatching.
-- agent_results uses an operator.or_ reducer in the state (see state.py) so
-  concurrent writes from parallel run_step calls merge instead of
-  overwriting each other.
+  pending steps left, it routes to synthesizer (or fan-out to synthesizer
+  + suggester if should_suggest() returns True).
+- agent_results uses a custom reducer (merge_agent_results) with centinela
+  None — this ensures parallel writes from run_step nodes merge correctly
+  without overwriting each other. The reducer handles both dict updates
+  and None values.
+- general and oos are direct graph nodes, not agents in AGENT_REGISTRY.
+  They handle single-step plans and route directly to synthesizer.
 - synthesizer returns a plain dict → simple edge to END.
+- suggester is an optional parallel node triggered by orchestrator when
+  should_suggest() returns True. It runs concurrently with synthesizer
+  and writes suggestions to state, never blocking the main response path.
+
+Fan-out details
+───────────────
+1. Orchestrator fan-out to run_step:
+   - Computes which steps are ready based on depends_on and current results
+   - Dispatches one Send per ready step in the same superstep
+   - Each run_step writes its result via merge_agent_results
+
+2. Orchestrator fan-out to synthesizer + suggester:
+   - When all steps are complete AND should_suggest() returns True
+   - Sends both nodes in parallel via Command(goto=["synthesizer", "suggester"])
+   - synthesizer produces the final answer; suggester produces optional chips
+   - Neither blocks the other; suggester has a short deadline and degrades gracefully
 """
 
 from langgraph.graph import StateGraph, START, END

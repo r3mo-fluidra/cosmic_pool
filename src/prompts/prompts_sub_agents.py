@@ -39,9 +39,6 @@ Changes from the original:
 
 # --- Canonical agent names -------------------------------------------------
 # Use these constants anywhere an agent refers to another agent.
-GENERAL = "Pool General Assistant Agent"
-OOS     = "Out-of-Scope Handler"
-
 CHEMISTRY = "Pool Chemistry Agent"
 EQUIPMENT = "Pool Equipment Agent"
 HYDRAULICS = "Pool Hydraulics Agent"
@@ -655,8 +652,6 @@ RECOVERY_AGENT_CONFIG = AgentConfig(
 # ===========================================================================
 
 
-GENERAL_AGENT_CONFIG = AgentConfig(agent_name="general", specialization="Free-form pool knowledge fallback", responsibilities=("General pool knowledge and guidance",), excluded_tasks=(), tools=(), tool_instructions="", output_contract="", archetype="conversational")
-OOS_AGENT_CONFIG = AgentConfig(agent_name="oos", specialization="Out-of-scope request rejection", responsibilities=("Reject unsafe or off-topic requests",), excluded_tasks=(), tools=(), tool_instructions="", output_contract="", archetype="critical")
 
 AGENT_REGISTRY = {
 CHEMISTRY: CHEMISTRY_AGENT_CONFIG,
@@ -670,27 +665,4 @@ FACILITY_DESIGN: FACILITY_DESIGN_AGENT_CONFIG,
 SAFETY: SAFETY_AGENT_CONFIG,
 RECORDS: RECORDS_AGENT_CONFIG,
 RECOVERY: RECOVERY_AGENT_CONFIG,
-GENERAL: AgentConfig(
-        agent_name="general",
-        specialization="Free-form pool knowledge",
-        responsibilities=("General pool knowledge",),
-        excluded_tasks=(),
-        tools=(),
-        tool_instructions="",   
-        output_contract="",
-        archetype="conversational",
-        tool_budget= 0
-        ,
-    ),
-OOS: AgentConfig(
-    agent_name="oos",
-    specialization="Out-of-scope rejection",
-    responsibilities=("Reject unsafe/off-topic requests",),
-    excluded_tasks=(),
-    tools=(),
-    tool_instructions="",
-    output_contract="",
-    archetype="critical",
-    tool_budget= 0
-    ),
 }

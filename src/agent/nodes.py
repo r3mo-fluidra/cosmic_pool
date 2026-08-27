@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
 _SUGGESTER_DEADLINE_S = 1.2
-
+_MAX_MISROUTE_RETRIES = 2
 
 # ================================================================
 # ROUTING: planner → general | oos | orchestrator
@@ -66,7 +66,7 @@ GENERAL_AGENT = "general"
 # Roster válido para recuperar un MISROUTE. Sin whitelist, un nombre
 # alucinado por el LLM explota adentro de get_agent_by_name en run_step.
 _MISROUTE_AGENTS = frozenset({
-    "contamination", "safety", "chemistry", "compliance", "general",
+    "contamination", "safety", "chemistry", "compliance",
 })
 
 _MISROUTE_RE = re.compile(r"^\s*MISROUTE:\s*([A-Za-z_]+)\s*(.*)", re.DOTALL)
@@ -81,7 +81,7 @@ def _normalize_agent(agent) -> str:
 
 def _route_from_plan(execution_plan: list[ExecutionStep]) -> str:
     if not execution_plan:
-        return "orchestrator"  # el orchestrator debe mirar missing_inputs en el state
+        return "orchestrator"
 
     if len(execution_plan) != 1:
         return "orchestrator"
@@ -103,11 +103,9 @@ def _last_human_text(state: PoolAgentState) -> str:
     return ""
 
 
-def _direct_answer(state: PoolAgentState, system_prompt: str) -> tuple[str, str | None]:
+def _direct_answer(state: PoolAgentState, system_prompt: str, deadline_s: float = STEP_DEADLINE_S) -> tuple[str, str | None]:
     """
-    Una sola llamada al LLM: sin tools, sin ReAct loop, sin ThreadPool.
-    Estos dos nodos no hacen retrieval, así que el overhead de _run_step
-    (create_react_agent + iteración de tool calls) es puro costo.
+    Una sola llamada al LLM con deadline.
     """
     plan = state.get("execution_plan") or []
     user_message = _last_human_text(state)
@@ -115,11 +113,17 @@ def _direct_answer(state: PoolAgentState, system_prompt: str) -> tuple[str, str 
     language = _LANGUAGE_MAP.get(state.get("detected_language", "es"), _LANGUAGE_MAP["es"])
 
     try:
-        raw = _get_llm().invoke([
-            SystemMessage(content=f"{system_prompt}\n\nRespond in: {language}"),
-            HumanMessage(content=f"Task: {task}\n\nUser context: {user_message}"),
-        ])
-        return _extract_text(raw.content), None
+        # Ejecutar con deadline
+        def _invoke():
+            return _get_llm().invoke([
+                SystemMessage(content=f"{system_prompt}\n\nRespond in: {language}"),
+                HumanMessage(content=f"Task: {task}\n\nUser context: {user_message}"),
+            ])
+        
+        result = _run_with_deadline(_invoke, deadline_s)
+        return _extract_text(result.content), None
+    except FuturesTimeout:
+        return "", "STEP_DEADLINE_EXCEEDED"
     except Exception as exc:
         err = str(exc).strip() or exc.__class__.__name__
         if exc.__class__.__name__ in _INFRA_EXC_NAMES and not _INFRA_CODE_RE.match(err):
@@ -192,6 +196,37 @@ _SOFT_ERROR_PREFIXES = ("MISSING_INPUTS", "CANNOT_COMPUTE", "NO_GRAPH_COVERAGE")
 # ================================================================
 # HELPERS
 # ================================================================
+
+# Agregar al inicio del archivo, después de los imports
+def _resolve_and_update_archetype(
+    execution_plan: list[ExecutionStep],
+    agent_results: dict,
+    extra_results: dict | None = None,
+    error: str | None = None,
+    force_archetype: str | None = None,
+) -> dict:
+    """
+    Helper unificado para resolver el archetype y preparar el update.
+    """
+    merged = {**agent_results, **(extra_results or {})}
+    usable = usable_results(merged)
+    agents = [r.agent for r in usable]
+
+    # Si force_archetype está presente, usarlo (para general/oos)
+    archetype = force_archetype or resolve_archetype(
+        execution_plan=execution_plan,
+        agents=agents,
+        agent_results=merged,
+    )
+
+    update: dict = {"archetype": archetype}
+    if extra_results:
+        update["agent_results"] = extra_results
+    if error:
+        update["error"] = error
+    
+    return update
+
 
 def is_infra_error(err: str | None, exc: BaseException | None = None) -> bool:
     """True solo para fallos del proveedor / timeouts, no para contratos de negocio."""
@@ -459,27 +494,12 @@ def _to_synthesizer(
     agent_results: dict,
     extra_results: dict | None = None,
     error: str | None = None,
+    force_archetype: str | None = None,
 ) -> Command:
-    """
-    Única salida hacia el synthesizer. Resuelve `archetype` aquí para que
-    synthesizer y suggester lean el mismo valor del state, y para que los
-    `agents` que ven el prompt y `enforce_contract` sean idénticos.
-    """
-    merged = {**agent_results, **(extra_results or {})}
-    usable = usable_results(merged)
-    agents = [r.agent for r in usable]
-
-    archetype = resolve_archetype(
-        execution_plan=execution_plan,
-        agents=agents,
-        agent_results=merged,
+    """Única salida hacia el synthesizer usando el helper unificado."""
+    update = _resolve_and_update_archetype(
+        execution_plan, agent_results, extra_results, error, force_archetype
     )
-
-    update: dict = {"archetype": archetype}
-    if extra_results:
-        update["agent_results"] = extra_results
-    if error:
-        update["error"] = error
     return Command(update=update, goto="synthesizer")
 
  
@@ -619,64 +639,6 @@ def planner(state: PoolAgentState, config: RunnableConfig):
 # ORCHESTRATOR NODE
 # ================================================================
 
-# @observe(as_type="agent", name="Orchestrator Node")
-# def orchestrator(state: PoolAgentState) -> Command:
-#     execution_plan = state.get("execution_plan", [])
-#     agent_results  = dict(state.get("agent_results") or {})
-#     current_idx    = state.get("current_step", 0)
-
-#     if not execution_plan:
-#         return Command(
-#             update={"error": "execution_plan is empty; cannot orchestrate."},
-#             goto="synthesizer",
-#         )
-
-#     if current_idx >= len(execution_plan):
-#         return Command(goto="synthesizer")
-
-#     step     = execution_plan[current_idx]
-#     step_key = f"step_{step.step}"
-
-#     messages = state.get("messages", [])
-#     user_message = ""
-#     for msg in reversed(messages):
-#         if hasattr(msg, "type") and msg.type == "human":
-#             user_message = _extract_text(msg.content)
-#             break
-
-#     try:
-#         agent_result = _run_step(step, user_message)
-#     except Exception as exc:
-#         agent_result = AgentResult(
-#             agent=step.assigned_agent,
-#             step=step.step,
-#             output="",
-#             error=str(exc),
-#         )
-
-#     agent_results[step_key] = agent_result
-
-#     next_idx = current_idx + 1
-#     goto = "orchestrator" if next_idx < len(execution_plan) else "synthesizer"
-
-#     return Command(
-#         update={
-#             "agent_results": agent_results,
-#             "current_step": next_idx,
-#         },
-#         goto=goto,
-#     )
-def _deps_ok(step, results) -> tuple[bool, str|None]:
-    for dep in step.get("depends_on", []):
-        r = results.get(f"step_{dep}")
-        if r is None:
-            return False, f"dependency step_{dep} did not run"
-        if r.get("error") or not r.get("output"):
-            return False, f"dependency step_{dep} failed: {r.get('error','empty output')}"
-    return True, None
-
-
-
 @observe(as_type="agent", name="Orchestrator Node")
 def orchestrator(state: PoolAgentState) -> Command:
     execution_plan = state.get("execution_plan", [])
@@ -684,7 +646,7 @@ def orchestrator(state: PoolAgentState) -> Command:
  
     if not execution_plan:
         return _to_synthesizer(
-            state, execution_plan, agent_results,
+            execution_plan, agent_results,
             error="EMPTY_EXECUTION_PLAN: planner produced no steps.",
         )
  
@@ -704,7 +666,9 @@ def orchestrator(state: PoolAgentState) -> Command:
     pending = [s for s in execution_plan if s.step not in done]
  
     if not pending:
-        return _to_synthesizer(state, execution_plan, agent_results)
+        return _to_synthesizer(
+            execution_plan, agent_results
+        )
  
     # --- 2. Circuit breaker: un 504/503/429 no se recupera dentro del turno ---
     infra_hit = next(
@@ -720,7 +684,7 @@ def orchestrator(state: PoolAgentState) -> Command:
         failed_num, failed_err = infra_hit
         reason = f"SKIPPED_UPSTREAM_INFRA_FAILURE: step_{failed_num} -> {failed_err}"
         return _to_synthesizer(
-            state, execution_plan, agent_results,
+            execution_plan, agent_results,
             extra_results={f"step_{s.step}": _skipped_result(s, reason) for s in pending},
             error=f"UPSTREAM_INFRA_FAILURE at step_{failed_num}",
         )
@@ -730,7 +694,7 @@ def orchestrator(state: PoolAgentState) -> Command:
     if remaining <= MIN_STEP_BUDGET_S:
         reason = f"SKIPPED_TURN_DEADLINE_EXCEEDED: {remaining:.1f}s left"
         return _to_synthesizer(
-            state, execution_plan, agent_results,
+            execution_plan, agent_results,
             extra_results={f"step_{s.step}": _skipped_result(s, reason) for s in pending},
             error="TURN_DEADLINE_EXCEEDED",
         )
@@ -764,9 +728,23 @@ def orchestrator(state: PoolAgentState) -> Command:
         if s.step not in blocked_nums
         and all(d in ok_steps for d in (s.depends_on or []))
     ]
-    waiting = [s for s in pending if s.step not in blocked_nums and s not in runnable]
+    
+    runnable_nums = {s.step for s in runnable}
+    waiting = [s for s in pending if s.step not in blocked_nums and s.step not in runnable_nums]
  
-    update: dict = {"agent_results": blocked} if blocked else {}
+    err = (
+        f"Deadlock in execution_plan: {[s.step for s in waiting]} blocked."
+        if waiting else None
+    )
+    
+    waiting_results = {
+        f"step_{s.step}": _skipped_result(
+            s, f"SKIPPED_DEADLOCK: step_{s.step} is in a dependency cycle"
+        )
+        for s in waiting
+    }
+    
+    extra = {**blocked, **waiting_results} if (blocked or waiting) else None
  
     if runnable:
         messages = state.get("messages", [])
@@ -776,11 +754,10 @@ def orchestrator(state: PoolAgentState) -> Command:
                 user_message = _extract_text(msg.content)
                 break
  
-        # El paso nunca puede durar más que lo que queda del turno.
         step_budget = max(MIN_STEP_BUDGET_S, min(STEP_DEADLINE_S, remaining))
  
         return Command(
-            update=update,
+            update={"agent_results": blocked} if blocked else {},
             goto=[
                 Send(
                     "run_step",
@@ -793,22 +770,38 @@ def orchestrator(state: PoolAgentState) -> Command:
                 for s in runnable
             ],
         )
- 
+    
+    # Si no hay runnable, vamos a synthesizer
+    # Primero obtenemos el update correcto usando _to_synthesizer
     if waiting:
-        # Pendientes sin bloquear y sin poder correr -> ciclo o depends_on inválido.
-        update["error"] = (
-            f"Deadlock in execution_plan: {[s.step for s in waiting]} blocked."
+        # Caso de deadlock: vamos directo a synthesizer con el error
+        return _to_synthesizer(
+            execution_plan, agent_results,
+            extra_results=extra,
+            error=err,
         )
- 
-    err = (
-        f"Deadlock in execution_plan: {[s.step for s in waiting]} blocked."
-        if waiting else None
+    
+    # Si no hay runnable ni waiting, es porque todo está bloqueado o completado
+    # Usamos _to_synthesizer para obtener el update correcto
+    synth_command = _to_synthesizer(
+        execution_plan, agent_results,
+        extra_results=extra,
+        error=err or "No runnable steps available",
     )
-    return _to_synthesizer(
-        state, execution_plan, agent_results,
-        extra_results=blocked or None,
-        error=err,
-    )
+    
+    # Ahora decidimos si hacer fan-out o ir directo a synthesizer
+    if should_suggest(state):
+        # Fan-out: synthesizer y suggester en paralelo
+        # Reutilizamos el update del synthesizer
+        return Command(
+            update=synth_command.update,  # Usamos el update del synthesizer
+            goto=["synthesizer", "suggester"]  # Fan-out
+        )
+    else:
+        return Command(
+            update=synth_command.update,  # Usamos el update del synthesizer
+            goto="synthesizer"
+        )
  
  
 # ---------------------------------------------------------------------------
@@ -1043,7 +1036,10 @@ def general(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
     plan = state.get("execution_plan") or []
     step_num = plan[0].step if plan else 1
 
-    text, err = _direct_answer(state, GENERAL_PROMPT)
+    remaining = _remaining_budget(state)
+    step_budget = max(MIN_STEP_BUDGET_S, min(STEP_DEADLINE_S, remaining))
+    
+    text, err = _direct_answer(state, GENERAL_PROMPT, deadline_s=step_budget)
 
     result = AgentResult(
         agent=GENERAL_AGENT,
@@ -1054,21 +1050,73 @@ def general(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
         status="ok" if text and not err else "failed",
     )
 
-    return Command(
-        update={
-            "agent_results": {f"step_{step_num}": result},
-            "archetype": "conversational",
-        },
-        goto="synthesizer",
+    update = _resolve_and_update_archetype(
+        execution_plan=plan,
+        agent_results={f"step_{step_num}": result},
+        force_archetype="conversational",
     )
+    return Command(update=update, goto="synthesizer")
 
 @observe(as_type="agent", name="OOS Node")
-def oos(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
+def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]]:
     plan = state.get("execution_plan") or []
     step_num = plan[0].step if plan else 1
 
     text, err = _direct_answer(state, OOS_PROMPT)
 
+    # Verificar si hay MISROUTE en la respuesta
+    misroute_match = _MISROUTE_RE.match(text) if text else None
+    
+    if misroute_match:
+        target_agent = misroute_match.group(1).strip().lower()
+        rest_text = misroute_match.group(2).strip()
+        
+        # Verificar reintentos
+        misroute_retries = state.get("misroute_retries", 0)
+        
+        if misroute_retries >= _MAX_MISROUTE_RETRIES:
+            # Demasiados reintentos, pasar a synthesizer con lo que tenemos
+            result = AgentResult(
+                agent="oos",
+                step=step_num,
+                output=f"Misroute failed after {_MAX_MISROUTE_RETRIES} attempts: {target_agent}",
+                sources=[],
+                error=f"MAX_MISROUTE_RETRIES_EXCEEDED: {target_agent}",
+                status="failed",
+            )
+            update = _resolve_and_update_archetype(
+                execution_plan=plan,
+                agent_results={f"step_{step_num}": result},
+                force_archetype="oos",
+            )
+            return Command(
+                update=update,
+                goto="synthesizer"
+            )
+        
+        # Reintentar con el agente específico
+        if target_agent in _MISROUTE_AGENTS:
+            logger.info(f"MISROUTE: redirecting to {target_agent} (attempt {misroute_retries + 1})")
+            
+            # Crear nuevo plan con el agente correcto
+            new_step = ExecutionStep(
+                step=step_num,
+                task=rest_text or state["messages"][-1].content,
+                assigned_agent=target_agent,
+                oos=False,
+            )
+            
+            # Actualizar el plan y reintentar
+            return Command(
+                update={
+                    "execution_plan": [new_step],
+                    "misroute_retries": misroute_retries + 1,
+                    "archetype": None,  # Resetear para que el orchestrator lo recalcule
+                },
+                goto="orchestrator"  # Volver al orchestrator con el nuevo plan
+            )
+    
+    # Si no hay MISROUTE o no es válido, continuar normalmente
     result = AgentResult(
         agent="oos",
         step=step_num,
@@ -1078,10 +1126,9 @@ def oos(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
         status="ok" if text and not err else "failed",
     )
 
-    return Command(
-        update={
-            "agent_results": {f"step_{step_num}": result},
-            "archetype": "oos",
-        },
-        goto="synthesizer",
+    update = _resolve_and_update_archetype(
+        execution_plan=plan,
+        agent_results={f"step_{step_num}": result},
+        force_archetype="oos",
     )
+    return Command(update=update, goto="synthesizer")
