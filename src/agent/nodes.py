@@ -211,13 +211,12 @@ def _resolve_and_update_archetype(
     """
     Helper unificado para resolver el archetype y preparar el update.
     """
-    from langchain_core.messages import AIMessage  # ✅ IMPORTAR AQUÍ
+    from langchain_core.messages import AIMessage
     
     merged = {**agent_results, **(extra_results or {})}
     usable = usable_results(merged)
     agents = [r.agent for r in usable]
 
-    # Si force_archetype está presente, usarlo (para general/oos)
     archetype = force_archetype or resolve_archetype(
         execution_plan=execution_plan,
         agents=agents,
@@ -225,7 +224,6 @@ def _resolve_and_update_archetype(
     )
 
     update: dict = {"archetype": archetype}
-    
     if extra_results:
         update["agent_results"] = extra_results
     if error:
@@ -236,7 +234,6 @@ def _resolve_and_update_archetype(
         if "messages" not in update:
             update["messages"] = []
         update["messages"].append(AIMessage(content=agent_message))
-        # También guardar en campo específico para fácil acceso
         update["agent_output"] = agent_message
     
     return update
@@ -945,35 +942,89 @@ def synthesizer(state: PoolAgentState) -> dict:
     5. Source attachment to response
     6. ✅ PRIORIZA el mensaje directo del agente para clarificaciones
     """
-    from langchain_core.messages import AIMessage  # ✅ Asegurar import
+    from langchain_core.messages import AIMessage
+    import logging
+    
+    logger = logging.getLogger(__name__)
     
     execution_plan: list[ExecutionStep] = state.get("execution_plan", [])
     agent_results_raw = state.get("agent_results") or {}
     language_code: str = state.get("detected_language", "es")
+    messages = state.get("messages", [])
 
     # ============================================================
-    # ✅ NUEVO: VERIFICAR SI HAY UN MENSAJE DIRECTO DEL AGENTE
+    # ✅ DETECTAR CLARIFICACIÓN - PRIORIDAD 1
     # ============================================================
+    # Buscar el mensaje del agente en varias fuentes
+    agent_message = None
+    is_clarification = False
+    
+    # 1. Buscar en agent_output (campo específico)
     agent_output = state.get("agent_output")
     if agent_output:
-        # Verificar si es una clarificación (contiene palabras clave)
-        clarification_keywords = ["missing", "provide", "need", "parameters", "volume", "current pH", "target pH"]
-        is_clarification = any(keyword in agent_output.lower() for keyword in clarification_keywords)
+        agent_message = agent_output
+    
+    # 2. Si no hay agent_output, buscar en messages
+    if not agent_message:
+        for msg in reversed(messages):
+            if hasattr(msg, "type") and msg.type == "ai":
+                agent_message = msg.content
+                break
+    
+    # 3. Si aún no hay mensaje, buscar en agent_results
+    if not agent_message:
+        for key, result in agent_results_raw.items():
+            if hasattr(result, 'output') and result.output:
+                agent_message = result.output
+                break
+            elif isinstance(result, dict) and result.get('output'):
+                agent_message = result.get('output')
+                break
+    
+    # Detectar si es clarificación
+    if agent_message:
+        # Palabras clave de clarificación
+        clarification_keywords = [
+            "missing", "provide", "need", "parameters", 
+            "volume", "current pH", "target pH", 
+            "request", "please provide", "details about your pool"
+        ]
+        is_clarification = any(keyword in agent_message.lower() for keyword in clarification_keywords)
         
+        # También verificar el plan
+        if execution_plan and not is_clarification:
+            first_step = execution_plan[0]
+            task = first_step.get("task", "")
+            # Si la tarea es una solicitud de información
+            if "Request" in task or "missing" in task.lower() or "provide" in task.lower():
+                is_clarification = True
+        
+        # Si es clarificación, usar el mensaje directamente
         if is_clarification:
-            logger.info("synthesizer: usando mensaje directo del agente (clarificación)")
-            # Usar el mensaje del agente directamente
+            logger.info("synthesizer: detectada clarificación, usando mensaje directo del agente")
+            
+            # Extraer el mensaje de clarificación
+            clarification_message = agent_message
+            
+            # Asegurarse de que el mensaje tenga un safety message
+            safety_message = "Always handle pool chemicals with care and wear protective gear."
+            
             payload = SynthesizerOutput(
-                tier1=agent_output,
+                tier1=clarification_message,
                 tier2=[],
-                safety="Always handle pool chemicals with care and wear protective gear.",
+                safety=safety_message,
                 details=[],
             )
+            
             return {
                 "archetype": state.get("archetype", "conversational"),
                 "response": payload,
-                "validation": {"direct_agent_message": True, "is_clarification": True},
-                "messages": [AIMessage(content=agent_output, name="Marlin")],
+                "validation": {
+                    "direct_agent_message": True, 
+                    "is_clarification": True,
+                    "message_source": "agent_output" if state.get("agent_output") else "messages"
+                },
+                "messages": [AIMessage(content=clarification_message, name="Marlin")],
             }
 
     # ============================================================
@@ -1033,15 +1084,14 @@ def synthesizer(state: PoolAgentState) -> dict:
     agents = [r.agent for r in usable]
 
     # ============================================================
-    # ✅ NUEVO: VERIFICAR SI EL RESULTADO DEL AGENTE ES UNA CLARIFICACIÓN
+    # ✅ SEGUNDO CHECK: Verificar en usable por si acaso (redundancia)
     # ============================================================
-    # Buscar en usable si hay un mensaje de clarificación
     for result in usable:
         if hasattr(result, 'output') and result.output:
+            # Verificar si es clarificación
             clarification_keywords = ["missing", "provide", "need", "parameters", "volume", "current pH"]
             if any(keyword in result.output.lower() for keyword in clarification_keywords):
-                logger.info("synthesizer: detectada clarificación en agent_results")
-                # Usar el output del agente directamente
+                logger.info("synthesizer: detectada clarificación en agent_results (fallback)")
                 payload = SynthesizerOutput(
                     tier1=result.output,
                     tier2=[],
@@ -1051,7 +1101,11 @@ def synthesizer(state: PoolAgentState) -> dict:
                 return {
                     "archetype": state.get("archetype", "conversational"),
                     "response": payload,
-                    "validation": {"direct_agent_message": True, "is_clarification": True},
+                    "validation": {
+                        "direct_agent_message": True, 
+                        "is_clarification": True,
+                        "message_source": "agent_results_fallback"
+                    },
                     "messages": [AIMessage(content=result.output, name="Marlin")],
                 }
 
