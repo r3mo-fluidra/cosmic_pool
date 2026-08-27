@@ -372,7 +372,7 @@ COMPLIANCE_AGENT_CONFIG = AgentConfig(
         f"Record and log design, retention periods, and documentation systems -- "
         f"owned by the {RECORDS}. Compliance states WHAT must be shown; Records "
         f"states HOW it is captured and kept.",
-        f"{JURISDICTION_RULE}",
+        "{JURISDICTION_RULE}",
         f"Operating procedures -- owned by the {OPERATIONS}.",
         f"Chemistry, equipment, and hydraulic diagnosis -- owned by the {CHEMISTRY}, "
         f"{EQUIPMENT}, and {HYDRAULICS}.",

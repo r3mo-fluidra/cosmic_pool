@@ -300,6 +300,13 @@ _SERVICE_UNAVAILABLE_TEXT = {
 }
 
 def static_service_unavailable_payload(output_cls, language_code: str):
+    """
+    Static fallback payload when everything fails.
+    """
+    _SERVICE_UNAVAILABLE_TEXT = {
+        "es": "Lo siento, nuestro asistente está experimentando una interrupción temporal por alta demanda. Probá de nuevo en unos minutos.",
+        "en": "Sorry, our assistant is experiencing a temporary service interruption due to high demand. Please try again in a few minutes.",
+    }
     text = _SERVICE_UNAVAILABLE_TEXT.get(language_code, _SERVICE_UNAVAILABLE_TEXT["es"])
     return output_cls(
         archetype="conversational",
@@ -387,16 +394,37 @@ def _is_oos(execution_plan: list[ExecutionStep]) -> bool:
     return len(execution_plan) == 1 and execution_plan[0].oos
 
 
-def _build_raw_content(agent_results: dict[str, AgentResult]) -> str:
+def _build_raw_content(agent_results) -> str:
+    """
+    Build raw content from agent results.
+    
+    Defensive: handles both dict and list inputs.
+    """
     if not agent_results:
         return ""
 
-    sorted_results: list[AgentResult] = sorted(
-        agent_results.values(),
-        key=lambda r: r.step,
-    )
+    # Normalizar a lista de resultados
+    results_list = []
+    if isinstance(agent_results, dict):
+        results_list = list(agent_results.values())
+    elif isinstance(agent_results, list):
+        results_list = agent_results
+    
+    # Filtrar y ordenar
+    valid_results = []
+    for result in results_list:
+        if isinstance(result, AgentResult):
+            valid_results.append(result)
+        elif isinstance(result, dict):
+            try:
+                valid_results.append(AgentResult(**result))
+            except Exception:
+                pass
+    
+    # Ordenar por step
+    sorted_results = sorted(valid_results, key=lambda r: r.step)
 
-    sections: list[str] = []
+    sections = []
     for result in sorted_results:
         if result.error:
             sections.append(
@@ -877,18 +905,87 @@ def run_step_node(payload: dict) -> Command:
 
 @observe(as_type="span", name="Synthesizer Node")
 def synthesizer(state: PoolAgentState) -> dict:
+    """
+    Synthesizes final response from agent results.
+    
+    HANDLES:
+    1. Agent results as dict OR list (defensive conversion)
+    2. Missing archetype (falls back to conversational)
+    3. Structured output failures (retries unstructured, then static fallback)
+    4. Contract enforcement with validation reporting
+    5. Source attachment to response
+    """
     execution_plan: list[ExecutionStep] = state.get("execution_plan", [])
-    agent_results:  dict[str, AgentResult] = state.get("agent_results") or {}
-    language_code:  str = state.get("detected_language", "es")
+    agent_results_raw = state.get("agent_results") or {}
+    language_code: str = state.get("detected_language", "es")
 
+    # ============================================================
+    # DEFENSA: Convertir agent_results de list a dict si es necesario
+    # ============================================================
+    if isinstance(agent_results_raw, list):
+        logger.warning(
+            "synthesizer: agent_results is list (got %d items), converting to dict",
+            len(agent_results_raw)
+        )
+        # Convertir lista a dict con step como key
+        agent_results: dict[str, AgentResult] = {}
+        for result in agent_results_raw:
+            if hasattr(result, 'step'):
+                key = f"step_{result.step}"
+                agent_results[key] = result
+            elif isinstance(result, dict) and 'step' in result:
+                key = f"step_{result['step']}"
+                # Convertir dict a AgentResult si es necesario
+                if not isinstance(result, AgentResult):
+                    try:
+                        agent_results[key] = AgentResult(**result)
+                    except Exception as e:
+                        logger.error(f"Failed to convert dict to AgentResult: {e}")
+                        # Fallback: crear un AgentResult básico
+                        agent_results[key] = AgentResult(
+                            agent=result.get('agent', 'unknown'),
+                            step=result.get('step', 0),
+                            output=result.get('output', ''),
+                            sources=result.get('sources', []),
+                            error=result.get('error', ''),
+                            status=result.get('status', 'failed'),
+                        )
+                else:
+                    agent_results[key] = result
+        # Si la conversión falló, usar un dict vacío
+        if not agent_results:
+            logger.error("synthesizer: failed to convert list to dict, using empty dict")
+            agent_results = {}
+    else:
+        # Ya es dict, asegurar que los valores sean AgentResult
+        agent_results = agent_results_raw
+        # Convertir cualquier valor que sea dict a AgentResult
+        for key, value in list(agent_results.items()):
+            if isinstance(value, dict) and not isinstance(value, AgentResult):
+                try:
+                    agent_results[key] = AgentResult(**value)
+                except Exception as e:
+                    logger.error(f"Failed to convert dict to AgentResult for key {key}: {e}")
+                    # Mantener el dict original si no se puede convertir
+                    pass
+
+    # ============================================================
+    # OOS CHECK
+    # ============================================================
     is_oos = _is_oos(execution_plan)
     oos_instruction = _OOS_INSTRUCTION_ACTIVE if is_oos else _OOS_INSTRUCTION_INACTIVE
     language_instruction = _LANGUAGE_MAP.get(language_code, _LANGUAGE_MAP["es"])
 
-    # --- un solo conjunto de resultados alimenta prompt, validador y sources ---
+    # ============================================================
+    # EXTRACT USABLE RESULTS
+    # ============================================================
+    # usable_results ahora maneja tanto dict como list de forma segura
     usable = usable_results(agent_results)
     agents = [r.agent for r in usable]
 
+    # ============================================================
+    # ARCHETYPE RESOLUTION
+    # ============================================================
     archetype = state.get("archetype")
     if not archetype:
         logger.warning(
@@ -897,66 +994,108 @@ def synthesizer(state: PoolAgentState) -> dict:
         )
         archetype = "conversational"
 
+    # ============================================================
+    # BUILD RAW CONTENT
+    # ============================================================
     raw_content = _build_raw_content(usable)
     if not raw_content:
-        # rama defensiva: sin evidencia utilizable no hay nada que sintetizar
+        # Rama defensiva: sin evidencia utilizable no hay nada que sintetizar
         raw_content = "(no prior content — generate a warm greeting and offer help)"
         archetype, agents, usable = "conversational", [], []
 
+    # ============================================================
+    # GET CONTRACT
+    # ============================================================
     contract = get_contract(archetype)
 
+    # ============================================================
+    # BUILD PROMPT - FIX: usar .format() en lugar de f-string
+    # ============================================================
+    # Obtener la sección del archetype de forma segura
+    archetype_section = build_synthesizer_archetype_section(archetype, agents)
+    
     system_content = SYNTHESIZER_PROMPT.format(
-        archetype_section=build_synthesizer_archetype_section(archetype, agents),
+        archetype_section=archetype_section,
         oos_instruction=oos_instruction,
         language=language_instruction,
         raw_content=raw_content,
     )
+    
     llm_messages = [
         SystemMessage(content=system_content),
         HumanMessage(content="Generate the final refined response now."),
     ]
 
-    # --- Fase 1: generación, con degradación en tres niveles -------------------
+    # ============================================================
+    # FASE 1: GENERACIÓN CON DEGRADACIÓN EN TRES NIVELES
+    # ============================================================
     validation: dict = {}
+    payload = None
+    
     try:
+        # Intentar structured output primero
         payload = _get_llm().with_structured_output(SynthesizerOutput).invoke(llm_messages)
     except Exception as exc:
         logger.warning(
             "synthesizer: structured output failed (%s); retrying unstructured", exc
         )
         try:
+            # Fallback a unstructured
             raw = _get_llm().invoke(llm_messages)
             payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
             validation = {"fallback": "unstructured", "reason": str(exc)}
         except Exception as exc2:
-            # 429 / 503 / 504: el reintento falla por la misma causa que el primero.
-            # Payload estático: cero llamadas de red, cero enforcement (el
-            # validador también podría lanzar y ya es el último nivel).
+            # Último fallback: respuesta estática
             logger.error(
                 "synthesizer: both generation attempts failed (%s | %s)", exc, exc2
             )
-            
-            return {
-                "archetype": archetype,
-                "validation": {"fallback": "static", "reason": f"{exc} | {exc2}"},
-                "messages": [
-                    AIMessage(content=payload.tier1_markdown(), name="Marlin")
-                ],
+            # Usar el payload estático
+            payload = static_service_unavailable_payload(
+                SynthesizerOutput, 
+                language_code
+            )
+            validation = {
+                "fallback": "static", 
+                "reason": f"{exc} | {exc2}"
             }
 
-    # --- Fase 2: enforcement, SIEMPRE, venga el payload de donde venga ---------
+    # ============================================================
+    # FASE 2: ENFORCEMENT - SIEMPRE se ejecuta
+    # ============================================================
     try:
-        payload, report = enforce_contract(
-            payload, contract, agents, detail_cls=DetailSection
-        )
-        validation = {**validation, **report.to_dict()}
+        if payload is not None:
+            payload, report = enforce_contract(
+                payload, contract, agents, detail_cls=DetailSection
+            )
+            validation = {**validation, **report.to_dict()}
+        else:
+            # Si payload es None (caso extremo), crear uno estático
+            logger.error("synthesizer: payload is None after generation attempts")
+            payload = static_service_unavailable_payload(
+                SynthesizerOutput, 
+                language_code
+            )
+            validation = {**validation, "payload_was_none": True}
     except Exception as exc:
-        # un bug del validador no debe costar otra llamada al modelo
+        # El validador falló, pero no debemos perder la respuesta
         logger.error("synthesizer: enforce_contract raised (%s)", exc, exc_info=True)
         validation = {**validation, "enforcement_error": str(exc)}
+        # Si payload es None, crear uno estático
+        if payload is None:
+            payload = static_service_unavailable_payload(
+                SynthesizerOutput, 
+                language_code
+            )
 
-    _attach_sources(payload, usable)
+    # ============================================================
+    # FASE 3: ATTACH SOURCES
+    # ============================================================
+    if payload is not None:
+        _attach_sources(payload, usable)
 
+    # ============================================================
+    # FASE 4: BUILD RETURN DICT
+    # ============================================================
     return {
         "archetype": archetype,
         "response": payload,

@@ -18,6 +18,7 @@ función pura, testeable sin correr el grafo.
 from __future__ import annotations
 
 from typing import List, Literal, Optional
+from ..agent.state import AgentResult
 
 from pydantic import BaseModel, Field
 
@@ -273,14 +274,62 @@ def get_contract(archetype: str) -> dict:
 # 5. HELPERS DE STATE
 # =====================================================================
 
-def usable_results(agent_results: dict) -> list:
+def usable_results(agent_results) -> list:
     """
-    agent_results es Dict["step_N", AgentResult]. El orden del dict no es
-    confiable: se ordena por .step y se filtran los que fallaron.
+    Extract usable results from agent_results dict or list.
+    
+    Defensive: handles both dict and list inputs.
     """
-    results = sorted((agent_results or {}).values(), key=lambda r: r.step)
-    return [r for r in results if not r.error and r.output and r.output.strip()]
+    results = []
+    
+    # Caso: es dict
+    if isinstance(agent_results, dict):
+        for value in agent_results.values():
+            if isinstance(value, AgentResult) and value.output and not value.error:
+                results.append(value)
+            elif isinstance(value, dict):
+                # Intentar convertir dict a AgentResult
+                try:
+                    result = AgentResult(**value)
+                    if result.output and not result.error:
+                        results.append(result)
+                except Exception:
+                    pass
+    # Caso: es list
+    elif isinstance(agent_results, list):
+        for item in agent_results:
+            if isinstance(item, AgentResult) and item.output and not item.error:
+                results.append(item)
+            elif isinstance(item, dict):
+                try:
+                    result = AgentResult(**item)
+                    if result.output and not result.error:
+                        results.append(result)
+                except Exception:
+                    pass
+    
+    return results
 
 
-def agents_from_results(agent_results: dict) -> list[str]:
-    return [r.agent for r in usable_results(agent_results)]
+def agents_from_results(agent_results) -> list:
+    """
+    Extract agent names from results.
+    
+    Defensive: handles both dict and list inputs.
+    """
+    agents = []
+    
+    if isinstance(agent_results, dict):
+        for value in agent_results.values():
+            if isinstance(value, AgentResult):
+                agents.append(value.agent)
+            elif isinstance(value, dict):
+                agents.append(value.get('agent', 'unknown'))
+    elif isinstance(agent_results, list):
+        for item in agent_results:
+            if isinstance(item, AgentResult):
+                agents.append(item.agent)
+            elif isinstance(item, dict):
+                agents.append(item.get('agent', 'unknown'))
+    
+    return agents
