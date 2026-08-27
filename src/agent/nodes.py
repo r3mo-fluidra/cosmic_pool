@@ -36,6 +36,7 @@ from ..graph_context.response_contracts import (
     usable_results, DetailSection, agents_from_results
 )
 from ..graph_context.response_validator import enforce_contract, fallback_payload
+from ..graph_context.response_contracts import build_synthesizer_archetype_section
 from ..graph_context.suggestions import (
     SUPERNODES,
     Suggestion,
