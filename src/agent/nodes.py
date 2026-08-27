@@ -56,6 +56,7 @@ TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
 _SUGGESTER_DEADLINE_S = 1.2
 _MAX_MISROUTE_RETRIES = 2
+STEP_DEADLINE_S = 60.0 
 
 # ================================================================
 # ROUTING: planner → general | oos | orchestrator
