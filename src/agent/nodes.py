@@ -454,6 +454,34 @@ _IGNORED_CHIP_LIMIT = 2
  
 _suggester_llm = None
  
+def _to_synthesizer(
+    execution_plan: list[ExecutionStep],
+    agent_results: dict,
+    extra_results: dict | None = None,
+    error: str | None = None,
+) -> Command:
+    """
+    Única salida hacia el synthesizer. Resuelve `archetype` aquí para que
+    synthesizer y suggester lean el mismo valor del state, y para que los
+    `agents` que ven el prompt y `enforce_contract` sean idénticos.
+    """
+    merged = {**agent_results, **(extra_results or {})}
+    usable = usable_results(merged)
+    agents = [r.agent for r in usable]
+
+    archetype = resolve_archetype(
+        execution_plan=execution_plan,
+        agents=agents,
+        agent_results=merged,
+    )
+
+    update: dict = {"archetype": archetype}
+    if extra_results:
+        update["agent_results"] = extra_results
+    if error:
+        update["error"] = error
+    return Command(update=update, goto="synthesizer")
+
  
 def _get_llm_suggester():
     """Lazy: no construir el cliente si el gate de supresión corta antes."""
@@ -655,9 +683,9 @@ def orchestrator(state: PoolAgentState) -> Command:
     agent_results = state.get("agent_results") or {}
  
     if not execution_plan:
-        return Command(
-            update={"error": "execution_plan is empty; cannot orchestrate."},
-            goto="synthesizer",
+        return _to_synthesizer(
+            state, execution_plan, agent_results,
+            error="EMPTY_EXECUTION_PLAN: planner produced no steps.",
         )
  
     # --- 1. Clasificar lo ya ejecutado: éxito != "presente en agent_results" ---
@@ -676,7 +704,7 @@ def orchestrator(state: PoolAgentState) -> Command:
     pending = [s for s in execution_plan if s.step not in done]
  
     if not pending:
-        return Command(goto="synthesizer")
+        return _to_synthesizer(state, execution_plan, agent_results)
  
     # --- 2. Circuit breaker: un 504/503/429 no se recupera dentro del turno ---
     infra_hit = next(
@@ -691,28 +719,20 @@ def orchestrator(state: PoolAgentState) -> Command:
     if infra_hit:
         failed_num, failed_err = infra_hit
         reason = f"SKIPPED_UPSTREAM_INFRA_FAILURE: step_{failed_num} -> {failed_err}"
-        return Command(
-            update={
-                "agent_results": {
-                    f"step_{s.step}": _skipped_result(s, reason) for s in pending
-                },
-                "error": f"UPSTREAM_INFRA_FAILURE at step_{failed_num}",
-            },
-            goto="synthesizer",
+        return _to_synthesizer(
+            state, execution_plan, agent_results,
+            extra_results={f"step_{s.step}": _skipped_result(s, reason) for s in pending},
+            error=f"UPSTREAM_INFRA_FAILURE at step_{failed_num}",
         )
  
     # --- 3. Presupuesto de turno ---
     remaining = _remaining_budget(state)
     if remaining <= MIN_STEP_BUDGET_S:
         reason = f"SKIPPED_TURN_DEADLINE_EXCEEDED: {remaining:.1f}s left"
-        return Command(
-            update={
-                "agent_results": {
-                    f"step_{s.step}": _skipped_result(s, reason) for s in pending
-                },
-                "error": "TURN_DEADLINE_EXCEEDED",
-            },
-            goto="synthesizer",
+        return _to_synthesizer(
+            state, execution_plan, agent_results,
+            extra_results={f"step_{s.step}": _skipped_result(s, reason) for s in pending},
+            error="TURN_DEADLINE_EXCEEDED",
         )
  
     # --- 4. Cascada de dependencias (punto fijo, resuelve cadenas 1->2->3) ---
@@ -780,7 +800,15 @@ def orchestrator(state: PoolAgentState) -> Command:
             f"Deadlock in execution_plan: {[s.step for s in waiting]} blocked."
         )
  
-    return Command(update=update, goto="synthesizer")
+    err = (
+        f"Deadlock in execution_plan: {[s.step for s in waiting]} blocked."
+        if waiting else None
+    )
+    return _to_synthesizer(
+        state, execution_plan, agent_results,
+        extra_results=blocked or None,
+        error=err,
+    )
  
  
 # ---------------------------------------------------------------------------
@@ -854,7 +882,7 @@ def run_step_node(payload: dict) -> Command:
 # SYNTHESIZER NODE
 # ================================================================
 
-@observe(as_type="generation", name="Synthesizer Node")
+@observe(as_type="span", name="Synthesizer Node")
 def synthesizer(state: PoolAgentState) -> dict:
     execution_plan: list[ExecutionStep] = state.get("execution_plan", [])
     agent_results:  dict[str, AgentResult] = state.get("agent_results") or {}
@@ -864,44 +892,75 @@ def synthesizer(state: PoolAgentState) -> dict:
     oos_instruction = _OOS_INSTRUCTION_ACTIVE if is_oos else _OOS_INSTRUCTION_INACTIVE
     language_instruction = _LANGUAGE_MAP.get(language_code, _LANGUAGE_MAP["es"])
 
-    usable    = usable_results(agent_results)
-    agents    = [r.agent for r in usable]
-    # archetype ya viene resuelto del orchestrator (punto de fan-out)
-    archetype = state.get("archetype", "conversational")
-    contract  = get_contract(archetype)
+    # --- un solo conjunto de resultados alimenta prompt, validador y sources ---
+    usable = usable_results(agent_results)
+    agents = [r.agent for r in usable]
 
-    raw_content = _build_raw_content(agent_results)
+    archetype = state.get("archetype")
+    if not archetype:
+        logger.warning(
+            "synthesizer: 'archetype' missing from state — orchestrator did not "
+            "resolve it. Degrading to 'conversational'."
+        )
+        archetype = "conversational"
+
+    raw_content = _build_raw_content(usable)
     if not raw_content:
+        # rama defensiva: sin evidencia utilizable no hay nada que sintetizar
         raw_content = "(no prior content — generate a warm greeting and offer help)"
-        # fallback defensivo — no debería dispararse si el orchestrator hizo su parte,
-        # pero cubre la rama de error / cualquier estado inconsistente
-        archetype, contract = "conversational", get_contract("conversational")
+        archetype, agents, usable = "conversational", [], []
+
+    contract = get_contract(archetype)
 
     system_content = SYNTHESIZER_PROMPT.format(
-        archetype=archetype,
-        shape=contract["shape"],
-        budget=contract["budget"],
-        detail_labels=", ".join(contract["details"]) or "(ninguna)",
+        archetype_section=build_synthesizer_archetype_section(archetype, agents),
         oos_instruction=oos_instruction,
         language=language_instruction,
         raw_content=raw_content,
     )
+    llm_messages = [
+        SystemMessage(content=system_content),
+        HumanMessage(content="Generate the final refined response now."),
+    ]
 
+    # --- Fase 1: generación, con degradación en tres niveles -------------------
+    validation: dict = {}
     try:
-        payload = _get_llm().with_structured_output(SynthesizerOutput).invoke([
-            SystemMessage(content=system_content),
-            HumanMessage(content="Generate the final refined response now."),
-        ])
-        payload, report = enforce_contract(payload, contract, agents,
-                                           detail_cls=DetailSection)
-        validation = report.to_dict()
+        payload = _get_llm().with_structured_output(SynthesizerOutput).invoke(llm_messages)
     except Exception as exc:
-        raw = _get_llm().invoke([
-            SystemMessage(content=system_content),
-            HumanMessage(content="Generate the final refined response now."),
-        ])
-        payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
-        validation = {"fallback": True, "reason": str(exc)}
+        logger.warning(
+            "synthesizer: structured output failed (%s); retrying unstructured", exc
+        )
+        try:
+            raw = _get_llm().invoke(llm_messages)
+            payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
+            validation = {"fallback": "unstructured", "reason": str(exc)}
+        except Exception as exc2:
+            # 429 / 503 / 504: el reintento falla por la misma causa que el primero.
+            # Payload estático: cero llamadas de red, cero enforcement (el
+            # validador también podría lanzar y ya es el último nivel).
+            logger.error(
+                "synthesizer: both generation attempts failed (%s | %s)", exc, exc2
+            )
+            
+            return {
+                "archetype": archetype,
+                "validation": {"fallback": "static", "reason": f"{exc} | {exc2}"},
+                "messages": [
+                    AIMessage(content=payload.tier1_markdown(), name="Marlin")
+                ],
+            }
+
+    # --- Fase 2: enforcement, SIEMPRE, venga el payload de donde venga ---------
+    try:
+        payload, report = enforce_contract(
+            payload, contract, agents, detail_cls=DetailSection
+        )
+        validation = {**validation, **report.to_dict()}
+    except Exception as exc:
+        # un bug del validador no debe costar otra llamada al modelo
+        logger.error("synthesizer: enforce_contract raised (%s)", exc, exc_info=True)
+        validation = {**validation, "enforcement_error": str(exc)}
 
     _attach_sources(payload, usable)
 

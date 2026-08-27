@@ -34,19 +34,12 @@ def _details_lines(details: list[str]) -> str:
     return "\n".join(f"- {d}" for d in details) if details else "- (none)"
 
 
-def _resolve_safety(safety_required, agent_key: str | None) -> bool | str:
-    """
-    Collapses "conditional" to a concrete bool when the agent is statically
-    known to be a hazard agent (mirrors resolve_safety_required's first test).
-    Returns True, False, or "conditional" when it stays dynamic.
-    """
-    if safety_required is not True and safety_required != "conditional":
-        return False
+def _resolve_safety(safety_required, agent_key):
     if safety_required is True:
         return True
-    if agent_key and agent_key in HAZARD_AGENTS:
-        return True
-    return "conditional"
+    if safety_required == "conditional":
+        return True if agent_key in HAZARD_AGENTS else "conditional"
+    return False
 
 
 def _budget_block(budget: int) -> str:
@@ -222,4 +215,5 @@ def build_agent_prompt(config, agent_key: str | None = None) -> str:
         archetype_section=build_subagent_archetype_section(
             config.archetype, agent_key
         ),
+        tool_budget=config.tool_budget
     )

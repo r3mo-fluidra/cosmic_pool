@@ -1,6 +1,6 @@
 # prompts_sub_agents.py
 from dataclasses import dataclass
-from .prompt_tools import tool_instructions_AA, tool_instructions_math
+from .prompt_tools import tool_instructions_AA, tool_instructions_math, tool_instructions_symptom
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -12,6 +12,7 @@ class AgentConfig:
     tool_instructions: str
     output_contract: str
     archetype: str
+    tool_budget: int = 6  
 
 """
 Optimized agent configurations for the Pool Chemistry Assistant.
@@ -38,6 +39,8 @@ Changes from the original:
 
 # --- Canonical agent names -------------------------------------------------
 # Use these constants anywhere an agent refers to another agent.
+GENERAL = "Pool General Assistant Agent"
+OOS     = "Out-of-Scope Handler"
 
 CHEMISTRY = "Pool Chemistry Agent"
 EQUIPMENT = "Pool Equipment Agent"
@@ -141,6 +144,7 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "retest_guidance",
     ),
     archetype="assessment", 
+    tool_budget= 6 
 )
 
 
@@ -157,7 +161,9 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
     ),
     responsibilities=(
         "Diagnose equipment faults from symptoms, gauge readings, and operator observations.",
-        "Recommend maintenance procedures and service intervals for installed equipment.",
+        "State the maintenance procedure and the service interval for a specific "
+        "component, with the basis for the interval. Operations assembles intervals "
+        "into a program; you supply the per-component figure.",
         "Provide operator-level repair and adjustment guidance.",
         "Identify replacement parts, consumables, media, and their specifications.",
         "Assess condition and calibration needs of chemical feeders, controllers, and probes.",
@@ -169,14 +175,14 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
         f"{FACILITY_DESIGN}.",
         f"Water chemistry diagnosis and chemical setpoints -- owned by the {CHEMISTRY}.",
         f"All arithmetic -- owned by the {MATH}.",
-        f"Maintenance scheduling, rotation, and daily operating routine -- owned by "
-        f"the {OPERATIONS}.",
+        f"Assembling intervals into a calendar, rotation, or daily operating routine "
+        f"-- owned by the {OPERATIONS}.",
         OUT_OF_SCOPE,
     ),
     tools=(
         'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
-    tool_instructions=tool_instructions_AA ,
+    tool_instructions=tool_instructions_symptom ,
     output_contract=_contract(
         "suspected_components (ordered by likelihood)",
         "diagnostic_steps",
@@ -184,6 +190,7 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
         "parts (name, specification, quantity)",
     ),
     archetype="procedure", 
+    tool_budget= 6 
 )
 
 
@@ -220,7 +227,7 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
     tools=(
             'vector_search', 'search_seed_nodes', 'expand_subgraph'
     ),
-    tool_instructions=tool_instructions_AA,
+    tool_instructions=tool_instructions_symptom,
     output_contract=_contract(
         "hydraulic_assessment",
         "required_flow_basis (venue type, turnover requirement, source)",
@@ -228,6 +235,7 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
         "calculation_request (null, or: intent, known_inputs, missing_inputs)",
     ),
     archetype="assessment",
+    tool_budget= 6 
 )
 
 
@@ -252,7 +260,6 @@ MATH_AGENT_CONFIG = AgentConfig(
         "One resolve_formula call, or two if the first returns CANDIDATES.",
         "Validate that the supplied inputs are dimensionally consistent and "
         "physically plausible before computing.",
-        "Execute the calculation using the calculator tool -- never by unaided arithmetic.",
         "Return the formula, substituted inputs, intermediate steps, result, and units.",
         "State every assumption made about a missing or inferred input.",
     ),
@@ -266,12 +273,12 @@ MATH_AGENT_CONFIG = AgentConfig(
         "Estimating a result when inputs are missing. Never guess a number.",
     ),
     tools=(
-    'resolve_formula',
-    'get_constant',
-    'convert_units',
-    'lookup_product',
-    'calculate',
-    'check_plausibility',
+        'resolve_formula',
+        'get_constant',
+        'convert_units',
+        'lookup_product',
+        'calculate',
+        'check_plausibility',
     ),
     tool_instructions=tool_instructions_math,
     output_contract=_contract(
@@ -284,6 +291,7 @@ MATH_AGENT_CONFIG = AgentConfig(
         "plausibility_check",
     ),
     archetype="calculation",
+    tool_budget= 10 
 )
 
 
@@ -300,7 +308,9 @@ OPERATIONS_AGENT_CONFIG = AgentConfig(
     ),
     responsibilities=(
         "Provide operational guidance and daily, weekly, and seasonal routines.",
-        "Build preventive maintenance schedules and service intervals into an operating program.",
+        "Assemble component service intervals supplied by other agents into a "
+        "preventive maintenance program with an owner and a cadence. Do not "
+        "originate an interval yourself.",
         "Advise on water-quality management strategy at the program level "
         "(testing frequency, monitoring cadence, seasonal adjustment).",
         "Identify operational best practices and common operator errors.",
@@ -328,8 +338,16 @@ OPERATIONS_AGENT_CONFIG = AgentConfig(
         "best_practices",
     ),
     archetype="procedure",
+    tool_budget= 6 
 )
 
+JURISDICTION_RULE = """This assistant covers the United States and Canada only.
+A named framework other than a US federal/state/local or Canadian
+federal/provincial code, or a stated facility location outside the US or Canada,
+is a strict OOS condition — not a coverage limitation to answer around. Never
+reframe such a request onto US/Canada guidance. When no framework is named and
+nothing indicates a location outside the US or Canada, assume US jurisdiction
+and proceed normally."""
 
 # ===========================================================================
 # COMPLIANCE
@@ -357,9 +375,7 @@ COMPLIANCE_AGENT_CONFIG = AgentConfig(
         f"Record and log design, retention periods, and documentation systems -- "
         f"owned by the {RECORDS}. Compliance states WHAT must be shown; Records "
         f"states HOW it is captured and kept.",
-        "Legal advice, enforcement predictions, or jurisdiction-specific "
-        "interpretation when the governing authority is unknown. State the "
-        "ambiguity and the need for the local health authority instead.",
+        f"{JURISDICTION_RULE}",
         f"Operating procedures -- owned by the {OPERATIONS}.",
         f"Chemistry, equipment, and hydraulic diagnosis -- owned by the {CHEMISTRY}, "
         f"{EQUIPMENT}, and {HYDRAULICS}.",
@@ -379,6 +395,7 @@ COMPLIANCE_AGENT_CONFIG = AgentConfig(
         "jurisdiction_caveat",
     ),
     archetype="compliance",
+    tool_budget= 5 
 )
 
 
@@ -403,7 +420,10 @@ CONTAMINATION_AGENT_CONFIG = AgentConfig(
         "Specify verification criteria and the reopening decision.",
         "Guide safe operator handling of wildlife and biological material without "
         "creating additional exposure.",
-        "Identify required post-incident documentation and follow-up.",
+        "Name the facts that must be captured about the incident (timeline, "
+        "classification, doses applied, contact time achieved, verification "
+        "readings, reopening decision). Do not design the form or assert that a "
+        "code requires it.",
         "Identify when the incident requires the health authority, a wildlife "
         "professional, or other qualified personnel.",
     ),
@@ -434,7 +454,8 @@ CONTAMINATION_AGENT_CONFIG = AgentConfig(
         "reopening_conditions",
         "documentation_required",
     ),
-    archetype="critical"
+    archetype="critical",
+    tool_budget= 6 
 )
 
 
@@ -480,6 +501,7 @@ FACILITY_DESIGN_AGENT_CONFIG = AgentConfig(
         "calculation_request (null, or: intent, known_inputs, missing_inputs)",
     ),
     archetype="assessment",
+    tool_budget= 6 
 )
 
 
@@ -496,19 +518,26 @@ SAFETY_AGENT_CONFIG = AgentConfig(
     ),
     responsibilities=(
         "Provide guidance on lifeguard protocols, zone coverage, and supervision ratios.",
-        "Advise on drowning prevention, barriers, and bather-load management.",
+        "Advise on drowning prevention and barrier adequacy.",
         "Guide emergency action plan structure, drills, rescue equipment, and first aid readiness.",
         "Advise on entrapment and drain-cover safety requirements.",
         "Recommend safety equipment and signage for the venue type.",
         "Advise on illness prevention, bather hygiene, and surveillance for "
         "recreational water illness before any incident occurs.",
+        "Advise on chemical handling, storage, spill response, ventilation, and PPE "
+        "as operator-exposure hazards, including incompatible-chemical warnings and "
+        "add-order. This is the handling layer, not the dosing decision.",
+        "Set the bather-load limit that supervision, turnover, and rescue coverage "
+        "can safely support. Operations manages the practice within that limit.",
     ),
     excluded_tasks=(
         f"Response to an active contamination incident, closure, and remediation -- "
         f"owned by the {CONTAMINATION}. Safety prevents; Contamination responds.",
         f"Clinical or medical treatment guidance beyond published first-aid and "
         f"rescue protocol -- see: {OUT_OF_SCOPE}",
-        f"Water chemistry, dosing, and treatment -- owned by the {CHEMISTRY}.",
+        f"Which chemical to add, why, and in what dose -- owned by the {CHEMISTRY} "
+        f"(decision) and the {MATH} (amount). Safety owns how it is handled, stored, "
+        f"and worn, not what goes in the water.",
         f"Equipment repair and hydraulic assessment -- owned by the {EQUIPMENT} and "
         f"the {HYDRAULICS}.",
         f"All calculation, including bather load -- owned by the {MATH}.",
@@ -526,7 +555,8 @@ SAFETY_AGENT_CONFIG = AgentConfig(
         "required_equipment",
         "emergency_procedures",
     ),
-    archetype="critical"
+    archetype="reference",
+    tool_budget= 6 
 )
 
 
@@ -567,7 +597,8 @@ RECORDS_AGENT_CONFIG = AgentConfig(
         "log_structure",
         "gaps_identified",
     ),
-    archetype="reference"
+    archetype="reference",
+    tool_budget= 5 
 )
 
 
@@ -614,7 +645,8 @@ RECOVERY_AGENT_CONFIG = AgentConfig(
         "recovery_sequence (ordered: step, precondition, verification)",
         "systems_requiring_inspection",
     ),
-    archetype="procedure"
+    archetype="procedure",
+    tool_budget= 6 
 )
 
 
@@ -638,17 +670,19 @@ FACILITY_DESIGN: FACILITY_DESIGN_AGENT_CONFIG,
 SAFETY: SAFETY_AGENT_CONFIG,
 RECORDS: RECORDS_AGENT_CONFIG,
 RECOVERY: RECOVERY_AGENT_CONFIG,
-"general": AgentConfig(
+GENERAL: AgentConfig(
         agent_name="general",
         specialization="Free-form pool knowledge",
         responsibilities=("General pool knowledge",),
         excluded_tasks=(),
         tools=(),
-        tool_instructions="",
+        tool_instructions="",   
         output_contract="",
         archetype="conversational",
+        tool_budget= 0
+        ,
     ),
-"oos": AgentConfig(
+OOS: AgentConfig(
     agent_name="oos",
     specialization="Out-of-scope rejection",
     responsibilities=("Reject unsafe/off-topic requests",),
@@ -657,5 +691,6 @@ RECOVERY: RECOVERY_AGENT_CONFIG,
     tool_instructions="",
     output_contract="",
     archetype="critical",
-),
+    tool_budget= 0
+    ),
 }
