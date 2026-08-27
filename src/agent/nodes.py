@@ -206,10 +206,13 @@ def _resolve_and_update_archetype(
     extra_results: dict | None = None,
     error: str | None = None,
     force_archetype: str | None = None,
+    agent_message: str | None = None,  # ✅ NUEVO PARÁMETRO
 ) -> dict:
     """
     Helper unificado para resolver el archetype y preparar el update.
     """
+    from langchain_core.messages import AIMessage  # ✅ IMPORTAR AQUÍ
+    
     merged = {**agent_results, **(extra_results or {})}
     usable = usable_results(merged)
     agents = [r.agent for r in usable]
@@ -222,10 +225,19 @@ def _resolve_and_update_archetype(
     )
 
     update: dict = {"archetype": archetype}
+    
     if extra_results:
         update["agent_results"] = extra_results
     if error:
         update["error"] = error
+    
+    # ✅ GUARDAR EL MENSAJE DEL AGENTE
+    if agent_message:
+        if "messages" not in update:
+            update["messages"] = []
+        update["messages"].append(AIMessage(content=agent_message))
+        # También guardar en campo específico para fácil acceso
+        update["agent_output"] = agent_message
     
     return update
 
@@ -507,7 +519,22 @@ def _unconsumed_entities(state: PoolAgentState, thread_id: str) -> List:
         and n.name.lower().replace("_", " ") not in answer
     ]
  
- 
+def _add_agent_message_to_update(update: dict, message: str) -> dict:
+    """
+    Agrega un mensaje de agente al update.
+    """
+    if not message:
+        return update
+    
+    from langchain_core.messages import AIMessage
+    
+    if "messages" not in update:
+        update["messages"] = []
+    update["messages"].append(AIMessage(content=message))
+    update["agent_output"] = message
+    
+    return update
+
 def _format_entities(nodes: List) -> str:
     if not nodes:
         return "(ninguna)"
@@ -916,10 +943,38 @@ def synthesizer(state: PoolAgentState) -> dict:
     3. Structured output failures (retries unstructured, then static fallback)
     4. Contract enforcement with validation reporting
     5. Source attachment to response
+    6. ✅ PRIORIZA el mensaje directo del agente para clarificaciones
     """
+    from langchain_core.messages import AIMessage  # ✅ Asegurar import
+    
     execution_plan: list[ExecutionStep] = state.get("execution_plan", [])
     agent_results_raw = state.get("agent_results") or {}
     language_code: str = state.get("detected_language", "es")
+
+    # ============================================================
+    # ✅ NUEVO: VERIFICAR SI HAY UN MENSAJE DIRECTO DEL AGENTE
+    # ============================================================
+    agent_output = state.get("agent_output")
+    if agent_output:
+        # Verificar si es una clarificación (contiene palabras clave)
+        clarification_keywords = ["missing", "provide", "need", "parameters", "volume", "current pH", "target pH"]
+        is_clarification = any(keyword in agent_output.lower() for keyword in clarification_keywords)
+        
+        if is_clarification:
+            logger.info("synthesizer: usando mensaje directo del agente (clarificación)")
+            # Usar el mensaje del agente directamente
+            payload = SynthesizerOutput(
+                tier1=agent_output,
+                tier2=[],
+                safety="Always handle pool chemicals with care and wear protective gear.",
+                details=[],
+            )
+            return {
+                "archetype": state.get("archetype", "conversational"),
+                "response": payload,
+                "validation": {"direct_agent_message": True, "is_clarification": True},
+                "messages": [AIMessage(content=agent_output, name="Marlin")],
+            }
 
     # ============================================================
     # DEFENSA: Convertir agent_results de list a dict si es necesario
@@ -929,7 +984,6 @@ def synthesizer(state: PoolAgentState) -> dict:
             "synthesizer: agent_results is list (got %d items), converting to dict",
             len(agent_results_raw)
         )
-        # Convertir lista a dict con step como key
         agent_results: dict[str, AgentResult] = {}
         for result in agent_results_raw:
             if hasattr(result, 'step'):
@@ -937,13 +991,11 @@ def synthesizer(state: PoolAgentState) -> dict:
                 agent_results[key] = result
             elif isinstance(result, dict) and 'step' in result:
                 key = f"step_{result['step']}"
-                # Convertir dict a AgentResult si es necesario
                 if not isinstance(result, AgentResult):
                     try:
                         agent_results[key] = AgentResult(**result)
                     except Exception as e:
                         logger.error(f"Failed to convert dict to AgentResult: {e}")
-                        # Fallback: crear un AgentResult básico
                         agent_results[key] = AgentResult(
                             agent=result.get('agent', 'unknown'),
                             step=result.get('step', 0),
@@ -954,21 +1006,17 @@ def synthesizer(state: PoolAgentState) -> dict:
                         )
                 else:
                     agent_results[key] = result
-        # Si la conversión falló, usar un dict vacío
         if not agent_results:
             logger.error("synthesizer: failed to convert list to dict, using empty dict")
             agent_results = {}
     else:
-        # Ya es dict, asegurar que los valores sean AgentResult
         agent_results = agent_results_raw
-        # Convertir cualquier valor que sea dict a AgentResult
         for key, value in list(agent_results.items()):
             if isinstance(value, dict) and not isinstance(value, AgentResult):
                 try:
                     agent_results[key] = AgentResult(**value)
                 except Exception as e:
                     logger.error(f"Failed to convert dict to AgentResult for key {key}: {e}")
-                    # Mantener el dict original si no se puede convertir
                     pass
 
     # ============================================================
@@ -981,9 +1029,31 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     # EXTRACT USABLE RESULTS
     # ============================================================
-    # usable_results ahora maneja tanto dict como list de forma segura
     usable = usable_results(agent_results)
     agents = [r.agent for r in usable]
+
+    # ============================================================
+    # ✅ NUEVO: VERIFICAR SI EL RESULTADO DEL AGENTE ES UNA CLARIFICACIÓN
+    # ============================================================
+    # Buscar en usable si hay un mensaje de clarificación
+    for result in usable:
+        if hasattr(result, 'output') and result.output:
+            clarification_keywords = ["missing", "provide", "need", "parameters", "volume", "current pH"]
+            if any(keyword in result.output.lower() for keyword in clarification_keywords):
+                logger.info("synthesizer: detectada clarificación en agent_results")
+                # Usar el output del agente directamente
+                payload = SynthesizerOutput(
+                    tier1=result.output,
+                    tier2=[],
+                    safety="Always handle pool chemicals with care and wear protective gear.",
+                    details=[],
+                )
+                return {
+                    "archetype": state.get("archetype", "conversational"),
+                    "response": payload,
+                    "validation": {"direct_agent_message": True, "is_clarification": True},
+                    "messages": [AIMessage(content=result.output, name="Marlin")],
+                }
 
     # ============================================================
     # ARCHETYPE RESOLUTION
@@ -1001,7 +1071,6 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     raw_content = _build_raw_content(usable)
     if not raw_content:
-        # Rama defensiva: sin evidencia utilizable no hay nada que sintetizar
         raw_content = "(no prior content — generate a warm greeting and offer help)"
         archetype, agents, usable = "conversational", [], []
 
@@ -1011,9 +1080,8 @@ def synthesizer(state: PoolAgentState) -> dict:
     contract = get_contract(archetype)
 
     # ============================================================
-    # BUILD PROMPT - FIX: usar .format() en lugar de f-string
+    # BUILD PROMPT
     # ============================================================
-    # Obtener la sección del archetype de forma segura
     archetype_section = build_synthesizer_archetype_section(archetype, agents)
     
     system_content = SYNTHESIZER_PROMPT.format(
@@ -1035,23 +1103,19 @@ def synthesizer(state: PoolAgentState) -> dict:
     payload = None
     
     try:
-        # Intentar structured output primero
         payload = _get_llm().with_structured_output(SynthesizerOutput).invoke(llm_messages)
     except Exception as exc:
         logger.warning(
             "synthesizer: structured output failed (%s); retrying unstructured", exc
         )
         try:
-            # Fallback a unstructured
             raw = _get_llm().invoke(llm_messages)
             payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
             validation = {"fallback": "unstructured", "reason": str(exc)}
         except Exception as exc2:
-            # Último fallback: respuesta estática
             logger.error(
                 "synthesizer: both generation attempts failed (%s | %s)", exc, exc2
             )
-            # Usar el payload estático
             payload = static_service_unavailable_payload(
                 SynthesizerOutput, 
                 language_code
@@ -1062,7 +1126,7 @@ def synthesizer(state: PoolAgentState) -> dict:
             }
 
     # ============================================================
-    # FASE 2: ENFORCEMENT - SIEMPRE se ejecuta
+    # FASE 2: ENFORCEMENT
     # ============================================================
     try:
         if payload is not None:
@@ -1071,7 +1135,6 @@ def synthesizer(state: PoolAgentState) -> dict:
             )
             validation = {**validation, **report.to_dict()}
         else:
-            # Si payload es None (caso extremo), crear uno estático
             logger.error("synthesizer: payload is None after generation attempts")
             payload = static_service_unavailable_payload(
                 SynthesizerOutput, 
@@ -1079,10 +1142,8 @@ def synthesizer(state: PoolAgentState) -> dict:
             )
             validation = {**validation, "payload_was_none": True}
     except Exception as exc:
-        # El validador falló, pero no debemos perder la respuesta
         logger.error("synthesizer: enforce_contract raised (%s)", exc, exc_info=True)
         validation = {**validation, "enforcement_error": str(exc)}
-        # Si payload es None, crear uno estático
         if payload is None:
             payload = static_service_unavailable_payload(
                 SynthesizerOutput, 
@@ -1172,34 +1233,10 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
 
     return {"suggestions": gated}
 
-@observe(as_type="agent", name="General Node")
-def general(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
-    plan = state.get("execution_plan") or []
-    step_num = plan[0].step if plan else 1
-
-    remaining = _remaining_budget(state)
-    step_budget = max(MIN_STEP_BUDGET_S, min(STEP_DEADLINE_S, remaining))
-    
-    text, err = _direct_answer(state, GENERAL_PROMPT, deadline_s=step_budget)
-
-    result = AgentResult(
-        agent=GENERAL_AGENT,
-        step=step_num,
-        output=text,
-        sources=[],
-        error=err,
-        status="ok" if text and not err else "failed",
-    )
-
-    update = _resolve_and_update_archetype(
-        execution_plan=plan,
-        agent_results={f"step_{step_num}": result},
-        force_archetype="conversational",
-    )
-    return Command(update=update, goto="synthesizer")
-
 @observe(as_type="agent", name="OOS Node")
 def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]]:
+    from langchain_core.messages import AIMessage  # ✅ IMPORTAR
+    
     plan = state.get("execution_plan") or []
     step_num = plan[0].step if plan else 1
 
@@ -1212,11 +1249,9 @@ def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]
         target_agent = misroute_match.group(1).strip().lower()
         rest_text = misroute_match.group(2).strip()
         
-        # Verificar reintentos
         misroute_retries = state.get("misroute_retries", 0)
         
         if misroute_retries >= _MAX_MISROUTE_RETRIES:
-            # Demasiados reintentos, pasar a synthesizer con lo que tenemos
             result = AgentResult(
                 agent="oos",
                 step=step_num,
@@ -1230,16 +1265,17 @@ def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]
                 agent_results={f"step_{step_num}": result},
                 force_archetype="oos",
             )
-            return Command(
-                update=update,
-                goto="synthesizer"
-            )
+            # ✅ GUARDAR MENSAJE SI EXISTE
+            if text:
+                if "messages" not in update:
+                    update["messages"] = []
+                update["messages"].append(AIMessage(content=text))
+                update["agent_output"] = text
+            return Command(update=update, goto="synthesizer")
         
-        # Reintentar con el agente específico
         if target_agent in _MISROUTE_AGENTS:
             logger.info(f"MISROUTE: redirecting to {target_agent} (attempt {misroute_retries + 1})")
             
-            # Crear nuevo plan con el agente correcto
             new_step = ExecutionStep(
                 step=step_num,
                 task=rest_text or state["messages"][-1].content,
@@ -1247,14 +1283,13 @@ def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]
                 oos=False,
             )
             
-            # Actualizar el plan y reintentar
             return Command(
                 update={
                     "execution_plan": [new_step],
                     "misroute_retries": misroute_retries + 1,
-                    "archetype": None,  # Resetear para que el orchestrator lo recalcule
+                    "archetype": None,
                 },
-                goto="orchestrator"  # Volver al orchestrator con el nuevo plan
+                goto="orchestrator"
             )
     
     # Si no hay MISROUTE o no es válido, continuar normalmente
@@ -1272,4 +1307,12 @@ def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]
         agent_results={f"step_{step_num}": result},
         force_archetype="oos",
     )
+    
+    # ✅ GUARDAR EL MENSAJE EXPLÍCITAMENTE
+    if text:
+        if "messages" not in update:
+            update["messages"] = []
+        update["messages"].append(AIMessage(content=text))
+        update["agent_output"] = text
+    
     return Command(update=update, goto="synthesizer")
