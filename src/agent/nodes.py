@@ -955,7 +955,6 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     # ✅ DETECTAR CLARIFICACIÓN - PRIORIDAD 1
     # ============================================================
-    # Buscar el mensaje del agente en varias fuentes
     agent_message = None
     is_clarification = False
     
@@ -983,7 +982,6 @@ def synthesizer(state: PoolAgentState) -> dict:
     
     # Detectar si es clarificación
     if agent_message:
-        # Palabras clave de clarificación
         clarification_keywords = [
             "missing", "provide", "need", "parameters", 
             "volume", "current pH", "target pH", 
@@ -991,28 +989,20 @@ def synthesizer(state: PoolAgentState) -> dict:
         ]
         is_clarification = any(keyword in agent_message.lower() for keyword in clarification_keywords)
         
-        # También verificar el plan
-        if execution_plan and not is_clarification:
+        if not is_clarification and execution_plan:
             first_step = execution_plan[0]
             task = first_step.get("task", "")
-            # Si la tarea es una solicitud de información
             if "Request" in task or "missing" in task.lower() or "provide" in task.lower():
                 is_clarification = True
         
-        # Si es clarificación, usar el mensaje directamente
         if is_clarification:
             logger.info("synthesizer: detectada clarificación, usando mensaje directo del agente")
             
-            # Extraer el mensaje de clarificación
-            clarification_message = agent_message
-            
-            # Asegurarse de que el mensaje tenga un safety message
-            safety_message = "Always handle pool chemicals with care and wear protective gear."
-            
+            # ✅ CORREGIDO: Usar 'answer' en lugar de 'tier1'
             payload = SynthesizerOutput(
-                tier1=clarification_message,
-                tier2=[],
-                safety=safety_message,
+                answer=agent_message,        # <-- Cambiado de tier1 a answer
+                actions=[],                  # <-- Añadido actions
+                safety="Always handle pool chemicals with care and wear protective gear.",
                 details=[],
             )
             
@@ -1024,7 +1014,7 @@ def synthesizer(state: PoolAgentState) -> dict:
                     "is_clarification": True,
                     "message_source": "agent_output" if state.get("agent_output") else "messages"
                 },
-                "messages": [AIMessage(content=clarification_message, name="Marlin")],
+                "messages": [AIMessage(content=agent_message, name="Marlin")],
             }
 
     # ============================================================
@@ -1088,13 +1078,14 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     for result in usable:
         if hasattr(result, 'output') and result.output:
-            # Verificar si es clarificación
             clarification_keywords = ["missing", "provide", "need", "parameters", "volume", "current pH"]
             if any(keyword in result.output.lower() for keyword in clarification_keywords):
                 logger.info("synthesizer: detectada clarificación en agent_results (fallback)")
+                
+                # ✅ CORREGIDO: Usar 'answer' en lugar de 'tier1'
                 payload = SynthesizerOutput(
-                    tier1=result.output,
-                    tier2=[],
+                    answer=result.output,      # <-- Cambiado de tier1 a answer
+                    actions=[],                # <-- Añadido actions
                     safety="Always handle pool chemicals with care and wear protective gear.",
                     details=[],
                 )
