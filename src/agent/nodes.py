@@ -1169,6 +1169,7 @@ def synthesizer(state: PoolAgentState) -> dict:
 # ================================================================
 # SUGGESTER NODE
 # ================================================================
+@observe(as_type="agent", name="Suggester")
 def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
     """
     Rama paralela del fan-out del orchestrator. Lee agent_results y
@@ -1232,6 +1233,36 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
         logger.info("suggester gates: %s", report)
 
     return {"suggestions": gated}
+
+@observe(as_type="agent", name="General Node")
+def general(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
+    plan = state.get("execution_plan") or []
+    step_num = plan[0].step if plan else 1
+
+    remaining = _remaining_budget(state)
+    step_budget = max(MIN_STEP_BUDGET_S, min(STEP_DEADLINE_S, remaining))
+    
+    text, err = _direct_answer(state, GENERAL_PROMPT, deadline_s=step_budget)
+
+    result = AgentResult(
+        agent=GENERAL_AGENT,
+        step=step_num,
+        output=text,
+        sources=[],
+        error=err,
+        status="ok" if text and not err else "failed",
+    )
+
+    update = _resolve_and_update_archetype(
+        execution_plan=plan,
+        agent_results={f"step_{step_num}": result},
+        force_archetype="conversational",
+    )
+    
+    # ✅ AGREGAR EL MENSAJE
+    update = _add_agent_message_to_update(update, text)
+    
+    return Command(update=update, goto="synthesizer")
 
 @observe(as_type="agent", name="OOS Node")
 def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]]:
