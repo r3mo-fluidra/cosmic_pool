@@ -17,10 +17,16 @@ función pura, testeable sin correr el grafo.
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional
-from ..agent.state import AgentResult
-
+from typing import List, Literal, Optional, TYPE_CHECKING, Dict, Any
 from pydantic import BaseModel, Field
+
+# =====================================================================
+# IMPORT DIFERIDO PARA EVITAR CIRCULAR
+# =====================================================================
+# AgentResult se importa solo cuando se necesita en runtime
+# TYPE_CHECKING permite que los type hints funcionen sin import circular
+if TYPE_CHECKING:
+    from ..agent.state import AgentResult
 
 
 # =====================================================================
@@ -91,7 +97,7 @@ class SynthesizerOutput(BaseModel):
     def tier1_markdown(self) -> str:
         """
         Only what is visible. This is what goes into messages as an AIMessage:
-the history must not carry Tier 2 content that the user never read.
+        the history must not carry Tier 2 content that the user never read.
         """
         parts = [self.answer.strip()]
         if self.actions:
@@ -102,12 +108,13 @@ the history must not carry Tier 2 content that the user never read.
 
     def to_markdown(self) -> str:
         """
-        Flat output, Tier 1 + Tier 2. Compatibility bridge: allows merging the backend without modifying the frontend yet.
+        Flat output, Tier 1 + Tier 2. Compatibility bridge: allows merging 
+        the backend without modifying the frontend yet.
         """
         parts = [self.tier1_markdown()]
         for d in self.details:
             parts.append(f"**{d.label}**\n{d.body.strip()}")
-        return "\n\n".join(parts)
+        return "\n\n".join(p for p in parts if p)
 
 
 # =====================================================================
@@ -244,7 +251,7 @@ def resolve_archetype(agents: list[str], is_oos: bool = False) -> str:
         is_oos: True if any step in the plan was marked as oos.
 
     Returns:
-    Key of ARCHETYPE_CONTRACTS.
+        Key of ARCHETYPE_CONTRACTS.
     """
     if is_oos:
         return "oos"
@@ -270,16 +277,39 @@ def get_contract(archetype: str) -> dict:
                                    ARCHETYPE_CONTRACTS[DEFAULT_ARCHETYPE])
 
 
+def build_synthesizer_archetype_section(archetype: str, agents: list[str]) -> str:
+    """
+    Build archetype section for synthesizer prompt.
+    """
+    if archetype == "conversational":
+        return "conversational"
+    if archetype == "oos":
+        return "out_of_scope"
+    if archetype == "critical":
+        return "critical"
+    if archetype == "compliance":
+        return "compliance"
+    if archetype == "calculation":
+        return "calculation"
+    if archetype == "reference":
+        return "reference"
+    return "assessment"
+
+
 # =====================================================================
-# 5. HELPERS DE STATE
+# 5. HELPERS DE STATE (CON IMPORT DIFERIDO)
 # =====================================================================
 
-def usable_results(agent_results) -> list:
+def usable_results(agent_results: Any) -> list:
     """
     Extract usable results from agent_results dict or list.
     
     Defensive: handles both dict and list inputs.
+    Importa AgentResult solo cuando se llama a la función.
     """
+    # Import diferido - evita el circular en tiempo de importación
+    from ..agent.state import AgentResult
+    
     results = []
     
     # Caso: es dict
@@ -311,12 +341,16 @@ def usable_results(agent_results) -> list:
     return results
 
 
-def agents_from_results(agent_results) -> list:
+def agents_from_results(agent_results: Any) -> list:
     """
     Extract agent names from results.
     
     Defensive: handles both dict and list inputs.
+    Importa AgentResult solo cuando se llama a la función.
     """
+    # Import diferido - evita el circular en tiempo de importación
+    from ..agent.state import AgentResult
+    
     agents = []
     
     if isinstance(agent_results, dict):
@@ -333,3 +367,98 @@ def agents_from_results(agent_results) -> list:
                 agents.append(item.get('agent', 'unknown'))
     
     return agents
+
+
+def enforce_contract(
+    payload: SynthesizerOutput,
+    contract: dict,
+    agents: list[str],
+    detail_cls: type = DetailSection,
+) -> tuple[SynthesizerOutput, dict]:
+    """
+    Enforce contract on payload.
+    
+    Importa AgentResult solo si es necesario para validación.
+    """
+    # Import diferido si se necesita para validación
+    from ..agent.state import AgentResult  # Si se necesita
+    
+    report = {"valid": True, "issues": []}
+    
+    # Validar que los campos requeridos existen
+    required_fields = contract.get("required_fields", [])
+    for field in required_fields:
+        if not hasattr(payload, field) or getattr(payload, field) is None:
+            report["valid"] = False
+            report["issues"].append(f"Missing required field: {field}")
+    
+    # Validar seguridad según contrato
+    safety_required = contract.get("safety_required", False)
+    if safety_required and not payload.safety:
+        # Si es requerido y no hay safety, marcar como issue
+        report["valid"] = False
+        report["issues"].append("Safety field required but missing")
+    
+    # Validar que details no exceda lo permitido
+    max_details = contract.get("max_details", 5)
+    if len(payload.details) > max_details:
+        # Truncar details
+        payload.details = payload.details[:max_details]
+        report["issues"].append(f"Details truncated to {max_details}")
+    
+    return payload, report
+
+
+def fallback_payload(content: str, output_cls: type = SynthesizerOutput) -> SynthesizerOutput:
+    """
+    Create fallback payload from unstructured content.
+    """
+    return output_cls(
+        archetype="conversational",
+        answer=content,
+        actions=[],
+        safety=None,
+        details=[],
+    )
+
+
+# =====================================================================
+# 6. FUNCIONES ADICIONALES PARA EL SYNTHESIZER
+# =====================================================================
+
+def resolve_archetype_from_plan(
+    execution_plan: list,
+    agent_results: Any,
+    extra_results: dict | None = None,
+    error: str | None = None,
+    force_archetype: str | None = None,
+) -> str:
+    """
+    Resolve archetype from execution plan and results.
+    
+    Args:
+        execution_plan: List of ExecutionStep
+        agent_results: Dict or List of AgentResult
+        extra_results: Additional results
+        error: Error message
+        force_archetype: Force a specific archetype
+    
+    Returns:
+        Archetype string
+    """
+    if force_archetype:
+        return force_archetype
+    
+    # Obtener agentes usables
+    agents = agents_from_results(agent_results)
+    
+    # Verificar si hay OOS
+    is_oos = False
+    if execution_plan:
+        for step in execution_plan:
+            if hasattr(step, 'oos') and step.oos:
+                is_oos = True
+                break
+    
+    # Resolver archetype
+    return resolve_archetype(agents, is_oos)
