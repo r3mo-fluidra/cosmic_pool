@@ -915,7 +915,7 @@ def run_step_node(payload: dict) -> Command:
     
     # ✅ OBTENER EL ESTADO COMPLETO DEL PAYLOAD
     # Asumiendo que el Send desde orchestrator incluye el estado
-    state = payload.get("state", {})
+    state = {"agent_results": payload.get("agent_results") or {}}
  
     # ✅ GATE PARA MATH
     if step.assigned_agent == MATH and not math_inputs_present(user_message):
@@ -1051,12 +1051,13 @@ def _build_agent_context(state: dict, step: ExecutionStep, user_message: str) ->
                     context_parts.append("")
     
     # 4. Instrucción sobre cómo usar el contexto
-    context_parts.append("--- INSTRUCTIONS ---")
-    context_parts.append(
-        "Use the context from previous steps above to inform your work. "
-        "Do not repeat searches or reasoning that has already been done. "
-        "Focus on your specific task and provide a complete, accurate response."
-    )
+    if step.depends_on or previous_step_num >= 1:
+        context_parts.append("--- INSTRUCTIONS ---")
+        context_parts.append(
+            "Apply the Context Sharing rules from your system prompt to the "
+            "material above. Check each step's status before treating it as "
+            "established."
+        )
     
     return "\n".join(context_parts)
 
