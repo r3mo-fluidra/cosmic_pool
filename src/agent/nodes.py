@@ -9,6 +9,7 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, Send
+from langgraph.errors import GraphRecursionError
 import logging
 from langfuse import observe, get_client
 from typing import List, Literal
@@ -23,12 +24,12 @@ from .state import PoolAgentState, ExecutionStep, AgentResult
 from ..prompts.prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
 from .chains import create_planner_chain
 from ..config.llm import create_llm, create_suggester_llm
-from .agents import get_agent_by_name
+from .agents import get_agent_by_name, SPECIALIST_SPECS
 from .gates import (
     math_inputs_present,
     missing_inputs_result
 )
-from ..prompts.prompts_sub_agents import MATH
+from ..prompts.prompts_sub_agents import MATH, AGENT_REGISTRY
 from ..prompts.prompts import GENERAL_PROMPT , OOS_PROMPT
 # Graph context
 from ..graph_context.response_contracts import (
@@ -192,8 +193,7 @@ _INFRA_EXC_NAMES = (
  
 # Prefijos de error que NO son fallo del proveedor: son contratos de negocio.
 # Un paso con MISSING_INPUTS "falló" pero el sistema está sano.
-_SOFT_ERROR_PREFIXES = ("MISSING_INPUTS", "CANNOT_COMPUTE", "NO_GRAPH_COVERAGE")
- 
+_SOFT_ERROR_PREFIXES = ("MISSING_INPUTS", "CANNOT_COMPUTE", "NO_GRAPH_COVERAGE", "TOOL_BUDGET_EXCEEDED")
 
 # ================================================================
 # HELPERS
@@ -294,6 +294,28 @@ def _remaining_budget(state) -> float:
         # stale de un turno viejo, o nunca se seteó -> no confiar en el budget
         return TURN_DEADLINE_S
     return TURN_DEADLINE_S - (time.time() - float(started))
+
+_SLUG_TO_CONFIG = {
+    slug: AGENT_REGISTRY[registry_key] for slug, registry_key in SPECIALIST_SPECS
+}
+_SLUG_TO_CONFIG["math"] = AGENT_REGISTRY[MATH]
+
+
+def _recursion_limit_for(agent_name: str) -> int:
+    """
+    The 'tool budget' in each AgentConfig is currently just text in the prompt --
+    confirmed by two traces where the model exceeded it (12/6 and 9/6) despite
+    saying "Hard limit ... non-negotiable". recursion_limit is the only real
+    cutoff: each turn of create_agent's internal graph = 1 model node +
+    1 tool node, so we need double the tool budget, plus margin for the final
+    response that doesn't call any tool.
+
+    No entry in _SLUG_TO_CONFIG (general/OOS don't go through run_step, or a
+    new agent not yet registered) -> conservative default of 6.
+    """
+    config = _SLUG_TO_CONFIG.get(_normalize_agent(agent_name))
+    budget = getattr(config, "tool_budget", 6) if config else 6
+    return budget * 2 + 2
 
 def _flatten(content) -> str:
     """Tu lógica actual de parseo, ahora solo para el camino de fallback."""
@@ -972,6 +994,20 @@ def run_step_node(payload: dict) -> Command:
             error=f"STEP_DEADLINE_EXCEEDED after {deadline_s:.0f}s",
             status="failed",
         )
+
+    except GraphRecursionError:
+        # El agente agotó su recursion_limit sin encontrar evidencia
+        # suficiente para responder. No es un fallo del proveedor -- es un
+        # gap de negocio, tratado como MISSING_INPUTS/CANNOT_COMPUTE en
+        # is_infra_error para que no dispare el circuit breaker del turno.
+        agent_result = AgentResult(
+            agent=step.assigned_agent,
+            step=step.step,
+            output="",
+            sources=[],
+            error=f"TOOL_BUDGET_EXCEEDED: {step.assigned_agent} exceeded its recursion_limit",
+            status="failed",
+        )
  
     except Exception as exc:
         err = str(exc).strip() or exc.__class__.__name__
@@ -1096,7 +1132,10 @@ def _run_step_enriched(step: ExecutionStep, agent_input: dict) -> AgentResult:
     Versión enriquecida de _run_step que acepta agent_input pre-construido.
     """
     agent = get_agent_by_name(step.assigned_agent)
-    result = agent.invoke(agent_input)
+    result = agent.invoke(
+        agent_input,
+        config={"recursion_limit": _recursion_limit_for(step.assigned_agent)},
+    )
 
     output_text = ""
     for msg in reversed(result.get("messages", [])):
