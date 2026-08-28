@@ -218,9 +218,8 @@ def _resolve_and_update_archetype(
     agents = [r.agent for r in usable]
 
     archetype = force_archetype or resolve_archetype(
-        execution_plan=execution_plan,
         agents=agents,
-        agent_results=merged,
+        is_oos=_is_oos(execution_plan),
     )
 
     update: dict = {"archetype": archetype}
