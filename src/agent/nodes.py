@@ -875,28 +875,94 @@ def _run_with_deadline(fn, deadline_s: float, *args):
     except FuturesTimeout:
         future.cancel()  # no mata el thread en curso; ver nota sobre timeout del cliente
         raise
- 
+
+def _build_agent_context(state: PoolAgentState, step: ExecutionStep) -> str:
+    """
+    Construye el contexto para el agente basado en el estado actual y el paso a ejecutar.
+    """
+    agent_results = state.get("agent_results", {})
+
+    # 1. Siempre incluir el mensaje del usuario original
+    context_parts = [f"User context: {user_message}"]
+
+    # 2. Incluir el resultado de los pasos de los que depende
+    if step.depends_on:
+        context_parts.append("\n--- Previous Results ---")
+        for dep_step_num in step.depends_on:
+            dep_key = f"step_{dep_step_num}"
+            dep_result = agent_results.get(dep_key)
+            if dep_result:
+                # Asumiendo que dep_result es un AgentResult o un dict con 'output'
+                output = getattr(dep_result, 'output', None)
+                if not output and isinstance(dep_result, dict):
+                    output = dep_result.get('output')
+                if output:
+                    context_parts.append(f"From Step {dep_step_num}:\n{output}")
+
+    # 3. (Opcional) Incluir el resultado del paso anterior inmediato,
+    #    incluso si no hay dependencia formal, para dar más contexto.
+    #    Puedes hacerlo solo si el paso anterior existe y fue exitoso.
+    previous_step_num = step.step - 1
+    if previous_step_num >= 1 and not step.depends_on: # Evita duplicar si ya está en depends_on
+        prev_key = f"step_{previous_step_num}"
+        prev_result = agent_results.get(prev_key)
+        if prev_result:
+            output = getattr(prev_result, 'output', None)
+            if not output and isinstance(prev_result, dict):
+                output = prev_result.get('output')
+            if output:
+                context_parts.append(f"\n(Additional context from Step {previous_step_num}):\n{output}")
+
+    return "\n".join(context_parts)
  
 @observe(as_type="agent", name="Run Step Node")
 def run_step_node(payload: dict) -> Command:
     from .state import AgentResult  # ajustá el import
+    from langchain_core.messages import HumanMessage
+    import logging
+    
+    logger = logging.getLogger(__name__)
  
     step = payload["step"]
     user_message = payload["user_message"]
     deadline_s = float(payload.get("deadline_s", STEP_DEADLINE_S))
     step_key = f"step_{step.step}"
+    
+    # ✅ OBTENER EL ESTADO COMPLETO DEL PAYLOAD
+    # Asumiendo que el Send desde orchestrator incluye el estado
+    state = payload.get("state", {})
  
+    # ✅ GATE PARA MATH
     if step.assigned_agent == MATH and not math_inputs_present(user_message):
-        # Gate determinista: sin ningún dígito en el turno, ninguna fórmula
-        # del catálogo tiene con qué calcular.
         return Command(
             update={"agent_results": {step_key: missing_inputs_result(step, user_message)}},
             goto="orchestrator",
         )
  
+    # ✅ CONSTRUIR CONTEXTO ENRIQUECIDO
+    agent_context = _build_agent_context(state, step, user_message)
+    
+    # ✅ CREAR EL INPUT DEL AGENTE CON CONTEXTO COMPARTIDO
+    agent_input = {
+        "messages": [
+            HumanMessage(
+                content=agent_context
+            )
+        ]
+    }
+    
+    # Log para debugging (opcional)
+    logger.info(f"run_step: step_{step.step} ({step.assigned_agent}) - Contexto construido con {len(agent_context)} caracteres")
+ 
     started = time.monotonic()
     try:
-        agent_result = _run_with_deadline(_run_step, deadline_s, step, user_message)
+        # ✅ PASAR EL INPUT ENRIQUECIDO EN LUGAR DE SOLO step Y user_message
+        agent_result = _run_with_deadline(
+            _run_step_enriched,  # Nueva función que acepta agent_input
+            deadline_s, 
+            step, 
+            agent_input
+        )
  
     except FuturesTimeout:
         agent_result = AgentResult(
@@ -924,6 +990,125 @@ def run_step_node(payload: dict) -> Command:
     return Command(
         update={"agent_results": {step_key: agent_result}},
         goto="orchestrator",
+    )
+
+
+# ✅ NUEVA FUNCIÓN HELPER PARA CONSTRUIR EL CONTEXTO
+def _build_agent_context(state: dict, step: ExecutionStep, user_message: str) -> str:
+    """
+    Construye el contexto enriquecido para el agente basado en:
+    1. El mensaje del usuario original
+    2. La tarea específica del paso
+    3. Los resultados de pasos anteriores (dependencias)
+    4. (Opcional) El resultado del paso inmediatamente anterior
+    """
+    agent_results = state.get("agent_results", {})
+    
+    # 1. Tarea y mensaje del usuario
+    context_parts = [
+        f"TASK: {step.task}",
+        "",
+        f"USER MESSAGE: {user_message}",
+        "",
+    ]
+    
+    # 2. Resultados de pasos de los que depende
+    if step.depends_on:
+        context_parts.append("--- PREVIOUS STEP RESULTS (Dependencies) ---")
+        for dep_step_num in step.depends_on:
+            dep_key = f"step_{dep_step_num}"
+            dep_result = agent_results.get(dep_key)
+            if dep_result:
+                # Extraer output y status
+                output = _get_result_output(dep_result)
+                status = _get_result_status(dep_result)
+                
+                if output:
+                    context_parts.append(f"Step {dep_step_num} (status: {status}):")
+                    context_parts.append(output)
+                    context_parts.append("")  # Línea en blanco para separación
+                elif status == "failed":
+                    error = _get_result_error(dep_result)
+                    context_parts.append(f"Step {dep_step_num} FAILED: {error}")
+                    context_parts.append("")
+            else:
+                context_parts.append(f"Step {dep_step_num}: No result available")
+                context_parts.append("")
+    
+    # 3. (Opcional) Resultado del paso inmediatamente anterior para más contexto
+    previous_step_num = step.step - 1
+    if previous_step_num >= 1:
+        prev_key = f"step_{previous_step_num}"
+        # Evitar duplicar si ya está en depends_on
+        if prev_key not in [f"step_{d}" for d in (step.depends_on or [])]:
+            prev_result = agent_results.get(prev_key)
+            if prev_result:
+                output = _get_result_output(prev_result)
+                if output:
+                    context_parts.append("--- ADDITIONAL CONTEXT (Previous Step) ---")
+                    context_parts.append(f"Step {previous_step_num} result:")
+                    context_parts.append(output)
+                    context_parts.append("")
+    
+    # 4. Instrucción sobre cómo usar el contexto
+    context_parts.append("--- INSTRUCTIONS ---")
+    context_parts.append(
+        "Use the context from previous steps above to inform your work. "
+        "Do not repeat searches or reasoning that has already been done. "
+        "Focus on your specific task and provide a complete, accurate response."
+    )
+    
+    return "\n".join(context_parts)
+
+
+# ✅ NUEVA FUNCIÓN HELPER PARA EXTRAER OUTPUT DE UN RESULTADO
+def _get_result_output(result) -> str:
+    """Extrae el output de un AgentResult o dict."""
+    if hasattr(result, 'output'):
+        return result.output or ""
+    if isinstance(result, dict):
+        return result.get('output', "")
+    return ""
+
+
+# ✅ NUEVA FUNCIÓN HELPER PARA EXTRAER STATUS
+def _get_result_status(result) -> str:
+    """Extrae el status de un AgentResult o dict."""
+    if hasattr(result, 'status'):
+        return result.status or "unknown"
+    if isinstance(result, dict):
+        return result.get('status', "unknown")
+    return "unknown"
+
+
+# ✅ NUEVA FUNCIÓN HELPER PARA EXTRAER ERROR
+def _get_result_error(result) -> str:
+    """Extrae el error de un AgentResult o dict."""
+    if hasattr(result, 'error'):
+        return result.error or ""
+    if isinstance(result, dict):
+        return result.get('error', "")
+    return ""
+
+
+# ✅ NUEVA FUNCIÓN _run_step_enriched (reemplaza a _run_step)
+def _run_step_enriched(step: ExecutionStep, agent_input: dict) -> AgentResult:
+    """
+    Versión enriquecida de _run_step que acepta agent_input pre-construido.
+    """
+    agent = get_agent_by_name(step.assigned_agent)
+    result = agent.invoke(agent_input)
+
+    output_text = ""
+    for msg in reversed(result.get("messages", [])):
+        if isinstance(msg, AIMessage) and msg.content:
+            output_text = _extract_text(msg.content)
+            break
+
+    return AgentResult(
+        agent=step.assigned_agent,
+        step=step.step,
+        output=output_text,
     )
 # ================================================================
 # SYNTHESIZER NODE
