@@ -936,7 +936,6 @@ RETURN
 
 
 @tool
-@tool
 def expand_subgraph(
     seed_node_ids: str,
     query: str = "",
