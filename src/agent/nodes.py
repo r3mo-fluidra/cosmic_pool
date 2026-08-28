@@ -199,6 +199,21 @@ _SOFT_ERROR_PREFIXES = ("MISSING_INPUTS", "CANNOT_COMPUTE", "NO_GRAPH_COVERAGE",
 # ================================================================
 # HELPERS
 # ================================================================
+_CODE_FENCE_RE = re.compile(r"^\s*```(?:json|markdown)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+def _strip_code_fences(text: str) -> str:
+    """
+    Red de seguridad: los sub-agentes emiten BASE_OUTPUT_CONTRACT envuelto en
+```json y el modelo a veces arrastra ese envoltorio al `answer`. El usuario
+    nunca debe ver un bloque de código -- si queda JSON dentro, al menos se
+    muestra sin el fence.
+    """
+    if not text:
+        return text
+    m = _CODE_FENCE_RE.match(text.strip())
+    return m.group(1).strip() if m else text
+
 
 # Agregar al inicio del archivo, después de los imports
 def _resolve_and_update_archetype(
