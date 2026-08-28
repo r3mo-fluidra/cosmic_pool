@@ -899,44 +899,6 @@ def _run_with_deadline(fn, deadline_s: float, *args):
         future.cancel()  # no mata el thread en curso; ver nota sobre timeout del cliente
         raise
 
-def _build_agent_context(state: PoolAgentState, step: ExecutionStep) -> str:
-    """
-    Construye el contexto para el agente basado en el estado actual y el paso a ejecutar.
-    """
-    agent_results = state.get("agent_results", {})
-
-    # 1. Siempre incluir el mensaje del usuario original
-    context_parts = [f"User context: {user_message}"]
-
-    # 2. Incluir el resultado de los pasos de los que depende
-    if step.depends_on:
-        context_parts.append("\n--- Previous Results ---")
-        for dep_step_num in step.depends_on:
-            dep_key = f"step_{dep_step_num}"
-            dep_result = agent_results.get(dep_key)
-            if dep_result:
-                # Asumiendo que dep_result es un AgentResult o un dict con 'output'
-                output = getattr(dep_result, 'output', None)
-                if not output and isinstance(dep_result, dict):
-                    output = dep_result.get('output')
-                if output:
-                    context_parts.append(f"From Step {dep_step_num}:\n{output}")
-
-    # 3. (Opcional) Incluir el resultado del paso anterior inmediato,
-    #    incluso si no hay dependencia formal, para dar más contexto.
-    #    Puedes hacerlo solo si el paso anterior existe y fue exitoso.
-    previous_step_num = step.step - 1
-    if previous_step_num >= 1 and not step.depends_on: # Evita duplicar si ya está en depends_on
-        prev_key = f"step_{previous_step_num}"
-        prev_result = agent_results.get(prev_key)
-        if prev_result:
-            output = getattr(prev_result, 'output', None)
-            if not output and isinstance(prev_result, dict):
-                output = prev_result.get('output')
-            if output:
-                context_parts.append(f"\n(Additional context from Step {previous_step_num}):\n{output}")
-
-    return "\n".join(context_parts)
  
 @observe(as_type="agent", name="Run Step Node")
 def run_step_node(payload: dict) -> Command:
