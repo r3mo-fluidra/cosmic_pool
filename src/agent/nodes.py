@@ -48,6 +48,7 @@ from ..graph_context.suggestions import (
 )
 from ..graph_context.turn_cache import reset_turn
 from ..graph_context.turn_cache import get_touched
+from .tools import begin_tool_scope
 # ================================================================
 # CONFIGURATION
 # ================================================================
@@ -840,6 +841,7 @@ def orchestrator(state: PoolAgentState) -> Command:
                         "step": s,
                         "user_message": user_message,
                         "deadline_s": step_budget,
+                        "agent_results": agent_results,
                     },
                 )
                 for s in runnable
@@ -978,11 +980,12 @@ def run_step_node(payload: dict) -> Command:
     started = time.monotonic()
     try:
         # ✅ PASAR EL INPUT ENRIQUECIDO EN LUGAR DE SOLO step Y user_message
+        begin_tool_scope() 
         agent_result = _run_with_deadline(
             _run_step_enriched,  # Nueva función que acepta agent_input
             deadline_s, 
             step, 
-            agent_input
+            agent_input,            
         )
  
     except FuturesTimeout:

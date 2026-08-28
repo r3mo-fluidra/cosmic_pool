@@ -28,6 +28,7 @@ import re
 import threading
 from functools import lru_cache
 from typing import Any, Literal, Optional, Sequence
+import contextvars
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
@@ -38,6 +39,58 @@ from ..qdrant_vector_store import cargar_vector_store, VectorStoreConfigError
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+_TOOL_CALLS: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "retrieval_tool_calls", default=None
+)
+
+# Cuántas veces puede llamarse cada tool dentro de UN step.
+# expand_subgraph = 2 porque el camino normativo documentado en RETRIEVAL_CORE
+# admite un intento por slug + un segundo sobre los seeds reales tras el miss.
+_TOOL_BUDGETS = {
+    "vector_search": 1,
+    "search_seed_nodes": 1,
+    "expand_subgraph": 2,
+}
+
+
+def begin_tool_scope() -> None:
+    """Llamar al inicio de cada step, antes de invocar al agente."""
+    _TOOL_CALLS.set({})
+
+
+def _gate(tool_name: str, arg_repr: str) -> str | None:
+    """
+    Devuelve None si la llamada procede, o el texto de rechazo si ya se
+    agotó el presupuesto de esa tool en este step.
+
+    Fail-open deliberado: si no hay scope activo (general/oos, o una tool
+    invocada fuera de run_step), no se bloquea nada. Un gate que rompe un
+    camino no previsto es peor que un gate que no aplica.
+    """
+    calls = _TOOL_CALLS.get()
+    if calls is None:
+        return None
+
+    previous = calls.setdefault(tool_name, [])
+    budget = _TOOL_BUDGETS.get(tool_name, 1)
+
+    if len(previous) >= budget:
+        hechas = "; ".join(repr(p) for p in previous)
+        return (
+            f"BUDGET_EXHAUSTED — `{tool_name}` ya se usó {len(previous)}/{budget} "
+            f"veces en esta tarea, con: {hechas}\n"
+            "Este límite lo aplica el sistema, no es una sugerencia: una nueva "
+            "llamada no se ejecuta. El índice es semántico — reformular busca el "
+            "mismo espacio y devuelve el mismo material.\n"
+            "Usa la evidencia que ya tienes, cambia a otra herramienta, o "
+            "responde con evidence_status = \"insufficient_evidence\" nombrando "
+            "el gap con precisión. Eso último es una respuesta CORRECTA y "
+            "COMPLETA, no un fallo."
+        )
+
+    previous.append(arg_repr)
+    return None
 
 # Langfuse es opcional: fuera del grafo (tests, scripts) no hay span activo.
 try:
@@ -531,6 +584,8 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
     It covers US practice and general operations. It does NOT contain the
     national regulations of other countries.
 
+    CALL THIS AT MOST ONCE PER TASK. A second call is refused by the system.
+
     Args:
         query: Search terms in English.
         k: Number of chunks to return (default 4).
@@ -542,6 +597,10 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
     Returns the top matching chunks with chapter, section path and a
     REGULATORY flag where applicable.
     """
+    blocked = _gate("vector_search", query)
+    if blocked:
+        return blocked
+
     try:
         store = get_vector_store()
     except Exception as e:
@@ -599,7 +658,9 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
     n_reg = sum(bool((d.metadata or {}).get("is_regulatory")) for d, _ in results)
     encabezado = (
         f"[{len(results)} chunks, {n_reg} regulatory | "
-        f"corpus: MAHC/OSHA/EPA, US-focused]\n\n"
+        f"corpus: MAHC/OSHA/EPA, US-focused]\n"
+        "Este es el resultado completo de la búsqueda semántica para esta "
+        "tarea. No vuelvas a llamar a esta herramienta.\n\n"
     )
     return encabezado + "\n".join(partes)
 
@@ -638,6 +699,8 @@ def search_seed_nodes(
     limit, requirement or code provision — otherwise an Equipment or Concept
     node may outrank the Requirement node that holds the actual answer.
 
+    CALL THIS AT MOST ONCE PER TASK. A second call is refused by the system.
+
     The first line of the result is a machine-readable STATUS:
       OK                 usable seeds found; related nodes listed
       WEAK               seeds found but confidence is low; treat as unconfirmed
@@ -649,6 +712,10 @@ def search_seed_nodes(
     of them states the value asked for, call expand_subgraph on it once, or
     answer directly. Do not run further vector searches to confirm it.
     """
+    blocked = _gate("search_seed_nodes", f"{query} [intent={intent}]")
+    if blocked:
+        return blocked
+
     try:
         driver = get_neo4j_driver()
     except Exception as e:
@@ -869,6 +936,7 @@ RETURN
 
 
 @tool
+@tool
 def expand_subgraph(
     seed_node_ids: str,
     query: str = "",
@@ -883,10 +951,18 @@ def expand_subgraph(
     search_seed_nodes. Ids that do not exist in the graph are reported back
     explicitly rather than silently ignored.
 
+    AT MOST TWO CALLS PER TASK: one speculative attempt with a canonical slug,
+    and one on the seeds returned by search_seed_nodes. A third is refused.
+    Pass ALL relevant seed ids in a single call rather than one per call.
+
     Returns an induced subgraph: nodes ranked by distance to the seeds and by
     how many preferred relationship types were traversed, plus only those
     relationships whose endpoints are both present in the returned node set.
     """
+    blocked = _gate("expand_subgraph", seed_node_ids)
+    if blocked:
+        return blocked
+
     try:
         driver = get_neo4j_driver()
     except Exception as e:
