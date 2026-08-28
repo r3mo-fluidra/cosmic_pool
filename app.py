@@ -11,8 +11,8 @@ from langfuse.langchain import CallbackHandler
 from langchain_core.messages import HumanMessage
 
 # Import your compiled LangGraph workflow
-from src.agent.graph import graph
-from src.ui.copy import (
+from .src.agent.graph import graph
+from .src.ui.copy import (
     FOOTER_PHASE,
     FOOTER_TEAM,
     PAGE_SUBTITLE,
