@@ -957,19 +957,19 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     agent_message = None
     is_clarification = False
-    
+
     # 1. Buscar en agent_output (campo específico)
     agent_output = state.get("agent_output")
     if agent_output:
         agent_message = agent_output
-    
+
     # 2. Si no hay agent_output, buscar en messages
     if not agent_message:
         for msg in reversed(messages):
             if hasattr(msg, "type") and msg.type == "ai":
                 agent_message = msg.content
                 break
-    
+
     # 3. Si aún no hay mensaje, buscar en agent_results
     if not agent_message:
         for key, result in agent_results_raw.items():
@@ -979,7 +979,7 @@ def synthesizer(state: PoolAgentState) -> dict:
             elif isinstance(result, dict) and result.get('output'):
                 agent_message = result.get('output')
                 break
-    
+
     # Detectar si es clarificación
     if agent_message:
         clarification_keywords = [
@@ -989,19 +989,26 @@ def synthesizer(state: PoolAgentState) -> dict:
         ]
         is_clarification = any(keyword in agent_message.lower() for keyword in clarification_keywords)
         
+        # ✅ CORREGIDO: Verificar el plan correctamente
         if not is_clarification and execution_plan:
             first_step = execution_plan[0]
-            task = first_step.get("task", "")
-            if "Request" in task or "missing" in task.lower() or "provide" in task.lower():
-                is_clarification = True
+            # Acceder como atributo
+            if hasattr(first_step, 'task'):
+                task = first_step.task
+                # También verificar assigned_agent
+                assigned_agent = getattr(first_step, 'assigned_agent', '')
+                
+                # Si es general y la tarea es una solicitud, es clarificación
+                if assigned_agent == "general" and ("Request" in task or "missing" in task.lower()):
+                    is_clarification = True
         
         if is_clarification:
             logger.info("synthesizer: detectada clarificación, usando mensaje directo del agente")
             
             # ✅ CORREGIDO: Usar 'answer' en lugar de 'tier1'
             payload = SynthesizerOutput(
-                answer=agent_message,        # <-- Cambiado de tier1 a answer
-                actions=[],                  # <-- Añadido actions
+                answer=agent_message,
+                actions=[],
                 safety="Always handle pool chemicals with care and wear protective gear.",
                 details=[],
             )
