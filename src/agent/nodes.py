@@ -645,17 +645,20 @@ def _unconsumed_entities(state: PoolAgentState, thread_id: str) -> List:
 def _add_agent_message_to_update(update: dict, message: str) -> dict:
     """
     Agrega un mensaje de agente al update.
+
+    No escribe `agent_output`: no es un canal declarado en PoolAgentState,
+    así que LangGraph lo descartaba en silencio. El texto viaja por
+    `agent_results` (que sí es un canal) y por `messages`.
     """
     if not message:
         return update
-    
+
     from langchain_core.messages import AIMessage
-    
+
     if "messages" not in update:
         update["messages"] = []
-    update["messages"].append(AIMessage(content=message))
-    update["agent_output"] = message
-    
+    update["messages"].append(AIMessage(content=message, name="Marlin"))
+
     return update
 
 def _format_entities(nodes: List) -> str:
@@ -1296,7 +1299,7 @@ def synthesizer(state: PoolAgentState) -> dict:
         )
         archetype = "conversational"
 
-        raw_content = _build_raw_content(agent_results)
+    raw_content = _build_raw_content(agent_results)
     if not raw_content:
         if execution_plan:
             # Se ejecutó un plan y no llegó nada: es un bug de escritura de
@@ -1495,20 +1498,28 @@ def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]
 
     text, err = _direct_answer(state, OOS_PROMPT, deadline_s=step_budget)
 
-    # Verificar si hay MISROUTE en la respuesta
+    # ── MISROUTE ─────────────────────────────────────────────────────
     misroute_match = _MISROUTE_RE.match(text) if text else None
-    
+
     if misroute_match:
         target_agent = misroute_match.group(1).strip().lower()
         rest_text = misroute_match.group(2).strip()
-        
+
         misroute_retries = state.get("misroute_retries", 0)
-        
+
         if misroute_retries >= _MAX_MISROUTE_RETRIES:
+            # Se agotaron los reintentos. `text` todavía empieza con
+            # "MISROUTE: <agente>" — señal de control interna que nunca
+            # debe llegar al usuario ni al historial. Se propaga solo el
+            # AgentResult fallido; el synthesizer decide qué decir.
+            logger.warning(
+                "oos: MISROUTE a '%s' agotó %d reintentos",
+                target_agent, _MAX_MISROUTE_RETRIES,
+            )
             result = AgentResult(
-                agent="oos",
+                agent=OOS_AGENT,
                 step=step_num,
-                output=f"Misroute failed after {_MAX_MISROUTE_RETRIES} attempts: {target_agent}",
+                output=rest_text,
                 sources=[],
                 error=f"MAX_MISROUTE_RETRIES_EXCEEDED: {target_agent}",
                 status="failed",
@@ -1518,48 +1529,45 @@ def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]
                 agent_results={f"step_{step_num}": result},
                 force_archetype="oos",
             )
-            # ✅ GUARDAR MENSAJE SI EXISTE
-            if text:
-                if "messages" not in update:
-                    update["messages"] = []
-                update["messages"].append(AIMessage(content=text))
-                update["agent_output"] = text
             return Command(update=update, goto="synthesizer")
-        
+
         if target_agent in _MISROUTE_AGENTS:
-            logger.info(f"MISROUTE: redirecting to {target_agent} (attempt {misroute_retries + 1})")
-            
+            logger.info(
+                "oos: MISROUTE a '%s' (intento %d)",
+                target_agent, misroute_retries + 1,
+            )
             new_step = ExecutionStep(
                 step=step_num,
                 task=rest_text or state["messages"][-1].content,
                 assigned_agent=target_agent,
                 oos=False,
             )
-            
             return Command(
                 update={
                     "execution_plan": [new_step],
                     "misroute_retries": misroute_retries + 1,
                     "archetype": None,
                 },
-                goto="orchestrator"
+                goto="orchestrator",
             )
-    
-    # Si no hay MISROUTE o no es válido, continuar normalmente
+
+        logger.warning("oos: MISROUTE a agente desconocido '%s'", target_agent)
+
+    # ── Camino normal ────────────────────────────────────────────────
     result = AgentResult(
-            agent=OOS_AGENT,
-            step=step_num,
-            output=text,
-            sources=[],
-            error=err,
-            status="ok" if text and not err else "failed",
-        )
+        agent=OOS_AGENT,
+        step=step_num,
+        output=text,
+        sources=[],
+        error=err,
+        status="ok" if text and not err else "failed",
+    )
 
     update = _resolve_and_update_archetype(
-            execution_plan=plan,
-            agent_results={f"step_{step_num}": result},
-            force_archetype="oos",
-        )
+        execution_plan=plan,
+        agent_results={f"step_{step_num}": result},
+        force_archetype="oos",
+    )
     update = _add_agent_message_to_update(update, text)
 
     return Command(update=update, goto="synthesizer")
