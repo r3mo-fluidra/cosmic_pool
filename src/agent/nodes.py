@@ -66,7 +66,7 @@ STEP_DEADLINE_S = 60.0
 # ================================================================
 
 GENERAL_AGENT = "general"
-
+OOS_AGENT = "oos"
 # Roster válido para recuperar un MISROUTE. Sin whitelist, un nombre
 # alucinado por el LLM explota adentro de get_agent_by_name en run_step.
 _MISROUTE_AGENTS = frozenset({
@@ -273,20 +273,75 @@ def _resolve_and_update_archetype(
     )
 
     update: dict = {"archetype": archetype}
-    if extra_results:
-        update["agent_results"] = extra_results
+
+    # Persistir TODO lo que se usó para resolver el archetype, no solo
+    # extra_results. Antes `agent_results` se calculaba y se descartaba:
+    # el synthesizer recibía {} y caía en la rama del saludo.
+    if merged:
+        update["agent_results"] = merged
+
     if error:
         update["error"] = error
-    
-    # ✅ GUARDAR EL MENSAJE DEL AGENTE
+
     if agent_message:
-        if "messages" not in update:
-            update["messages"] = []
-        update["messages"].append(AIMessage(content=agent_message))
-        update["agent_output"] = agent_message
-    
+        update["messages"] = [AIMessage(content=agent_message, name="Marlin")]
+        # `agent_output` se elimina: no es un canal declarado en PoolAgentState
+        # y LangGraph lo descartaba silenciosamente.
+
     return update
 
+_EMPTY_RESULTS_FALLBACK = {
+    "es": {
+        "answer": (
+            "No pude completar tu consulta en este intento. "
+            "¿Podés volver a formularla?"
+        ),
+        "safety": (
+            "Si se trata de una emergencia o de una exposición química, "
+            "contactá a los servicios de emergencia o al centro de "
+            "toxicología de inmediato."
+        ),
+    },
+    "en": {
+        "answer": (
+            "I could not complete your request on this attempt. "
+            "Could you rephrase it?"
+        ),
+        "safety": (
+            "If this is an emergency or a chemical exposure, contact "
+            "emergency services or poison control immediately."
+        ),
+    },
+}
+
+
+def _empty_results_fallback(state: PoolAgentState, reason: str) -> dict:
+    """
+    Backstop para cuando el turno ejecutó un plan pero no llegó ningún
+    resultado al synthesizer.
+
+    Nunca debería alcanzarse: significa que un nodo no escribió en
+    `agent_results`. Existe para que ese bug salga como un fallo visible
+    y no como un saludo de primer contacto — que es lo que pasaba antes.
+    """
+    language_code = state.get("detected_language", "es")
+    strings = _EMPTY_RESULTS_FALLBACK.get(
+        language_code, _EMPTY_RESULTS_FALLBACK["es"]
+    )
+
+    payload = SynthesizerOutput(
+        answer=strings["answer"],
+        actions=[],
+        safety=strings["safety"],
+        details=[],
+    )
+
+    return {
+        "archetype": "conversational",
+        "response": payload,
+        "validation": {"fallback": "empty_results", "reason": reason},
+        "messages": [AIMessage(content=payload.tier1_markdown(), name="Marlin")],
+    }
 
 def is_infra_error(err: str | None, exc: BaseException | None = None) -> bool:
     """True solo para fallos del proveedor / timeouts, no para contratos de negocio."""
@@ -1193,26 +1248,26 @@ def synthesizer(state: PoolAgentState) -> dict:
     # palabras sin ser una clarificación -- y devolvía el JSON crudo al
     # usuario, saltándose la síntesis por completo.
     # ============================================================
-    agent_message = state.get("agent_output")
     if (
-        agent_message
-        and len(execution_plan) == 1
+        len(execution_plan) == 1
         and _normalize_agent(execution_plan[0].assigned_agent) == "general"
     ):
-        logger.info("synthesizer: clarificación de `general`, se usa su prosa directa")
-        text = _strip_code_fences(_extract_text(agent_message))
-        payload = SynthesizerOutput(
-            answer=text,
-            actions=[],
-            safety=None,
-            details=[],
-        )
-        return {
-            "archetype": state.get("archetype", "conversational"),
-            "response": payload,
-            "validation": {"direct_agent_message": True, "is_clarification": True},
-            "messages": [AIMessage(content=text, name="Marlin")],
-        }
+        single = next(iter(agent_results.values()), None)
+        if single and single.output and not single.error:
+            logger.info("synthesizer: clarificación de `general`, se usa su prosa directa")
+            text = _strip_code_fences(single.output)
+            payload = SynthesizerOutput(
+                answer=text,
+                actions=[],
+                safety=None,
+                details=[],
+            )
+            return {
+                "archetype": state.get("archetype", "conversational"),
+                "response": payload,
+                "validation": {"direct_agent_message": True, "is_clarification": True},
+                "messages": [AIMessage(content=text, name="Marlin")],
+            }
 
     # ============================================================
     # OOS / IDIOMA
@@ -1241,8 +1296,19 @@ def synthesizer(state: PoolAgentState) -> dict:
         )
         archetype = "conversational"
 
-    raw_content = _build_raw_content(agent_results)
+        raw_content = _build_raw_content(agent_results)
     if not raw_content:
+        if execution_plan:
+            # Se ejecutó un plan y no llegó nada: es un bug de escritura de
+            # estado, no un turno vacío. El saludo NUNCA es correcto acá.
+            logger.error(
+                "synthesizer: raw_content vacío con execution_plan no vacío "
+                "(agents=%s) — algún nodo no escribió en agent_results",
+                [s.assigned_agent for s in execution_plan],
+            )
+            return _empty_results_fallback(
+                state, reason="empty_raw_content_with_plan"
+            )
         raw_content = "(no prior content — generate a warm greeting and offer help)"
         archetype, agents, usable = "conversational", [], []
 
@@ -1421,12 +1487,13 @@ def general(state: PoolAgentState) -> Command[Literal["synthesizer"]]:
 
 @observe(as_type="agent", name="OOS Node")
 def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]]:
-    from langchain_core.messages import AIMessage  # ✅ IMPORTAR
-    
     plan = state.get("execution_plan") or []
     step_num = plan[0].step if plan else 1
 
-    text, err = _direct_answer(state, OOS_PROMPT)
+    remaining = _remaining_budget(state)
+    step_budget = max(MIN_STEP_BUDGET_S, min(STEP_DEADLINE_S, remaining))
+
+    text, err = _direct_answer(state, OOS_PROMPT, deadline_s=step_budget)
 
     # Verificar si hay MISROUTE en la respuesta
     misroute_match = _MISROUTE_RE.match(text) if text else None
@@ -1480,25 +1547,19 @@ def oos(state: PoolAgentState) -> Command[Literal["orchestrator", "synthesizer"]
     
     # Si no hay MISROUTE o no es válido, continuar normalmente
     result = AgentResult(
-        agent="oos",
-        step=step_num,
-        output=text,
-        sources=[],
-        error=err,
-        status="ok" if text and not err else "failed",
-    )
+            agent=OOS_AGENT,
+            step=step_num,
+            output=text,
+            sources=[],
+            error=err,
+            status="ok" if text and not err else "failed",
+        )
 
     update = _resolve_and_update_archetype(
-        execution_plan=plan,
-        agent_results={f"step_{step_num}": result},
-        force_archetype="oos",
-    )
-    
-    # ✅ GUARDAR EL MENSAJE EXPLÍCITAMENTE
-    if text:
-        if "messages" not in update:
-            update["messages"] = []
-        update["messages"].append(AIMessage(content=text))
-        update["agent_output"] = text
-    
+            execution_plan=plan,
+            agent_results={f"step_{step_num}": result},
+            force_archetype="oos",
+        )
+    update = _add_agent_message_to_update(update, text)
+
     return Command(update=update, goto="synthesizer")
