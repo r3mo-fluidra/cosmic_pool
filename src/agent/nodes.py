@@ -214,6 +214,40 @@ def _strip_code_fences(text: str) -> str:
     m = _CODE_FENCE_RE.match(text.strip())
     return m.group(1).strip() if m else text
 
+def _normalize_agent_results(raw) -> dict:
+    """
+    dict | list -> dict[str, AgentResult]. Defensivo: el reducer del state
+    debería entregar siempre un dict, pero un fan-out mal formado o un
+    checkpoint viejo pueden traer otra cosa.
+    """
+    if isinstance(raw, dict):
+        out = {}
+        for k, v in raw.items():
+            if isinstance(v, AgentResult):
+                out[k] = v
+            elif isinstance(v, dict):
+                try:
+                    out[k] = AgentResult(**v)
+                except Exception as e:
+                    logger.error("no se pudo convertir %s a AgentResult: %s", k, e)
+        return out
+
+    if isinstance(raw, list):
+        logger.warning("synthesizer: agent_results llegó como lista (%d items)", len(raw))
+        out = {}
+        for r in raw:
+            step = getattr(r, "step", None)
+            if step is None and isinstance(r, dict):
+                step = r.get("step")
+            if step is None:
+                continue
+            try:
+                out[f"step_{step}"] = r if isinstance(r, AgentResult) else AgentResult(**r)
+            except Exception as e:
+                logger.error("no se pudo convertir item de lista: %s", e)
+        return out
+
+    return {}
 
 # Agregar al inicio del archivo, después de los imports
 def _resolve_and_update_archetype(
@@ -1133,294 +1167,159 @@ def _run_step_enriched(step: ExecutionStep, agent_input: dict) -> AgentResult:
 # SYNTHESIZER NODE
 # ================================================================
 
+
 @observe(as_type="span", name="Synthesizer Node")
 def synthesizer(state: PoolAgentState) -> dict:
     """
-    Synthesizes final response from agent results.
-    
-    HANDLES:
-    1. Agent results as dict OR list (defensive conversion)
-    2. Missing archetype (falls back to conversational)
-    3. Structured output failures (retries unstructured, then static fallback)
-    4. Contract enforcement with validation reporting
-    5. Source attachment to response
-    6. ✅ PRIORIZA el mensaje directo del agente para clarificaciones
+    Convierte los resultados de los sub-agentes en UNA respuesta en lenguaje
+    natural para el usuario.
+
+    Invariante: el `answer` que sale de aquí es prosa. Los sub-agentes emiten
+    JSON estructurado (BASE_OUTPUT_CONTRACT); ese JSON es materia prima para el
+    LLM de síntesis, nunca la respuesta. El único texto que puede pasar sin
+    sintetizar es el de `general`, que ya produce prosa por diseño.
     """
-    from langchain_core.messages import AIMessage
-    import logging
-    
-    logger = logging.getLogger(__name__)
-    
     execution_plan: list[ExecutionStep] = state.get("execution_plan", [])
-    agent_results_raw = state.get("agent_results") or {}
     language_code: str = state.get("detected_language", "es")
-    messages = state.get("messages", [])
+
+    agent_results = _normalize_agent_results(state.get("agent_results") or {})
 
     # ============================================================
-    # ✅ DETECTAR CLARIFICACIÓN - PRIORIDAD 1
+    # ÚNICO ATAJO: clarificación de `general`
+    # ------------------------------------------------------------
+    # Se decide por el PLAN, no por keywords en el texto. Buscar
+    # "provide"/"need"/"volume" en la salida de un especialista da falso
+    # positivo casi siempre -- un informe de contaminación contiene esas
+    # palabras sin ser una clarificación -- y devolvía el JSON crudo al
+    # usuario, saltándose la síntesis por completo.
     # ============================================================
-    agent_message = None
-    is_clarification = False
-
-    # 1. Buscar en agent_output (campo específico)
-    agent_output = state.get("agent_output")
-    if agent_output:
-        agent_message = agent_output
-
-    # 2. Si no hay agent_output, buscar en messages
-    if not agent_message:
-        for msg in reversed(messages):
-            if hasattr(msg, "type") and msg.type == "ai":
-                agent_message = msg.content
-                break
-
-    # 3. Si aún no hay mensaje, buscar en agent_results
-    if not agent_message:
-        for key, result in agent_results_raw.items():
-            if hasattr(result, 'output') and result.output:
-                agent_message = result.output
-                break
-            elif isinstance(result, dict) and result.get('output'):
-                agent_message = result.get('output')
-                break
-
-    # Detectar si es clarificación
-    if agent_message:
-        clarification_keywords = [
-            "missing", "provide", "need", "parameters", 
-            "volume", "current pH", "target pH", 
-            "request", "please provide", "details about your pool"
-        ]
-        is_clarification = any(keyword in agent_message.lower() for keyword in clarification_keywords)
-        
-        # ✅ CORREGIDO: Verificar el plan correctamente
-        if not is_clarification and execution_plan:
-            first_step = execution_plan[0]
-            # Acceder como atributo
-            if hasattr(first_step, 'task'):
-                task = first_step.task
-                # También verificar assigned_agent
-                assigned_agent = getattr(first_step, 'assigned_agent', '')
-                
-                # Si es general y la tarea es una solicitud, es clarificación
-                if assigned_agent == "general" and ("Request" in task or "missing" in task.lower()):
-                    is_clarification = True
-        
-        if is_clarification:
-            logger.info("synthesizer: detectada clarificación, usando mensaje directo del agente")
-            
-            # ✅ CORREGIDO: Usar 'answer' en lugar de 'tier1'
-            payload = SynthesizerOutput(
-                answer=agent_message,
-                actions=[],
-                safety="Always handle pool chemicals with care and wear protective gear.",
-                details=[],
-            )
-            
-            return {
-                "archetype": state.get("archetype", "conversational"),
-                "response": payload,
-                "validation": {
-                    "direct_agent_message": True, 
-                    "is_clarification": True,
-                    "message_source": "agent_output" if state.get("agent_output") else "messages"
-                },
-                "messages": [AIMessage(content=agent_message, name="Marlin")],
-            }
-
-    # ============================================================
-    # DEFENSA: Convertir agent_results de list a dict si es necesario
-    # ============================================================
-    if isinstance(agent_results_raw, list):
-        logger.warning(
-            "synthesizer: agent_results is list (got %d items), converting to dict",
-            len(agent_results_raw)
+    agent_message = state.get("agent_output")
+    if (
+        agent_message
+        and len(execution_plan) == 1
+        and _normalize_agent(execution_plan[0].assigned_agent) == "general"
+    ):
+        logger.info("synthesizer: clarificación de `general`, se usa su prosa directa")
+        text = _strip_code_fences(_extract_text(agent_message))
+        payload = SynthesizerOutput(
+            answer=text,
+            actions=[],
+            safety=None,
+            details=[],
         )
-        agent_results: dict[str, AgentResult] = {}
-        for result in agent_results_raw:
-            if hasattr(result, 'step'):
-                key = f"step_{result.step}"
-                agent_results[key] = result
-            elif isinstance(result, dict) and 'step' in result:
-                key = f"step_{result['step']}"
-                if not isinstance(result, AgentResult):
-                    try:
-                        agent_results[key] = AgentResult(**result)
-                    except Exception as e:
-                        logger.error(f"Failed to convert dict to AgentResult: {e}")
-                        agent_results[key] = AgentResult(
-                            agent=result.get('agent', 'unknown'),
-                            step=result.get('step', 0),
-                            output=result.get('output', ''),
-                            sources=result.get('sources', []),
-                            error=result.get('error', ''),
-                            status=result.get('status', 'failed'),
-                        )
-                else:
-                    agent_results[key] = result
-        if not agent_results:
-            logger.error("synthesizer: failed to convert list to dict, using empty dict")
-            agent_results = {}
-    else:
-        agent_results = agent_results_raw
-        for key, value in list(agent_results.items()):
-            if isinstance(value, dict) and not isinstance(value, AgentResult):
-                try:
-                    agent_results[key] = AgentResult(**value)
-                except Exception as e:
-                    logger.error(f"Failed to convert dict to AgentResult for key {key}: {e}")
-                    pass
+        return {
+            "archetype": state.get("archetype", "conversational"),
+            "response": payload,
+            "validation": {"direct_agent_message": True, "is_clarification": True},
+            "messages": [AIMessage(content=text, name="Marlin")],
+        }
 
     # ============================================================
-    # OOS CHECK
+    # OOS / IDIOMA
     # ============================================================
     is_oos = _is_oos(execution_plan)
     oos_instruction = _OOS_INSTRUCTION_ACTIVE if is_oos else _OOS_INSTRUCTION_INACTIVE
     language_instruction = _LANGUAGE_MAP.get(language_code, _LANGUAGE_MAP["es"])
 
     # ============================================================
-    # EXTRACT USABLE RESULTS
+    # RESULTADOS
+    # ------------------------------------------------------------
+    # `usable` y `agents` van filtrados: alimentan enforce_contract (que
+    # resuelve el safety condicional por HAZARD_AGENTS) y _attach_sources.
+    # `raw_content` ve el turno COMPLETO, incluidos los steps con error o
+    # skipped: sin eso el synthesizer no puede decir "no pude verificar X" y
+    # degrada a un saludo genérico cuando el único step del turno falló.
     # ============================================================
     usable = usable_results(agent_results)
     agents = [r.agent for r in usable]
 
-    # ============================================================
-    # ✅ SEGUNDO CHECK: Verificar en usable por si acaso (redundancia)
-    # ============================================================
-    for result in usable:
-        if hasattr(result, 'output') and result.output:
-            clarification_keywords = ["missing", "provide", "need", "parameters", "volume", "current pH"]
-            if any(keyword in result.output.lower() for keyword in clarification_keywords):
-                logger.info("synthesizer: detectada clarificación en agent_results (fallback)")
-                
-                # ✅ CORREGIDO: Usar 'answer' en lugar de 'tier1'
-                payload = SynthesizerOutput(
-                    answer=result.output,      # <-- Cambiado de tier1 a answer
-                    actions=[],                # <-- Añadido actions
-                    safety="Always handle pool chemicals with care and wear protective gear.",
-                    details=[],
-                )
-                return {
-                    "archetype": state.get("archetype", "conversational"),
-                    "response": payload,
-                    "validation": {
-                        "direct_agent_message": True, 
-                        "is_clarification": True,
-                        "message_source": "agent_results_fallback"
-                    },
-                    "messages": [AIMessage(content=result.output, name="Marlin")],
-                }
-
-    # ============================================================
-    # ARCHETYPE RESOLUTION
-    # ============================================================
     archetype = state.get("archetype")
     if not archetype:
         logger.warning(
-            "synthesizer: 'archetype' missing from state — orchestrator did not "
-            "resolve it. Degrading to 'conversational'."
+            "synthesizer: 'archetype' ausente del state — el orchestrator no lo "
+            "resolvió. Degradando a 'conversational'."
         )
         archetype = "conversational"
 
-    # ============================================================
-    # BUILD RAW CONTENT
-    # ============================================================
-    raw_content = _build_raw_content(usable)
+    raw_content = _build_raw_content(agent_results)
     if not raw_content:
         raw_content = "(no prior content — generate a warm greeting and offer help)"
         archetype, agents, usable = "conversational", [], []
 
-    # ============================================================
-    # GET CONTRACT
-    # ============================================================
     contract = get_contract(archetype)
 
     # ============================================================
-    # BUILD PROMPT
+    # PROMPT
     # ============================================================
-    archetype_section = build_synthesizer_archetype_section(archetype, agents)
-    
     system_content = SYNTHESIZER_PROMPT.format(
-        archetype_section=archetype_section,
+        archetype_section=build_synthesizer_archetype_section(archetype, agents),
         oos_instruction=oos_instruction,
         language=language_instruction,
         raw_content=raw_content,
     )
-    
     llm_messages = [
         SystemMessage(content=system_content),
         HumanMessage(content="Generate the final refined response now."),
     ]
 
     # ============================================================
-    # FASE 1: GENERACIÓN CON DEGRADACIÓN EN TRES NIVELES
+    # FASE 1 — generación, degradación en tres niveles
     # ============================================================
     validation: dict = {}
-    payload = None
-    
     try:
         payload = _get_llm().with_structured_output(SynthesizerOutput).invoke(llm_messages)
     except Exception as exc:
         logger.warning(
-            "synthesizer: structured output failed (%s); retrying unstructured", exc
+            "synthesizer: structured output falló (%s); reintentando sin estructura", exc
         )
         try:
             raw = _get_llm().invoke(llm_messages)
             payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
             validation = {"fallback": "unstructured", "reason": str(exc)}
         except Exception as exc2:
+            # 429 / 503 / 504: el reintento falla por la misma causa que el
+            # primero. Payload estático: cero red, cero enforcement (el
+            # validador también podría lanzar y ya es el último nivel).
             logger.error(
-                "synthesizer: both generation attempts failed (%s | %s)", exc, exc2
+                "synthesizer: ambos intentos de generación fallaron (%s | %s)", exc, exc2
             )
-            payload = static_service_unavailable_payload(
-                SynthesizerOutput, 
-                language_code
-            )
-            validation = {
-                "fallback": "static", 
-                "reason": f"{exc} | {exc2}"
+            payload = static_service_unavailable_payload(SynthesizerOutput, language_code)
+            return {
+                "archetype": archetype,
+                "response": payload,
+                "validation": {"fallback": "static", "reason": f"{exc} | {exc2}"},
+                "messages": [AIMessage(content=payload.tier1_markdown(), name="Marlin")],
             }
 
     # ============================================================
-    # FASE 2: ENFORCEMENT
+    # FASE 2 — enforcement (siempre, venga el payload de donde venga)
     # ============================================================
     try:
-        if payload is not None:
-            payload, report = enforce_contract(
-                payload, contract, agents, detail_cls=DetailSection
-            )
-            validation = {**validation, **report.to_dict()}
-        else:
-            logger.error("synthesizer: payload is None after generation attempts")
-            payload = static_service_unavailable_payload(
-                SynthesizerOutput, 
-                language_code
-            )
-            validation = {**validation, "payload_was_none": True}
+        payload, report = enforce_contract(
+            payload, contract, agents, detail_cls=DetailSection
+        )
+        validation = {**validation, **report.to_dict()}
     except Exception as exc:
-        logger.error("synthesizer: enforce_contract raised (%s)", exc, exc_info=True)
+        # Un bug del validador no debe costar otra llamada al modelo.
+        logger.error("synthesizer: enforce_contract lanzó (%s)", exc, exc_info=True)
         validation = {**validation, "enforcement_error": str(exc)}
-        if payload is None:
-            payload = static_service_unavailable_payload(
-                SynthesizerOutput, 
-                language_code
-            )
 
     # ============================================================
-    # FASE 3: ATTACH SOURCES
+    # FASE 3 — garantía de prosa + fuentes
     # ============================================================
-    if payload is not None:
-        _attach_sources(payload, usable)
+    payload.answer = _strip_code_fences(payload.answer or "")
+    if payload.safety:
+        payload.safety = _strip_code_fences(payload.safety)
 
-    # ============================================================
-    # FASE 4: BUILD RETURN DICT
-    # ============================================================
+    _attach_sources(payload, usable)
+
     return {
         "archetype": archetype,
         "response": payload,
         "validation": validation,
         "messages": [AIMessage(content=payload.tier1_markdown(), name="Marlin")],
     }
+
 
 # ================================================================
 # SUGGESTER NODE
