@@ -974,18 +974,7 @@ def orchestrator(state: PoolAgentState) -> Command:
     )
     
     # Ahora decidimos si hacer fan-out o ir directo a synthesizer
-    if should_suggest(state):
-        # Fan-out: synthesizer y suggester en paralelo
-        # Reutilizamos el update del synthesizer
-        return Command(
-            update=synth_command.update,  # Usamos el update del synthesizer
-            goto=["synthesizer", "suggester"]  # Fan-out
-        )
-    else:
-        return Command(
-            update=synth_command.update,  # Usamos el update del synthesizer
-            goto="synthesizer"
-        )
+    return synth_command
  
  
 # ---------------------------------------------------------------------------

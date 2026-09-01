@@ -702,6 +702,7 @@ def run_turn(
     plan_steps: list = []
     agent_runs: list[tuple[str, str | None]] = []
     debug_lines: list[tuple[str, str]] = []   # (kind, text), replayed below
+    suggestions: list[str] = []  
 
     def paint(rows: list[tuple[str, bool]]) -> None:
         if status_slot is not None:
@@ -765,6 +766,15 @@ def run_turn(
             messages = event["synthesizer"].get("messages", [])
             if messages:
                 final_response = messages[-1].content
+        if "suggester" in event:
+            raw = event["suggester"].get("suggestions") or []
+            # Opción A: solo el label viaja al frontend. `agent` y `entity`
+            # quedan en el objeto del backend (ver Paso 2 / decisión de ruteo).
+            suggestions = []
+            for s in raw:
+                label = s.get("label") if isinstance(s, dict) else getattr(s, "label", "")
+                if label and label.strip():
+                    suggestions.append(label.strip())
 
     return (
         final_response,

@@ -182,8 +182,8 @@ def build_graph(checkpointer=None):
 
     # ── Wire edges ────────────────────────────────────────────────────────────
 
-    builder.add_edge(START, "build_context_node")   # new entry point
-    builder.add_edge("synthesizer", END)             # terminal node
+    builder.add_edge(START, "build_context_node")
+    builder.add_edge("synthesizer", "suggester")   # antes: END
     builder.add_edge("suggester", END)
     # All other transitions (build_context_node → summarize_memory_node | planner,
     # summarize_memory_node → planner, planner → orchestrator,
