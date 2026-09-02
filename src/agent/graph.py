@@ -48,52 +48,55 @@ Node topology
                          │ - Fan-out a ["synthesizer", "suggester"]
                          │ - O ir solo a "synthesizer"
                          │
-                  ┌──────┴──────┐
-                  │             │
-           ┌──────▼──────┐ ┌───▼──────┐
-           │ synthesizer │ │ suggester│ (paralelo, opcional)
-           └──────┬──────┘ └───┬──────┘
-                  │            │
-                 END          END
+                  ┌──────▼──────┐
+                  │ synthesizer │
+                  └──────┬──────┘
+                         │  edge simple
+                  ┌──────▼──────┐
+                  │  suggester  │
+                  └──────┬──────┘
+                         │
+                        END
 
 Routing notes
 ─────────────
 - build_context_node returns a Command with goto, bypassing any memory_router.
+  It also resets the per-turn channels (error, planner_error, archetype,
+  misroute_retries, response, validation, suggestions): the checkpointer
+  persists them across turns and they have no None sentinel of their own the
+  way agent_results does via merge_agent_results.
 - summarize_memory_node returns Command(goto="planner") after trimming messages.
 - planner returns Command(goto="orchestrator") by default, but may route to
   "general" or "oos" if execution_plan has a single step assigned to those nodes.
-- orchestrator no longer executes agents itself: it computes which steps in
-  execution_plan are "ready" (their depends_on are already present in
-  agent_results) and dispatches them via Send("run_step", ...). Multiple
-  Send calls in the same Command run in parallel in the same superstep.
-- run_step executes exactly one ExecutionStep (whatever LangGraph handed it
-  via Send) and always routes back to orchestrator with Command(goto=...).
+- orchestrator computes which steps in execution_plan are "ready" (their
+  depends_on are already present in agent_results) and dispatches them via
+  Send("run_step", ...). Multiple Send calls in the same Command run in
+  parallel in the same superstep.
+- run_step executes exactly one ExecutionStep and always routes back to
+  orchestrator with Command(goto=...).
 - orchestrator re-evaluates on every return; once execution_plan has no
-  pending steps left, it routes to synthesizer (or fan-out to synthesizer
-  + suggester if should_suggest() returns True).
+  pending steps left, it routes to synthesizer.
 - agent_results uses a custom reducer (merge_agent_results) with centinela
-  None — this ensures parallel writes from run_step nodes merge correctly
-  without overwriting each other. The reducer handles both dict updates
-  and None values.
+  None so parallel writes from run_step merge instead of overwriting.
 - general and oos are direct graph nodes, not agents in AGENT_REGISTRY.
-  They handle single-step plans and route directly to synthesizer.
-- synthesizer returns a plain dict → simple edge to END.
-- suggester is an optional parallel node triggered by orchestrator when
-  should_suggest() returns True. It runs concurrently with synthesizer
-  and writes suggestions to state, never blocking the main response path.
+  oos may also route BACK to orchestrator on a MISROUTE.
+- synthesizer returns a plain dict → edge to suggester → END.
 
-Fan-out details
-───────────────
-1. Orchestrator fan-out to run_step:
-   - Computes which steps are ready based on depends_on and current results
-   - Dispatches one Send per ready step in the same superstep
-   - Each run_step writes its result via merge_agent_results
+Suggester: sequential, not parallel
+───────────────────────────────────
+It was designed as a fan-out branch off the orchestrator, running beside the
+synthesizer so it could never delay the answer. It isn't wired that way, and
+the sequential edge is the correct choice for now: suggester reads
+state["response"], which only exists after the synthesizer writes it. Two of
+its gates (answer_ends_with_question, and the redundancy filter in
+_unconsumed_entities) have no input at all under true fan-out.
 
-2. Orchestrator fan-out to synthesizer + suggester:
-   - When all steps are complete AND should_suggest() returns True
-   - Sends both nodes in parallel via Command(goto=["synthesizer", "suggester"])
-   - synthesizer produces the final answer; suggester produces optional chips
-   - Neither blocks the other; suggester has a short deadline and degrades gracefully
+The cost is that the suggester sits on the user's critical path. That is why
+_SUGGESTER_DEADLINE_S is short and why every failure inside the node degrades
+to [] rather than propagating.
+
+Going back to real fan-out means rewriting both gates against agent_results
+instead of response — a deliberate trade, not a cleanup.
 """
 
 from langgraph.graph import StateGraph, START, END

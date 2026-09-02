@@ -1417,11 +1417,16 @@ def synthesizer(state: PoolAgentState) -> dict:
 @observe(as_type="agent", name="Suggester")
 def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
     """
-    Rama paralela del fan-out del orchestrator. Lee agent_results y
-    archetype; no depende del synthesizer ni lo bloquea.
+    Produce los chips de seguimiento del turno.
 
-    Devuelve siempre la clave "suggestions" — nunca la omite, para que
-    el frontend pueda distinguir "no hubo chips" de "el nodo no corrió".
+    Corre DESPUÉS del synthesizer (edge secuencial synthesizer → suggester),
+    no en paralelo: necesita `state["response"]` para saber qué quedó sin
+    cubrir y para no ofrecer un chip encima de una pregunta del synthesizer.
+    Eso lo pone en el camino crítico del usuario, y por eso el deadline es
+    corto y todo error degrada a [] en vez de propagarse.
+
+    Devuelve SIEMPRE la clave "suggestions" — nunca la omite, para que el
+    frontend pueda distinguir "no hubo chips" de "el nodo no corrió".
     """
     blocked = _suggest_block_reason(state)
     if blocked:
@@ -1432,15 +1437,36 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
 
     unconsumed = _unconsumed_entities(state, thread_id)
     if not unconsumed:
+        # Sin entidades libres el LLM solo puede inventar. Ahorramos la
+        # llamada: es el caso más común en turnos sin retrieval.
+        #
+        # Se loguea `touched` crudo aparte del filtrado: distingue "el
+        # retrieval no tocó nada" (turn_cache vacío) de "tocó y los dos
+        # filtros de _unconsumed_entities se lo comieron todo". Son dos
+        # bugs distintos.
         logger.info(
-            "suggester skipped: no_unconsumed_entities "
-            "(thread=%s, touched=%d)",
+            "suggester skipped: no_unconsumed_entities (thread=%s, touched=%d)",
             thread_id or "(vacío)",
             len(get_touched(thread_id) or []),
         )
         return {"suggestions": []}
 
-    # DESPUÉS
+    language_code = state.get("detected_language", "es")
+    language = "español" if language_code == "es" else "English"
+    answer_text = _build_answered_summary(state)
+
+    system_content = SUGGESTER_PROMPT.format(
+        language=language,
+        roster=roster_text(),
+        answered_summary=answer_text,
+        unconsumed_entities=_format_entities(unconsumed),
+    )
+
+    messages = [
+        SystemMessage(content=system_content),
+        HumanMessage(content="Generá las sugerencias ahora, o ninguna."),
+    ]
+
     try:
         chain = _get_llm_suggester().with_structured_output(SuggesterOutput)
         # El deadline lo impone el executor, no el cliente: la API exige
@@ -1465,9 +1491,7 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
         # output inválido. Se loguea para poder ver la distribución real de
         # fallas en Langfuse, pero nunca se propaga: un chip opcional no rompe
         # el turno del usuario.
-        logger.warning(
-            "suggester degraded to []: %s: %s", type(exc).__name__, exc
-        )
+        logger.warning("suggester degraded to []: %s: %s", type(exc).__name__, exc)
         return {"suggestions": []}
 
     raw: List[Suggestion] = payload.suggestions or []
@@ -1478,6 +1502,7 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
     if report["input"] != report["output"]:
         logger.info("suggester gates: %s", report)
 
+    logger.info("suggester: %d chips generados", len(gated))
     return {"suggestions": gated}
 
 @observe(as_type="agent", name="General Node")
