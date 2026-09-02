@@ -893,7 +893,7 @@ if prompt:
             )
 
             try:
-                final_response, definitive, debug_lines = run_turn(
+                final_response, definitive, debug_lines, suggestions = run_turn(
                     prompt,
                     current_trace_id,
                     turn_index,
