@@ -1029,7 +1029,7 @@ def _run_with_deadline(fn, deadline_s: float, *args):
 
  
 @observe(as_type="agent", name="Run Step Node")
-def run_step_node(payload: dict) -> Command:
+def run_step_node(payload: dict, config: RunnableConfig) -> Command:
     from .state import AgentResult  # ajustá el import
     from langchain_core.messages import HumanMessage
     import logging
@@ -1070,7 +1070,7 @@ def run_step_node(payload: dict) -> Command:
     started = time.monotonic()
     try:
         # ✅ PASAR EL INPUT ENRIQUECIDO EN LUGAR DE SOLO step Y user_message
-        begin_tool_scope() 
+        begin_tool_scope(config.get("configurable", {}).get("thread_id", ""))
         agent_result = _run_with_deadline(
             _run_step_enriched,  # Nueva función que acepta agent_input
             deadline_s, 

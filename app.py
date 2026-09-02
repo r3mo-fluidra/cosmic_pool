@@ -290,6 +290,29 @@ def render_debug(lines: list[tuple[str, str]]) -> None:
 
 
 # ==========================================
+# HELPER
+# ==========================================
+def _chip_texts(raw) -> list[str]:
+    """
+    `list[Suggestion]` → `list[str]`, que es lo que `render_suggestions` toma.
+
+    Defensivo con el nombre del campo: el modelo puede exponer el texto como
+    .label o .text, y un checkpoint viejo puede traer dicts en vez de objetos.
+    Un chip vacío se descarta en vez de renderizar un botón sin texto.
+    """
+    out: list[str] = []
+    for s in raw or []:
+        if isinstance(s, str):
+            text = s
+        elif isinstance(s, dict):
+            text = s.get("label") or s.get("text") or ""
+        else:
+            text = getattr(s, "label", None) or getattr(s, "text", "") or ""
+        text = str(text).strip()
+        if text:
+            out.append(text)
+    return out
+# ==========================================
 # OPENING SUGGESTIONS
 # ==========================================
 def render_suggestions(
@@ -621,10 +644,7 @@ with st.container(key="pa-phone"):
                     and not msg.get("opening")
                     and msg is st.session_state.messages[-1]
                 ):
-                    next_chips = followup_suggestions(
-                        st.session_state.messages,
-                        msg.get("language") or detect_language(msg.get("content", "")),
-                    )
+                    next_chips = msg.get("suggestions") or []
                     if next_chips:
                         render_suggestions(
                             next_chips,
@@ -738,6 +758,7 @@ def run_turn(
 
     final_response = ""
     plan_steps: list = []
+    suggestions: list[str] = []
     agent_runs: list[tuple[str, str | None]] = []
     debug_lines: list[tuple[str, str]] = []   # (kind, text), replayed below
 
@@ -803,11 +824,16 @@ def run_turn(
             messages = event["synthesizer"].get("messages", [])
             if messages:
                 final_response = messages[-1].content
-
+        elif "suggester" in event:
+            # El nodo SIEMPRE escribe la clave, aunque sea con []. Sin esta
+            # rama el evento caía al vacío y los chips del grafo no salían
+            # nunca de run_turn — los que se veían eran el deck estático.
+            suggestions = _chip_texts(event["suggester"].get("suggestions"))
     return (
         final_response,
         is_definitive_answer(plan_steps, agent_runs, final_response),
         debug_lines,
+        suggestions,
     )
 
 
@@ -845,6 +871,7 @@ if prompt:
     final_response = ""
     definitive = False
     debug_lines: list[tuple[str, str]] = []
+    suggestions: list[str] = []
     turn_error: Exception | None = None
 
     if lf is not None:
@@ -953,6 +980,7 @@ if prompt:
             # Only kept when the flag is on: off, this is dead weight in session
             # state for every turn of the conversation.
             "debug": debug_lines if SHOW_PIPELINE_DEBUG else None,
+            "suggestions": suggestions,
         }
         st.session_state.messages.append(answer)
         # Rerun so the feedback widget renders from the history loop, where

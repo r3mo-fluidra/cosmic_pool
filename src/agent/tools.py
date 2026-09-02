@@ -35,6 +35,8 @@ from langchain_core.tools import tool
 from neo4j import Driver, GraphDatabase
 
 from ..qdrant_vector_store import cargar_vector_store, VectorStoreConfigError
+from ..graph_context.turn_cache import TouchedNode, touch as _touch_turn
+
 
 load_dotenv()
 
@@ -42,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 _TOOL_CALLS: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "retrieval_tool_calls", default=None
+)
+
+_TURN_THREAD_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "retrieval_turn_thread_id", default=""
 )
 
 # Cuántas veces puede llamarse cada tool dentro de UN step.
@@ -54,10 +60,32 @@ _TOOL_BUDGETS = {
 }
 
 
-def begin_tool_scope() -> None:
-    """Llamar al inicio de cada step, antes de invocar al agente."""
-    _TOOL_CALLS.set({})
+def begin_tool_scope(thread_id: str = "") -> None:
+    """
+    Llamar al inicio de cada step, antes de invocar al agente.
 
+    Resetea el presupuesto de tools del step y fija el thread_id contra el
+    que las tools registran los nodos tocados.
+    """
+    _TOOL_CALLS.set({})
+    _TURN_THREAD_ID.set(thread_id or "")
+
+
+def _record_touched(nodes: list[TouchedNode]) -> None:
+    """
+    Registra en turn_cache lo que una tool efectivamente devolvió.
+
+    Fail-open y silencioso, igual que _gate: sin thread_id (tests, scripts,
+    una tool invocada fuera de run_step) no se registra nada. Y nunca lanza —
+    alimentar los chips es un extra, no puede costarle el retrieval al agente.
+    """
+    thread_id = _TURN_THREAD_ID.get()
+    if not thread_id or not nodes:
+        return
+    try:
+        _touch_turn(thread_id, nodes)
+    except Exception as e:
+        logger.warning("turn_cache touch falló: %s: %s", type(e).__name__, e)
 
 def _gate(tool_name: str, arg_repr: str) -> str | None:
     """
@@ -872,6 +900,25 @@ def search_seed_nodes(
         "Usa EXACTAMENTE los IDs de arriba en expand_subgraph. "
         "No construyas ids que no aparezcan en esta lista."
     )
+
+    _record_touched(
+        [
+            TouchedNode(
+                id=node.get("id") or node.element_id,
+                label=(sorted(node.labels) or [""])[0],
+                name=node.get("name") or node.get("id") or "",
+            )
+            for _adj, _raw, node, _on_intent in kept
+        ]
+        + [
+            TouchedNode(
+                id=n["id"],
+                label=(n["labels"] or [""])[0],
+                name=n["name"] or n["id"],
+            )
+            for n in neighbors
+        ]
+    )
     return "\n".join(parts)
 
 
@@ -1048,4 +1095,8 @@ def expand_subgraph(
         suffix = f" | {props}" if props else ""
         parts.append(f"  ({r['source']}) -[{r['type']}]-> ({r['target']}){suffix}")
 
+    _record_touched([
+        TouchedNode(id=n["id"], label=n["label"] or "", name=n["name"] or n["id"])
+        for n in nodes
+    ])
     return "\n".join(parts)
