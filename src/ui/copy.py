@@ -67,6 +67,27 @@ SUGGESTIONS: tuple[str, ...] = (
     "I have a maintenance question",
 )
 
+#: The same deck in Spanish, verbatim from the demo's `es.chips`.
+#:
+#: Kept beside `SUGGESTIONS` rather than folded into it because a test pins that
+#: tuple to the demo's `en.chips` array, and because the greeting that opens the
+#: conversation is English — there is no reader language to follow yet.
+#:
+#: It exists at all because these chips now also appear *after* an answer, where
+#: the reader's language is known. §8.3 makes EN/ES parity structural: chrome
+#: follows the language the reader wrote in, and a Spanish conversation offering
+#: English openers would be the one place that breaks the rule.
+SUGGESTIONS_ES: tuple[str, ...] = (
+    "El agua se ve turbia",
+    "Me apareció un aviso en la app",
+    "Tengo una duda de mantenimiento",
+)
+
+SUGGESTION_DECKS: dict[str, tuple[str, ...]] = {
+    "en": SUGGESTIONS,
+    "es": SUGGESTIONS_ES,
+}
+
 
 # =====================================================================
 # STATUS LINES
@@ -357,6 +378,14 @@ def reason_label(language: str, reason: str) -> str:
     """
     table = REASON_COPY.get(language, REASON_COPY["en"])
     return table.get(reason) or REASON_COPY["en"].get(reason) or reason
+
+
+def suggestions(language: str) -> tuple[str, ...]:
+    """
+    The opener deck in the reader's language, falling back to English on an
+    unknown one — the same contract as every other accessor here.
+    """
+    return SUGGESTION_DECKS.get(language, SUGGESTIONS)
 
 
 def reason_choices(language: str) -> dict[str, str]:
