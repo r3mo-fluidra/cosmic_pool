@@ -4,14 +4,6 @@ import uuid
 import time
 from typing import Sequence
 
-
-import sys
-from pathlib import Path
-
-# Add the current directory to Python path
-sys.path.insert(0, str(Path(__file__).parent))
-
-
 import streamlit as st
 from neo4j import GraphDatabase
 from langfuse import Langfuse, propagate_attributes
@@ -46,7 +38,7 @@ from src.ui.theme import (
     theme_slider,
     type_out,
 )
-from src.ui.turns import TurnProgress, is_definitive_answer
+from src.ui.turns import TurnProgress, followup_suggestions, is_definitive_answer
 
 # ==========================================
 # CONFIGURATION & LANGFUSE SETUP
@@ -300,15 +292,25 @@ def render_debug(lines: list[tuple[str, str]]) -> None:
 # ==========================================
 # OPENING SUGGESTIONS
 # ==========================================
-def render_suggestions(options: Sequence[str], disabled: bool = False) -> None:
+def render_suggestions(
+    options: Sequence[str],
+    disabled: bool = False,
+    namespace: str = "pa-chips",
+) -> None:
     """
-    The openers under the greeting. A click stashes the text and reruns; the
-    composer picks it up below and the turn runs exactly as if it were typed —
-    so they follow the composer and go dead while the graph is unreachable.
+    The openers under the greeting, and the same deck under the latest answer.
+    A click stashes the text and reruns; the composer picks it up below and the
+    turn runs exactly as if it were typed — so they follow the composer and go
+    dead while the graph is unreachable.
+
+    `namespace` keys both the container and its buttons. The two placements are
+    mutually exclusive today, but they are one Streamlit rerun apart and a
+    duplicate widget key raises rather than degrading, so they do not share one.
+    The stylesheet matches `[class*="st-key-pa-chips"]`, which covers both.
     """
-    with st.container(key="pa-chips"):
+    with st.container(key=namespace):
         for i, text in enumerate(options):
-            if st.button(text, key=f"sug_{i}", disabled=disabled):
+            if st.button(text, key=f"sug_{namespace}_{i}", disabled=disabled):
                 st.session_state.pending_prompt = text
                 st.rerun()
 
@@ -341,14 +343,25 @@ def _submit_and_store(
     easier. Only the toast follows the reader.
     """
     note = "Respuesta útil" if value == 1 else "Respuesta no útil (pendiente de detalle)"
+
+    # The verdict is stored *before* the score is sent, and regardless of whether
+    # sending works. Gating it on the send made the control's appearance depend on
+    # telemetry: with no Langfuse client `submit_feedback` returns False, so the
+    # thumb stayed unselected and the tap read as a dead button. Whether the score
+    # reached Langfuse is a telemetry outcome; whether the reader's tap registered
+    # is not, and the two do not belong on the same conditional.
+    st.session_state.feedback[trace_id] = {
+        "value": value,
+        "reason": None,
+        "awaiting_detail": value == 0,
+    }
+
+    # `submit_feedback` raises its own toast when it cannot record, so the thanks
+    # is only shown when there is something to be thankful for — two contradicting
+    # toasts would be worse than none.
     if submit_feedback(trace_id, value, note, turn_index=turn_index):
-        st.session_state.feedback[trace_id] = {
-            "value": value,
-            "reason": None,
-            "awaiting_detail": value == 0,
-        }
         st.toast(form_label(lang, "thanks_verdict"))
-        st.rerun()
+    st.rerun()
 
 
 def _clear_verdict(trace_id: str) -> None:
@@ -594,6 +607,31 @@ with st.container(key="pa-phone"):
                 if msg["role"] == "assistant" and msg.get("can_rate"):
                     render_answer_actions(msg)
 
+                # Openers again, under the action row on the newest answer.
+                #
+                # The newest one only: these are a live affordance, not
+                # transcript content. Under every past answer they would be
+                # three dead pills per turn, and a click from mid-conversation
+                # would read as editing history rather than asking next.
+                #
+                # After the row, so the order under an answer is: what you can
+                # say about it, then what you can ask next.
+                if (
+                    msg["role"] == "assistant"
+                    and not msg.get("opening")
+                    and msg is st.session_state.messages[-1]
+                ):
+                    next_chips = followup_suggestions(
+                        st.session_state.messages,
+                        msg.get("language") or detect_language(msg.get("content", "")),
+                    )
+                    if next_chips:
+                        render_suggestions(
+                            next_chips,
+                            disabled=not online,
+                            namespace="pa-chips-next",
+                        )
+
                 # Openers sit outside the greeting card, as in the prototypes,
                 # and only while the greeting is still the whole conversation.
                 if msg.get("opening") and is_opening_only(st.session_state.messages):
@@ -702,7 +740,6 @@ def run_turn(
     plan_steps: list = []
     agent_runs: list[tuple[str, str | None]] = []
     debug_lines: list[tuple[str, str]] = []   # (kind, text), replayed below
-    suggestions: list[str] = []  
 
     def paint(rows: list[tuple[str, bool]]) -> None:
         if status_slot is not None:
@@ -766,15 +803,6 @@ def run_turn(
             messages = event["synthesizer"].get("messages", [])
             if messages:
                 final_response = messages[-1].content
-        if "suggester" in event:
-            raw = event["suggester"].get("suggestions") or []
-            # Opción A: solo el label viaja al frontend. `agent` y `entity`
-            # quedan en el objeto del backend (ver Paso 2 / decisión de ruteo).
-            suggestions = []
-            for s in raw:
-                label = s.get("label") if isinstance(s, dict) else getattr(s, "label", "")
-                if label and label.strip():
-                    suggestions.append(label.strip())
 
     return (
         final_response,
