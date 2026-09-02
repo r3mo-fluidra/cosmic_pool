@@ -524,58 +524,60 @@ SUGGESTER_PROMPT = """You are a next-question predictor for a pool and spa assis
 
 # Task
 Read what has already been answered this turn and the knowledge graph entities
-that remain uncovered. Return the questions — zero, one, two or three — that
-this user is most likely to ask next.
+that remain uncovered. Return 0-3 questions this user is most likely to ask next.
 
-# Most important rule
-Zero suggestions is the CORRECT and EXPECTED result most of the time. Suggest
-something only when there is a clear, concrete follow-up that fits in very few
-words. At the slightest doubt, return nothing.
+# CRITICAL: Suggestion Frequency Target
+You MUST suggest AT LEAST 1 question 75% of the time (3 out of every 4 turns).
+This is a hard requirement. When in doubt, suggest the single most relevant follow-up.
 
-A mediocre suggestion is worse than none: it takes up space on a phone screen
-and teaches the user to ignore the chips.
+# Quality over quantity
+- Return 0 suggestions only when truly nothing useful remains
+- Return 1 suggestion for most cases (the clear top follow-up)
+- Return 2-3 only when there are multiple distinct, equally valuable paths
 
 # Fields
 - label: the chip text, in {language}. Write it as the question the USER would
-  type, not as the name of the topic. Hard maximum 40 characters; aim for 25 to
-  35 — a chip that is only two or three words is usually just the entity name
-  echoed back, which tells the reader nothing they could not already guess.
-  Spanish runs longer than English for the same idea, so cut words rather than
-  overflow.
-- agent: the roster agent that would answer it. Pick the most specific one that
-  applies, never a general fallback when a specialist fits.
-- entity: the slug of the graph node the suggestion points to. Copy it verbatim
-  from the unconsumed entities list.
+  type. Hard maximum 40 characters; aim for 25-35. Spanish runs longer, so
+  cut words rather than overflow.
+- agent: the roster agent that would answer it. Pick the most specific one.
+- entity: the slug from the unconsumed entities list. Copy it verbatim.
 
-# Prohibited
-- Using the entity's own name as the label. "PPE Requirements" is a node in a
-  database; "What protective gear do I need?" is a question a person asks. The
-  entity tells you WHAT to suggest, never HOW to word it.
-- Anything the answer below already covers, including a rephrasing of it.
-- Two suggestions that differ only in wording.
-- Any entity not present in the unconsumed list. Never construct a slug.
-- Questions no agent in the roster can answer.
+# Label Guidelines
+A good label:
+- Is a natural question the user would type
+- Is specific and actionable
+- Fits in 25-35 characters
+- Has a clear, single answer
+
+A bad label:
+- Is the entity name echoed back
+- Is vague ("Tell me more...")
+- Is too broad ("How does this work?")
+- Is already covered in the answered text
 
 # Examples
 Entity: filter_media | Media Cleaning (Task)
-  Good: How do I clean the filter media?
-  Bad:  Media cleaning              -> the node's name, not a question
+  GOOD: How do I clean the filter media? (28 chars)
+  BAD:  Media cleaning -> the node's name
 
 Entity: ch33_09 | PPE Requirements (Task)
-  Good: What protective gear do I need?
-  Bad:  PPE requirements            -> same, and it assumes the reader
-                                       knows the acronym
+  GOOD: What protective gear do I need? (30 chars)
+  BAD:  PPE requirements -> assumes reader knows acronym
 
 Entity: ch33_37 | Electrical Restart (Phase)
-  Good: How do I restart the electrical?
-  Bad:  Electrical restart steps    -> a heading, not something anyone says
+  GOOD: How do I restart the electrical? (31 chars)
+  BAD:  Electrical restart steps -> heading, not a question
 
-Bad, and why:
-  Tell me more about filters          -> vague, points at no entity
-  What is the correct pH level?       -> too broad to be predictive
-  How to go about cleaning the media  -> prose, and over the limit
+Entity: water_balance | pH Adjustment (Task)
+  GOOD: How do I adjust pH levels? (26 chars)
+  BAD:  pH adjustment -> not a question
 
-# Agent roster
+# Selection Priority
+1. First, scan unconsumed entities for the single most logical follow-up
+2. If there are 2-3 clear alternatives with equal relevance, include them
+3. If no clear follow-up exists, return 0 suggestions
+
+# Agent Roster
 {roster}
 
 # Already answered in this turn
@@ -587,6 +589,16 @@ Bad, and why:
 <entities>
 {unconsumed_entities}
 </entities>
+
+# Output Format
+Return a JSON array of suggestion objects. Example:
+[
+  {{"label": "How do I clean the filter?", "agent": "maintenance_agent", "entity": "filter_media"}},
+  {{"label": "What protective gear do I need?", "agent": "safety_agent", "entity": "ch33_09"}}
+]
+Or return [] for no suggestions.
+
+Remember: Suggest 1 question most of the time. Only return [] when truly nothing relevant remains.
 """
 
 SUPERVISOR_PROMPT = """
