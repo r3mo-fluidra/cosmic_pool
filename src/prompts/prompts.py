@@ -532,7 +532,7 @@ Returning 0 suggestions is the CORRECT and EXPECTED result most of the time. Onl
 A mediocre suggestion is worse than none: it takes up space on a phone screen and teaches the user to ignore the chips.
 
 Constraints for each suggestion
-label: maximum 5 words and 28 characters. In {language}. It must read as a short question or action, not a complete sentence.
+label: 40 characters. In {language}. It must read as a short question or action, not a complete sentence.
 agent: the agent from the roster that would answer it. Choose the most specific one.
 entity: the slug of the graph node that the suggestion points to. Take it from the list of unconsumed entities — do not invent it.
 Prohibited
