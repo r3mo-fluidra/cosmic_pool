@@ -225,7 +225,15 @@ class PoolAgentState(TypedDict):
     ignored_chip_streak: Annotated[int, lambda a, b: b]
 
     # ── Error handling ───────────────────────────────────────────────
-    error: NotRequired[Optional[str]]
+    # Reducer explícito last-wins: el reset de turno lo hace
+    # build_context_node escribiendo None. Sin reducer declarado, un None
+    # entrante se trata igual, pero dejarlo explícito documenta que este
+    # canal se limpia por turno y no acumula.
+    error: Annotated[Optional[str], lambda a, b: b]
+
+    #: Lo escribe el fallback del planner cuando la cadena LLM falla.
+    #: Estaba sin declarar: LangGraph lo descartaba en silencio.
+    planner_error: Annotated[Optional[str], lambda a, b: b]
 
 
 # futuro: test para asegurar que todos los agentes declarados en AgentName estén mapeados en AGENT_TO_ARCHETYPE

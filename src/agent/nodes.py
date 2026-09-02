@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
-_SUGGESTER_DEADLINE_S = 1.2
+_SUGGESTER_DEADLINE_S = 6
 _MAX_MISROUTE_RETRIES = 2
 STEP_DEADLINE_S = 60.0 
 
@@ -165,7 +165,8 @@ MIN_STEP_BUDGET_S = 8.0   # si queda menos que esto, no arranques otro paso
  
 # Pool dedicado: no compartir con el executor por defecto de LangGraph.
 _STEP_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="run_step")
- 
+_SUGGESTER_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="suggester")
+
 
 
 _INFRA_CODE_RE = re.compile(r"^\s*(429|500|502|503|504)\b")
@@ -586,30 +587,39 @@ def estimated_tokens(messages: List[BaseMessage]) -> int:
                     total += len(block.get("text", "")) // 4
     return total
 
-def should_suggest(state: PoolAgentState) -> bool:
+def _suggest_block_reason(state: PoolAgentState) -> str | None:
     """
-    Lógica pura, cero llamadas al LLM. Corre antes de cualquier gasto de
-    cuota. El orden es intencional: lo más barato y más frecuente primero.
+    El motivo por el que este turno no lleva chips, o None si sí los lleva.
+
+    Separado de `should_suggest` para que el nodo pueda loguear cuál gate
+    cortó. El orden es intencional: lo más barato y más frecuente primero.
     """
-    if state.get("archetype") in _SUPPRESSED_ARCHETYPES:
-        return False
- 
+    archetype = state.get("archetype")
+    if archetype in _SUPPRESSED_ARCHETYPES:
+        return f"archetype_suppressed:{archetype}"
+
     if state.get("error"):
-        return False
- 
+        return f"turn_error:{str(state.get('error'))[:80]}"
+
     # Sin agentes usables no hay contenido del cual predecir nada.
     if not agents_from_results(state.get("agent_results") or {}):
-        return False
- 
+        return "no_usable_agents"
+
     # El usuario ya ignoró chips dos turnos seguidos: dejar de ofrecerlos.
-    if state.get("ignored_chip_streak", 0) >= _IGNORED_CHIP_LIMIT:
-        return False
- 
+    streak = state.get("ignored_chip_streak", 0)
+    if streak >= _IGNORED_CHIP_LIMIT:
+        return f"ignored_chip_streak:{streak}"
+
     # El synthesizer ya cerró con una pregunta propia; un chip encima es ruido.
     if answer_ends_with_question(state):
-        return False
- 
-    return True
+        return "answer_ends_with_question"
+
+    return None
+
+
+def should_suggest(state: PoolAgentState) -> bool:
+    """Lógica pura, cero llamadas al LLM. Corre antes de cualquier gasto de cuota."""
+    return _suggest_block_reason(state) is None
 
 def _build_answered_summary(state: PoolAgentState) -> str:
     """Solo el tier 1: es lo que el usuario efectivamente leyó."""
@@ -693,6 +703,8 @@ def _get_llm_suggester():
         _suggester_llm = create_suggester_llm()
     return _suggester_llm
 
+
+
 # ================================================================
 # CONTEXT NODE
 # ================================================================
@@ -708,7 +720,27 @@ def build_context_node(
     )
 
     return Command(
-        update={"turn_started_at": time.time()},
+        update={
+            "turn_started_at": time.time(),
+            # Reset de turno. `agent_results` ya se limpia en el planner vía
+            # el centinela None de merge_agent_results; estos canales no
+            # tenían equivalente y sobrevivían en el checkpointer.
+            #
+            # `error` es el que más dolía: should_suggest corta con cualquier
+            # error, así que un solo turno fallido dejaba el thread sin chips
+            # de forma permanente.
+            #
+            # Va acá y no en el planner porque este nodo es la única puerta
+            # de entrada garantizada del turno — el planner puede no llegar
+            # a ejecutarse, o fallar antes de emitir su update.
+            "error": None,
+            "planner_error": None,
+            "archetype": None,
+            "misroute_retries": 0,
+            "response": None,
+            "validation": {},
+            "suggestions": [],
+        },
         goto=next_node,
     )
 
@@ -1391,42 +1423,43 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
     Devuelve siempre la clave "suggestions" — nunca la omite, para que
     el frontend pueda distinguir "no hubo chips" de "el nodo no corrió".
     """
-    if not should_suggest(state):
+    blocked = _suggest_block_reason(state)
+    if blocked:
+        logger.info("suggester skipped: %s", blocked)
         return {"suggestions": []}
 
     thread_id = config.get("configurable", {}).get("thread_id", "")
 
     unconsumed = _unconsumed_entities(state, thread_id)
     if not unconsumed:
-        # Sin entidades libres el LLM solo puede inventar. Ahorramos la
-        # llamada: es el caso más común en turnos sin retrieval.
+        logger.info(
+            "suggester skipped: no_unconsumed_entities "
+            "(thread=%s, touched=%d)",
+            thread_id or "(vacío)",
+            len(get_touched(thread_id) or []),
+        )
         return {"suggestions": []}
 
-    language_code = state.get("detected_language", "es")
-    language = "español" if language_code == "es" else "English"
-    answer_text = _build_answered_summary(state)
-
-    system_content = SUGGESTER_PROMPT.format(
-        language=language,
-        roster=roster_text(),
-        answered_summary=answer_text,
-        unconsumed_entities=_format_entities(unconsumed),
-    )
-
-    messages = [
-        SystemMessage(content=system_content),
-        HumanMessage(content="Generá las sugerencias ahora, o ninguna."),
-    ]
-
+    # DESPUÉS
     try:
         chain = _get_llm_suggester().with_structured_output(SuggesterOutput)
         # El deadline lo impone el executor, no el cliente: la API exige
-        # timeout >= 10s, y 10s bloqueando la superstep rompe el invariante
-        # "NUNCA bloquea al synthesizer".
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            payload: SuggesterOutput = ex.submit(chain.invoke, messages).result(
-                timeout=_SUGGESTER_DEADLINE_S
-            )
+        # timeout >= 10s y no queremos esperar tanto.
+        #
+        # NO usar `with ThreadPoolExecutor(...)`: su __exit__ hace
+        # shutdown(wait=True), así que aunque .result() lance el timeout, el
+        # bloque se queda esperando la llamada completa igual. Se pagaba la
+        # latencia entera y encima se descartaba el resultado.
+        #
+        # copy_context() propaga el parent OTel de Langfuse al thread; sin él
+        # el span del suggester aparece suelto en el trace.
+        ctx = contextvars.copy_context()
+        future = _SUGGESTER_POOL.submit(ctx.run, chain.invoke, messages)
+        try:
+            payload: SuggesterOutput = future.result(timeout=_SUGGESTER_DEADLINE_S)
+        except FuturesTimeout:
+            future.cancel()  # no mata el thread en curso, solo libera el slot
+            raise
     except Exception as exc:
         # Todo se degrada igual: 429, TimeoutError del executor, o structured
         # output inválido. Se loguea para poder ver la distribución real de
