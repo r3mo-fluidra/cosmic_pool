@@ -47,8 +47,8 @@ SUPERNODES: Set[str] = {
     "ph",
 }
 
-_MAX_LABEL_WORDS = 5
-_MAX_LABEL_CHARS = 28      # 2 chips por fila a 380px
+
+_MAX_LABEL_CHARS = 40      # 2 chips por fila a 380px
 _MAX_SUGGESTIONS = 3
 
 # Umbral de solapamiento de tokens para considerar dos labels
@@ -76,7 +76,6 @@ class Suggestion(BaseModel):
     label: str = Field(
         description=(
             f"Texto del chip, en el idioma del usuario. "
-            f"Máximo {_MAX_LABEL_WORDS} palabras y {_MAX_LABEL_CHARS} "
             f"caracteres. Debe leerse como una pregunta o acción corta, "
             f"no como una oración completa."
         )
@@ -177,15 +176,17 @@ def gate_length(candidates: Sequence[Suggestion]) -> List[Suggestion]:
     """
     Gate 2 — Longitud.
 
-    <= 5 palabras y <= 28 caracteres. No se trunca: un label truncado
-    pierde sentido y se ve peor que su ausencia. Se descarta.
+    <= _MAX_LABEL_CHARS. No se trunca: un label truncado pierde sentido y se
+    ve peor que su ausencia. Se descarta.
+
+    El límite es de ancho de pantalla y debe moverse junto con el rango que
+    SUGGESTER_PROMPT le pide al modelo. Si los dos se separan, el nodo gasta
+    la llamada al LLM y descarta todo lo que vuelve.
     """
     out: List[Suggestion] = []
     for c in candidates:
         label = c.label.strip()
         if not label:
-            continue
-        if len(label.split()) > _MAX_LABEL_WORDS:
             continue
         if len(label) > _MAX_LABEL_CHARS:
             continue
