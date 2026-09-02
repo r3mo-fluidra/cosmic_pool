@@ -1,8 +1,9 @@
 """
 turns.py
 ========
-The two pieces of per-turn presentation logic that are not rendering: which
-status rows the wait shows, and whether a finished turn is rateable.
+The per-turn presentation logic that is not rendering: which status rows the
+wait shows, whether a finished turn is rateable, and which openers are still
+worth offering after it.
 
 Both used to live inside `app.py` — one as a closure over `run_turn`'s locals,
 the other as a module function halfway down an executing script — which is why
@@ -22,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Sequence
 
-from src.ui.copy import RETRIEVE_ROTATION, agent_line, status_line
+from src.ui.copy import RETRIEVE_ROTATION, agent_line, status_line, suggestions
 
 #: A status row: the label, and whether it is the stage currently in flight.
 StatusRow = tuple[str, bool]
@@ -235,3 +236,28 @@ class TurnProgress:
     def _paint(self) -> None:
         if self._on_change is not None:
             self._on_change(self.rows)
+
+
+def followup_suggestions(messages: Sequence[dict], language: str) -> tuple[str, ...]:
+    """
+    Which openers are still worth offering after an answer.
+
+    The deck is static — the graph returns no follow-up questions of its own, so
+    inventing contextual ones here would be putting words in its mouth. What can
+    be done honestly is not offering an opener the reader has already used:
+    "My water looks cloudy" under the answer to that very question is the one
+    way a static deck reads as broken.
+
+    Compared case-insensitively on the exact text, because that is what a click
+    sends. A typed paraphrase is not caught, and should not be — this filters
+    the chips the reader actually pressed, nothing more.
+    """
+    asked = {
+        msg.get("content", "").strip().casefold()
+        for msg in messages
+        if msg.get("role") == "user"
+    }
+    return tuple(
+        text for text in suggestions(language)
+        if text.strip().casefold() not in asked
+    )
