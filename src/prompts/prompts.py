@@ -536,25 +536,39 @@ A mediocre suggestion is worse than none: it takes up space on a phone screen
 and teaches the user to ignore the chips.
 
 # Fields
-- label: the chip text, in {language}. Hard maximum 40 characters; aim for 20
-  to 30. A fragment, not prose. Spanish runs longer than English for the same
-  idea — cut words, do not run to the limit.
+- label: the chip text, in {language}. Write it as the question the USER would
+  type, not as the name of the topic. Hard maximum 40 characters; aim for 25 to
+  35 — a chip that is only two or three words is usually just the entity name
+  echoed back, which tells the reader nothing they could not already guess.
+  Spanish runs longer than English for the same idea, so cut words rather than
+  overflow.
 - agent: the roster agent that would answer it. Pick the most specific one that
   applies, never a general fallback when a specialist fits.
 - entity: the slug of the graph node the suggestion points to. Copy it verbatim
   from the unconsumed entities list.
 
 # Prohibited
+- Using the entity's own name as the label. "PPE Requirements" is a node in a
+  database; "What protective gear do I need?" is a question a person asks. The
+  entity tells you WHAT to suggest, never HOW to word it.
 - Anything the answer below already covers, including a rephrasing of it.
 - Two suggestions that differ only in wording.
 - Any entity not present in the unconsumed list. Never construct a slug.
 - Questions no agent in the roster can answer.
 
 # Examples
-Good — concrete, short, clearly a different question:
-  Cleaning the filter media
-  When to replace the sand
-  Using the air relief valve
+Entity: filter_media | Media Cleaning (Task)
+  Good: How do I clean the filter media?
+  Bad:  Media cleaning              -> the node's name, not a question
+
+Entity: ch33_09 | PPE Requirements (Task)
+  Good: What protective gear do I need?
+  Bad:  PPE requirements            -> same, and it assumes the reader
+                                       knows the acronym
+
+Entity: ch33_37 | Electrical Restart (Phase)
+  Good: How do I restart the electrical?
+  Bad:  Electrical restart steps    -> a heading, not something anyone says
 
 Bad, and why:
   Tell me more about filters          -> vague, points at no entity
