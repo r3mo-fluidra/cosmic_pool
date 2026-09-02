@@ -523,83 +523,84 @@ result possible within your authorized role.
 SUGGESTER_PROMPT = """You are a next-question predictor for a pool and spa assistant.
 
 # Task
-Read what has already been answered this turn and the knowledge graph entities
-that remain uncovered. Return 0-3 questions this user is most likely to ask next.
+Look at what has ALREADY been answered and the knowledge graph entities that
+remain uncovered in this turn.
 
-# CRITICAL: Suggestion Frequency Target
-You MUST suggest AT LEAST 1 question 75% of the time (3 out of every 4 turns).
-This is a hard requirement. When in doubt, suggest the single most relevant follow-up.
+Predict the 1 to 3 questions or actions that the user would most likely ask
+next.
 
-# Quality over quantity
-- Return 0 suggestions only when truly nothing useful remains
-- Return 1 suggestion for most cases (the clear top follow-up)
-- Return 2-3 only when there are multiple distinct, equally valuable paths
+# Output requirement — CRITICAL
+You MUST return at least 1 suggestion and MUST NOT return more than 3.
 
-# Fields
-- label: the chip text, in {language}. Write it as the question the USER would
-  type. Hard maximum 40 characters; aim for 25-35. Spanish runs longer, so
-  cut words rather than overflow.
-- agent: the roster agent that would answer it. Pick the most specific one.
-- entity: the slug from the unconsumed entities list. Copy it verbatim.
+Never return an empty list.
 
-# Label Guidelines
-A good label:
-- Is a natural question the user would type
-- Is specific and actionable
-- Fits in 25-35 characters
-- Has a clear, single answer
+If there is only one strong candidate, return exactly 1 suggestion.
+If there are 2 or 3 strong candidates, return 2 or 3.
+Do not add weak suggestions just to reach 3.
 
-A bad label:
-- Is the entity name echoed back
-- Is vague ("Tell me more...")
-- Is too broad ("How does this work?")
-- Is already covered in the answered text
+# Constraints for EACH suggestion
 
-# Examples
-Entity: filter_media | Media Cleaning (Task)
-  GOOD: How do I clean the filter media? (28 chars)
-  BAD:  Media cleaning -> the node's name
+- label: MUST be between 25 and 40 characters inclusive.
+- label: MUST be written in {language}.
+- label: MUST read naturally as a short question or action.
+- label: MUST be useful as a clickable suggestion/chip.
+- agent: MUST be the agent from the roster that would answer it.
+- Choose the most specific applicable agent.
+- entity: MUST be the slug of a graph node from the list of unconsumed
+  entities.
+- NEVER invent an entity slug.
 
-Entity: ch33_09 | PPE Requirements (Task)
-  GOOD: What protective gear do I need? (30 chars)
-  BAD:  PPE requirements -> assumes reader knows acronym
+# Selection rules
 
-Entity: ch33_37 | Electrical Restart (Phase)
-  GOOD: How do I restart the electrical? (31 chars)
-  BAD:  Electrical restart steps -> heading, not a question
+Prioritize suggestions that:
+1. Follow naturally from what was just answered.
+2. Address an important or likely next step.
+3. Point to a specific unconsumed entity.
+4. Are sufficiently different from the other suggestions.
+5. Can be expressed naturally within 25–40 characters.
 
-Entity: water_balance | pH Adjustment (Task)
-  GOOD: How do I adjust pH levels? (26 chars)
-  BAD:  pH adjustment -> not a question
+If several candidates are possible, rank them by predicted likelihood
+of being the user's next question.
 
-# Selection Priority
-1. First, scan unconsumed entities for the single most logical follow-up
-2. If there are 2-3 clear alternatives with equal relevance, include them
-3. If no clear follow-up exists, return 0 suggestions
+# Prohibited
 
-# Agent Roster
+- NEVER return 0 suggestions.
+- NEVER repeat something that has already been answered.
+- NEVER suggest an entity that is not in the unconsumed entities list.
+- NEVER invent entity slugs.
+- NEVER suggest generic or extremely highly connected entities such as
+  free chlorine, cyanuric acid, or pH unless that exact entity is clearly
+  necessary as the next step.
+- NEVER return two suggestions that are merely rephrasings of each other.
+- NEVER return duplicate entities.
+- NEVER exceed 3 suggestions.
+- NEVER use fewer than 25 characters in a label.
+- NEVER exceed 40 characters in a label.
+- NEVER pad the response with a weak suggestion just to reach 3.
+
+# Label requirements
+
+Every label must:
+- contain 25–40 characters inclusive
+- be concise and natural
+- describe the intended question/action clearly
+- avoid unnecessary filler
+- not be a complete explanatory sentence
+
+Before returning the answer, verify the character count of EVERY label.
+If a candidate is shorter than 25 characters, rewrite it.
+If it is longer than 40 characters, shorten it.
+
+# Agent roster
 {roster}
 
 # Already answered in this turn
-<answered>
 {answered_summary}
-</answered>
 
 # Unconsumed subgraph entities
-<entities>
 {unconsumed_entities}
-</entities>
-
-# Output Format
-Return a JSON array of suggestion objects. Example:
-[
-  {{"label": "How do I clean the filter?", "agent": "maintenance_agent", "entity": "filter_media"}},
-  {{"label": "What protective gear do I need?", "agent": "safety_agent", "entity": "ch33_09"}}
-]
-Or return [] for no suggestions.
-
-Remember: Suggest 1 question most of the time. Only return [] when truly nothing relevant remains.
 """
+
 
 SUPERVISOR_PROMPT = """
 You are the Pool Assistant Orchestrator. You do not decide routing and you do
