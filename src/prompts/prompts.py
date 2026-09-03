@@ -531,15 +531,11 @@ next.
 
 # Output requirement — CRITICAL
 You MUST return at least 1 suggestion and MUST NOT return more than 3.
-
 Never return an empty list.
-
 If there is only one strong candidate, return exactly 1 suggestion.
 If there are 2 or 3 strong candidates, return 2 or 3.
 Do not add weak suggestions just to reach 3.
-
 # Constraints for EACH suggestion
-
 - label: MUST be between 25 and 40 characters inclusive.
 - label: MUST be written in {language}.
 - label: MUST read naturally as a short question or action.
@@ -593,12 +589,18 @@ If it is longer than 40 characters, shorten it.
 
 # Agent roster
 {roster}
-
 # Already answered in this turn
 {answered_summary}
-
 # Unconsumed subgraph entities
 {unconsumed_entities}
+
+Write every `label` in {language}. Every single word of every label must be in
+{language}, regardless of the language used anywhere else in this prompt.
+The agent roster descriptions, the entity descriptions, and the final
+instruction message may appear in another language: ignore their language
+entirely, they are internal metadata.
+Entity slugs (`impeller_erosion`) and agent names (`equipment`) are
+identifiers, never translate them.
 """
 
 

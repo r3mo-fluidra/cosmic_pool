@@ -58,6 +58,10 @@ logger = logging.getLogger(__name__)
 TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
 _SUGGESTER_DEADLINE_S = 6
+_SUGGESTER_KICKOFF = {
+    "es": "Generá las sugerencias ahora, en español, o ninguna.",
+    "en": "Generate the suggestions now, in English, or none.",
+}
 _MAX_MISROUTE_RETRIES = 2
 STEP_DEADLINE_S = 60.0 
 
@@ -1451,7 +1455,7 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
         )
         return {"suggestions": []}
 
-    language_code = state.get("detected_language", "es")
+    language_code = "es" if state.get("detected_language") == "es" else "en"
     language = "español" if language_code == "es" else "English"
     answer_text = _build_answered_summary(state)
 
@@ -1464,7 +1468,15 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
 
     messages = [
         SystemMessage(content=system_content),
-        HumanMessage(content="Generá las sugerencias ahora, o ninguna."),
+        # Última posición del prompt = mayor peso para la elección de idioma.
+        # Tiene que reforzar el idioma objetivo, no contradecirlo: con el
+        # kickoff hardcodeado en español, los turnos en inglés devolvían
+        # chips en español pese al `{language}` del system prompt.
+        HumanMessage(
+            content=_SUGGESTER_KICKOFF.get(
+                language_code, _SUGGESTER_KICKOFF["en"]
+            )
+        ),
     ]
 
     try:
