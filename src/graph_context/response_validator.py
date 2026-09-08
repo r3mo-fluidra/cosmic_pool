@@ -28,7 +28,7 @@ NO_CAP = 9999  # presupuesto centinela: arquetipo `critical`, sin techo
 
 # Agentes cuyo contenido implica manejo de producto químico o riesgo directo.
 # Resuelven `safety_required = "conditional"` a True.
-HAZARD_AGENTS = {"chemistry", "contamination", "safety"}
+HAZARD_AGENTS = {"chemistry", "contamination", "safety", "math", "recovery"}
 
 # Fallback léxico por si el arquetipo es `calculation` sin agente peligroso
 # pero el contenido igual describe manipulación de producto.

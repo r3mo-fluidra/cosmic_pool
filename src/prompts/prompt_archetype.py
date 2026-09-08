@@ -1,18 +1,18 @@
 """
 prompt_archetype.py
 
-Section 9 of the prompt, split by node:
+Ensamblado de prompts, por nodo:
 
-  build_subagent_archetype_section()   -> goes into BASE_POOL_AGENT_PROMPT
-  build_synthesizer_archetype_section() -> goes into the Synthesizer prompt
+  build_cluster_prompt()                -> prompt de un nodo de cluster
+  build_subagent_archetype_section()    -> sección 10 de BASE_POOL_AGENT_PROMPT
+  build_synthesizer_archetype_section() -> sección 9 del prompt del Synthesizer
 
-Rationale: sub-agents emit BASE_OUTPUT_CONTRACT JSON that the user never sees.
-Only the Synthesizer emits SynthesizerOutput, so only the Synthesizer is
-subject to a word budget, tier partitioning, or `details`. Giving sub-agents a
-budget starves the Synthesizer of evidence and the budgets do not compose
-(3 agents x 90w != a better 80w answer).
+Rationale: el cluster emite BASE_OUTPUT_CONTRACT en JSON que el usuario nunca
+ve. Solo el Synthesizer emite SynthesizerOutput, así que solo el Synthesizer
+está sujeto a presupuesto de palabras, partición en tiers o `details`. Darle
+presupuesto al cluster le quita evidencia al Synthesizer.
 
-Every literal that the validator enforces is imported, never retyped.
+Todo literal que el validador impone se importa, nunca se retipea.
 """
 
 from __future__ import annotations
@@ -24,7 +24,15 @@ from ..graph_context.response_validator import (
     HAZARD_AGENTS,
     OVERFLOW_LABEL,
 )
-from .prompts import BASE_POOL_AGENT_PROMPT 
+from .prompts import BASE_POOL_AGENT_PROMPT
+from .prompts_sub_agents import (
+    CLUSTER_REGISTRY,
+    CALC_PROTOCOL,
+    REVISION_PROTOCOL,
+    contract_for,
+    archetype_for,
+)
+
 
 # =====================================================================
 # Bloques condicionales
@@ -34,11 +42,18 @@ def _details_lines(details: list[str]) -> str:
     return "\n".join(f"- {d}" for d in details) if details else "- (none)"
 
 
-def _resolve_safety(safety_required, agent_key):
+def _resolve_safety(safety_required, modules: list[str] | None):
+    """
+    `modules` son los module_id activos del turno (primario + apoyo).
+    Antes era un solo `agent_key`; ahora un turno puede tener dos módulos
+    y basta que uno sea de riesgo.
+    """
     if safety_required is True:
         return True
     if safety_required == "conditional":
-        return True if agent_key in HAZARD_AGENTS else "conditional"
+        if HAZARD_AGENTS.intersection(modules or []):
+            return True
+        return "conditional"
     return False
 
 
@@ -102,7 +117,7 @@ line rather than fabricating content.
 
 
 # =====================================================================
-# Sub-agente
+# Cluster (sección 10 de BASE_POOL_AGENT_PROMPT)
 # =====================================================================
 
 _SUBAGENT_TEMPLATE = """## 10. DOWNSTREAM RESPONSE SHAPE
@@ -125,10 +140,12 @@ permanently. Be complete and non-redundant, not short.
 {safety}"""
 
 
-def build_subagent_archetype_section(archetype: str,
-                                     agent_key: str | None = None) -> str:
+def build_subagent_archetype_section(
+    archetype: str,
+    modules: list[str] | None = None,
+) -> str:
     c = get_contract(archetype)
-    resolved = _resolve_safety(c.get("safety_required", False), agent_key)
+    resolved = _resolve_safety(c.get("safety_required", False), modules)
 
     if resolved is True:
         safety = ("**Safety:** the final answer will carry a mandatory warning. "
@@ -151,7 +168,7 @@ def build_subagent_archetype_section(archetype: str,
 
 
 # =====================================================================
-# Synthesizer
+# Synthesizer (sección 9)
 # =====================================================================
 
 _SYNTH_TEMPLATE = """## 9. OUTPUT ARCHETYPE
@@ -170,18 +187,17 @@ verdict means the verdict comes first, before any qualification.
 {safety}"""
 
 
-def build_synthesizer_archetype_section(archetype: str,
-                                        agents: list[str] | None = None) -> str:
+def build_synthesizer_archetype_section(
+    archetype: str,
+    agents: list[str] | None = None,
+) -> str:
     """
-    `archetype` comes from resolve_archetype(...) at turn time, not from a
-    static agent config. `agents` is state["assigned_agents"], used to collapse
-    a "conditional" safety requirement the same way the validator will.
+    `archetype` viene resuelto del módulo primario del plan.
+    `agents` son los module_id que produjeron output, y colapsan un safety
+    "conditional" del mismo modo que lo hará el validador.
     """
     c = get_contract(archetype)
-    required = c.get("safety_required", False)
-    resolved = required
-    if required == "conditional" and HAZARD_AGENTS.intersection(agents or []):
-        resolved = True
+    resolved = _resolve_safety(c.get("safety_required", False), agents)
 
     return _SYNTH_TEMPLATE.format(
         archetype=archetype,
@@ -193,27 +209,84 @@ def build_synthesizer_archetype_section(archetype: str,
 
 
 # =====================================================================
-# Builder corregido
+# Builder de cluster
 # =====================================================================
 
-def build_agent_prompt(config, agent_key: str | None = None) -> str:
+def build_cluster_prompt(
+    cluster_name: str,
+    primary_module: str,
+    support_modules: list[str] | None = None,
+    revising: bool = False,
+) -> str:
     """
-    Fixes vs. the previous version:
-      - config.agent_name (the dataclass has no `name`).
-      - get_contract() instead of ARCHETYPE_CONTRACTS[...] -> no KeyError.
-      - archetype section pre-rendered, so no unused `budget`/`safety_required`
-        kwargs silently doing nothing.
+    Ensambla el prompt de un nodo de cluster para este turno.
+
+    Reemplaza a build_agent_prompt(config), que recibía un AgentConfig por
+    agente. Ahora el prompt se arma en tiempo de turno: el cluster es fijo,
+    pero los módulos activos los elige el planner, así que el role framing,
+    las responsabilidades y el contrato de salida varían por turno.
+
+    El role_framing solo sale del módulo PRIMARIO -- un prompt con tres
+    "You are a specialist in..." no tiene rol.
     """
+    cluster = CLUSTER_REGISTRY[cluster_name]
+    support = [m for m in (support_modules or []) if m != primary_module]
+
+    primary = cluster.modules[primary_module]
+    active = (primary, *(cluster.modules[m] for m in support if m in cluster.modules))
+
+    responsibilities: list[str] = []
+    for module in active:
+        for item in module.responsibilities:
+            if item not in responsibilities:
+                responsibilities.append(item)
+
+    # El scope del cluster va primero: contiene las precondiciones que
+    # aplican siempre (frontera temporal en SYSTEMS, jurisdicción y
+    # obligación-vs-artefacto en GOVERNANCE, CYA en AQUATIC_CHEM).
+    specialization = cluster.scope
+    if support:
+        specialization += (
+            f"\n\nThis turn also draws on: {', '.join(support)}. "
+            "Apply that expertise in service of the primary task, not as a "
+            "second answer."
+        )
+
+    excluded = list(cluster.hard_exclusions)
+    # Sin orquestador no hay a dónde rutear mid-turn: las exclusiones dejan
+    # de ser instrucciones de ruteo y pasan a ser fronteras. Lo no cubierto
+    # se declara, no se deriva.
+    excluded.append(
+        "For anything above: do NOT answer it and do NOT route it. State "
+        "plainly that it falls outside this turn's scope and name it in "
+        "`missing_information` so it can be offered to the user as a "
+        "follow-up."
+    )
+
+    protocols = [*cluster.safety_rules]
+    if cluster.tools:
+        protocols.append(CALC_PROTOCOL)
+    if revising:
+        protocols.append(REVISION_PROTOCOL)
+
+    tool_instructions = cluster.tool_instructions or (
+        "No tools are authorized for this cluster. Never state a computed "
+        "numeric value from arithmetic you performed yourself."
+    )
+    if protocols:
+        tool_instructions = tool_instructions + "\n\n" + "\n\n".join(protocols)
+
     return BASE_POOL_AGENT_PROMPT.format(
-        agent_name=config.agent_name,
-        specialization=config.specialization,
-        responsibilities="\n".join(f"- {i}" for i in config.responsibilities),
-        excluded_tasks="\n".join(f"- {i}" for i in config.excluded_tasks),
-        tools=", ".join(config.tools),
-        tool_instructions=config.tool_instructions,
-        output_contract=config.output_contract,
+        agent_name=cluster.cluster_name,
+        specialization=specialization,
+        responsibilities="\n".join(f"- {r}" for r in responsibilities),
+        excluded_tasks="\n".join(f"- {e}" for e in excluded),
+        tools=", ".join(cluster.tools) or "(none)",
+        tool_instructions=tool_instructions,
+        output_contract=contract_for(active),
         archetype_section=build_subagent_archetype_section(
-            config.archetype, agent_key
+            archetype_for(primary),
+            [primary_module, *support],
         ),
-        tool_budget=config.tool_budget
+        tool_budget=cluster.tool_budget_per_calc_step * (1 + len(support)),
     )
