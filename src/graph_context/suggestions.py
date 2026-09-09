@@ -23,14 +23,14 @@ from typing import List, Sequence, Set, Tuple
 from pydantic import BaseModel, Field
 from typing_extensions import get_args
 
-from ..agent.agent_names import AgentName, ModuleName   # AJUSTAR la ruta al ubicar el módulo
+from ..agent.agent_names import AgentName   # AJUSTAR la ruta al ubicar el módulo
 
 
 # =====================================================================
 # 1. CONSTANTES
 # =====================================================================
 
-_VALID_AGENTS: Set[str] = set(get_args(ModuleName))
+_VALID_AGENTS: Set[str] = set(get_args(AgentName))
 
 # Agentes que nunca deben ser destino de un chip, aunque sean válidos
 # como valor de AgentName. Un chip que rutea a "oos" es una invitación
@@ -38,22 +38,17 @@ _VALID_AGENTS: Set[str] = set(get_args(ModuleName))
 # específico que justifique ocupar espacio en pantalla.
 _NON_SUGGESTABLE_AGENTS: Set[str] = {"oos", "general"}
 
-GENERIC_TERMS: Set[str] = {
+# Supernodos del grafo (grado alto) — validado en retrieval que el
+# bloqueo anti-hub importa; acá aplica igual. Un chip sobre "pH" es
+# tan genérico que no predice nada.
+SUPERNODES: Set[str] = {
     "free_chlorine",
     "cyanuric_acid",
     "ph",
-    "cloro_libre",
-    "acido_cianurico",
-    "alcalinidad",
-    "alkalinity",
 }
 
-# Alias: nodes.py todavía lo importa. Se retira cuando toquemos el
-# suggester.
-SUPERNODES = GENERIC_TERMS
 
-
-_MAX_LABEL_CHARS = 48      # 2 chips por fila a 380px
+_MAX_LABEL_CHARS = 40      # 2 chips por fila a 380px
 _MAX_SUGGESTIONS = 3
 
 # Umbral de solapamiento de tokens para considerar dos labels
@@ -80,24 +75,23 @@ class Suggestion(BaseModel):
 
     label: str = Field(
         description=(
-            "Texto del chip, en el idioma del usuario. Máximo 40 "
-            "caracteres. Debe leerse como una pregunta o acción corta, "
-            "no como una oración completa."
+            f"Texto del chip, en el idioma del usuario. "
+            f"caracteres. Debe leerse como una pregunta o acción corta, "
+            f"no como una oración completa."
         )
     )
 
-    agent: ModuleName = Field(
+    agent: AgentName = Field(
         description=(
-            "Módulo que respondería si el usuario toca este chip. "
-            "Nunca 'general' ni 'oos'."
+            "Agente que respondería si el usuario toca este chip. "
+            "Debe ser un agente especializado: nunca 'general' ni 'oos'."
         )
     )
 
-    module_id: ModuleName = Field(
+    entity: str = Field(
         description=(
-            "Módulo al que apunta el chip. Reemplaza al slug de Neo4j: "
-            "sin retrieval no hay entidades de grafo que referenciar. "
-            "Se usa para telemetría de taps y para la distinción mutua."
+            "Slug del nodo de Neo4j al que apunta el chip. Se usa para "
+            "el bloqueo anti-supernodo y para telemetría de taps."
         )
     )
 
@@ -202,25 +196,26 @@ def gate_length(candidates: Sequence[Suggestion]) -> List[Suggestion]:
 
 def gate_anti_hub(candidates: Sequence[Suggestion]) -> List[Suggestion]:
     """
-    Gate 4 — Anti-genérico.
+    Gate 4 — Anti-hub.
 
-    Antes bloqueaba supernodos del grafo por slug de `entity`. Sin
-    retrieval no hay slugs, así que ahora aplica solo al label: un chip
-    cuyo texto es un parámetro genérico ("pH", "cloro libre") no predice
-    nada — el usuario no toca "pH", toca "¿por qué sube el pH?".
-
-    Se descarta solo si el label ES el término genérico, no si lo
-    menciona. La versión anterior hacía `if "ph" in label.split()`, que
-    mataba "¿Subo el pH o la alcalinidad?" — un chip perfectamente útil.
+    Descarta chips que apuntan a supernodos genéricos. Chequea tanto
+    el slug de `entity` como el texto del label, porque el LLM puede
+    poner el supernodo en el label y un slug vecino en entity.
     """
     out: List[Suggestion] = []
     for c in candidates:
-        normalized = _normalize(c.label)
-        # Solo el label pelado, no cualquier aparición.
-        if normalized.replace(" ", "_") in GENERIC_TERMS:
+        entity_slug = _normalize(c.entity).replace(" ", "_")
+        if entity_slug in SUPERNODES:
             continue
-        if normalized in GENERIC_TERMS:
+
+        label_tokens = _content_tokens(c.label)
+        hub_tokens = {t for s in SUPERNODES for t in _content_tokens(s)}
+        # "ph" queda fuera de _content_tokens por longitud; se chequea aparte.
+        if label_tokens & hub_tokens:
             continue
+        if "ph" in _normalize(c.label).split():
+            continue
+
         out.append(c)
     return out
 
@@ -241,13 +236,15 @@ def gate_no_redundancy(
 
     out: List[Suggestion] = []
     for c in candidates:
-    # El chequeo de `entity in answer` se fue: un module_id
-    # ("chemistry") no aparece nunca en la respuesta al usuario, así
-    # que la comparación era siempre falsa. El filtro real es el de
-    # tokens del label.
+        entity_norm = _normalize(c.entity)
+        if entity_norm and entity_norm in answer_norm:
+            continue
+
         label_tokens = _content_tokens(c.label)
+        # Si todo lo que dice el label ya está en la respuesta, es redundante.
         if label_tokens and label_tokens.issubset(answer_tokens):
             continue
+
         out.append(c)
     return out
 
@@ -267,7 +264,7 @@ def gate_mutual_distinction(candidates: Sequence[Suggestion]) -> List[Suggestion
     seen_targets: Set[Tuple[str, str]] = set()
 
     for c in candidates:
-        target = (c.agent, c.module_id)
+        target = (c.agent, _normalize(c.entity))
         if target in seen_targets:
             continue
 

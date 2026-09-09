@@ -1,121 +1,224 @@
 """
 agents.py
 =========
-Construcción de los agentes de cluster.
-
-Solo AQUATIC_CHEM y SYSTEMS necesitan un grafo de agente: declaran tools de
-cálculo. GOVERNANCE declara tools=() y corre con _direct_answer en nodes.py,
-igual que general y oos.
-
-Cambio estructural respecto de la versión anterior: los agentes ya no se
-construyen una vez en _initialize(). Su system prompt depende de los módulos
-que el planner eligió para ESTE turno (role framing del primario, contrato de
-salida unido, budget por módulo activo), así que se construyen por turno. Lo
-que se cachea es el LLM, que es lo caro de instanciar.
-
-Lo que se eliminó:
-  - create_supervisor / pool_supervisor: el supervisor operaba sobre
-    execution_plan ordenado, avanzando paso a paso. Con un step por turno no
-    tiene trabajo.
-  - Los agentes de general y oos, y RunnableWithFallbacks: los nodos nunca
-    los usaron -- llaman _direct_answer, que es un invoke pelado.
-    get_agent_by_name("general") no se llamaba desde el grafo.
-  - pool_general_knowledge: era un no-op que devolvía un string pidiéndole al
-    modelo responder de su training. Un round trip regalado.
-  - RETRIEVAL_TOOLS (vector_search, search_seed_nodes, expand_subgraph): los
-    clusters responden con prompt especializado y catálogo de cálculo.
-  - SPECIALIST_SPECS y AGENT_REGISTRY: reemplazados por CLUSTER_REGISTRY.
+Defines the sub-agents used inside the orchestrator pipeline.
 """
 
 import logging
 
+from langchain_core.tools import tool
+from langchain_core.runnables import RunnableWithFallbacks
 from langchain.agents import create_agent
+from langgraph_supervisor import create_supervisor
 
 from ..tools_math.tools import MATH_TOOLS
-from ..config.llm import create_synthesizer_llm
-from ..prompts.prompts_sub_agents import CLUSTER_REGISTRY
-from ..prompts.prompt_archetype import build_cluster_prompt
+from .agent_names import AgentName
+from ..config.llm import create_routing_llm, create_synthesizer_llm, create_fallback_llm
+from ..prompts.prompts import (
+    GENERAL_PROMPT,
+    OOS_PROMPT,
+    SUPERVISOR_PROMPT,
+)
+from ..prompts.prompt_archetype import build_agent_prompt
+from ..prompts.prompts_sub_agents import (
+    AGENT_REGISTRY,
+    CHEMISTRY,
+    EQUIPMENT,
+    HYDRAULICS,
+    OPERATIONS,
+    COMPLIANCE,
+    CONTAMINATION,
+    FACILITY_DESIGN,
+    SAFETY,
+    RECOVERY,
+    RECORDS,
+    MATH,
+)
+from .tools import (
+    vector_search,
+    search_seed_nodes,
+    expand_subgraph,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ================================================================
-# CLUSTERS CON GRAFO DE AGENTE
-# ================================================================
-# GOVERNANCE queda afuera a propósito: tools=() en su ClusterConfig.
-# create_agent con lista de tools vacía construye un grafo que nunca puede
-# ir al nodo de tools -- un invoke directo hace lo mismo sin el overhead.
-
-TOOLED_CLUSTERS = frozenset({"AQUATIC_CHEM", "SYSTEMS"})
-
-
-def is_tooled(cluster_name: str) -> bool:
-    """True si el cluster necesita grafo de agente en vez de _direct_answer."""
-    return cluster_name in TOOLED_CLUSTERS
-
-
-# ================================================================
-# LAZY LLM
+# TOOLS
 # ================================================================
 
-_llm = None
-
-
-def _get_llm():
-    global _llm
-    if _llm is None:
-        _llm = create_synthesizer_llm()
-    return _llm
-
-
-# ================================================================
-# CONSTRUCCIÓN POR TURNO
-# ================================================================
-
-def build_cluster_agent(
-    cluster_name: str,
-    primary_module: str,
-    support_modules: list[str] | None = None,
-    revising: bool = False,
-):
+@tool
+def pool_general_knowledge(topic: str) -> str:
     """
-    Construye el agente de un cluster para este turno.
+    Retrieve general knowledge and best practices for a pool-related topic.
 
-    Raises:
-        ValueError: cluster desconocido, cluster sin tools, o módulo primario
-                    que no pertenece al cluster. Los tres son bugs de ruteo,
-                    no condiciones a degradar: el nodo los captura y los
-                    reporta como AgentResult fallido.
+    Args:
+        topic: The specific pool subject to look up
+               (e.g. 'saltwater pools', 'water balance', 'pool covers').
     """
-    cluster = CLUSTER_REGISTRY.get(cluster_name)
-    if cluster is None:
-        raise ValueError(
-            f"Cluster '{cluster_name}' no está registrado. "
-            f"Disponibles: {list(CLUSTER_REGISTRY)}"
-        )
-
-    if not is_tooled(cluster_name):
-        raise ValueError(
-            f"Cluster '{cluster_name}' no declara tools; debe correr con "
-            "_direct_answer, no con un grafo de agente."
-        )
-
-    if primary_module not in cluster.modules:
-        raise ValueError(
-            f"Módulo '{primary_module}' no pertenece a '{cluster_name}'. "
-            f"Módulos del cluster: {list(cluster.modules)}"
-        )
-
-    system_prompt = build_cluster_prompt(
-        cluster_name=cluster_name,
-        primary_module=primary_module,
-        support_modules=support_modules,
-        revising=revising,
+    return (
+        f"General pool information about '{topic}': "
+        "Please provide a comprehensive, helpful explanation based on your training knowledge."
     )
 
-    return create_agent(
-        model=_get_llm(),
+
+# ================================================================
+# SPECIALIST DECLARATION
+# ================================================================
+
+RETRIEVAL_TOOLS = [vector_search, search_seed_nodes, expand_subgraph]
+
+# (node_name, AGENT_REGISTRY key). El node_name es el que usa el planner
+# en `assigned_agent`; no se deriva de la constante para evitar drift silencioso.
+SPECIALIST_SPECS: tuple[tuple[str, str], ...] = (
+    ("chemistry",       CHEMISTRY),
+    ("equipment",       EQUIPMENT),
+    ("hydraulics",      HYDRAULICS),
+    ("operations",      OPERATIONS),
+    ("compliance",      COMPLIANCE),
+    ("contamination",   CONTAMINATION),
+    ("facility_design", FACILITY_DESIGN),
+    ("safety",          SAFETY),
+    ("recovery",        RECOVERY),
+    ("records",         RECORDS),
+)
+
+
+# ================================================================
+# LAZY INITIALIZATION
+# ================================================================
+
+_initialized = False
+_routing_llm = None
+_synthesizer_llm = None
+_fallback_llm = None
+_agents: dict[str, object] = {}
+_supervisor_agents: list[object] = []
+pool_supervisor = None
+
+
+def _initialize():
+    global _initialized, _routing_llm, _synthesizer_llm, _fallback_llm
+    global _agents, _supervisor_agents, pool_supervisor
+
+    if _initialized:
+        return
+
+    _routing_llm     = create_routing_llm()
+    _synthesizer_llm = create_synthesizer_llm()
+    _fallback_llm    = create_fallback_llm()
+
+    # ---- general: primario + fallback ---------------------------------
+    # El fallback tiene que ser OTRO AGENTE, no un LLM suelto: el primario
+    # recibe y devuelve estado de grafo ({"messages": [...]}), un chat model
+    # no acepta esa firma.
+    primary_general = create_agent(
+        model=_synthesizer_llm,
+        tools=[pool_general_knowledge],
+        name="general",
+        system_prompt=GENERAL_PROMPT,
+    )
+
+    fallback_general = create_agent(
+        model=_fallback_llm,
+        tools=[pool_general_knowledge],
+        name="general_fallback",
+        system_prompt=GENERAL_PROMPT,
+    )
+
+    # RunnableWithFallbacks NO hereda el .name del runnable que envuelve.
+    # Sin `name=` explícito, create_supervisor aborta con:
+    #   "Please specify a name when you create your agent ..."
+    general_agent = RunnableWithFallbacks(
+        runnable=primary_general,
+        fallbacks=[fallback_general],
+        name="general",
+    )
+
+    # ---- oos ----------------------------------------------------------
+    oos_agent = create_agent(
+        model=_synthesizer_llm,
+        tools=[],
+        name="oos",
+        system_prompt=OOS_PROMPT,
+    )
+
+    # ---- specialists (retrieval) --------------------------------------
+    specialists = {
+        node_name: create_agent(
+            model=_synthesizer_llm,
+            tools=RETRIEVAL_TOOLS,
+            name=node_name,
+            system_prompt=build_agent_prompt(AGENT_REGISTRY[registry_key]),
+        )
+        for node_name, registry_key in SPECIALIST_SPECS
+    }
+
+    # ---- math (catálogo determinista) ---------------------------------
+    math_agent = create_agent(
+        model=_synthesizer_llm,
         tools=MATH_TOOLS,
-        name=cluster_name,
-        system_prompt=system_prompt,
+        name="math",
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[MATH]),
     )
+
+    _agents = {
+        "general": general_agent,
+        "oos": oos_agent,
+        **specialists,
+        "math": math_agent,
+    }
+
+    # El supervisor recibe el agente primario "pelado", no el wrapper de
+    # fallbacks: create_supervisor inspecciona el grafo de cada nodo.
+    _supervisor_agents = [primary_general, oos_agent, *specialists.values(), math_agent]
+
+    # Los specialists ya están utilizables aunque el supervisor falle.
+    _initialized = True
+
+    _build_supervisor()
+
+
+def _build_supervisor():
+    """
+    Construye el supervisor de forma aislada. Un fallo aquí no debe tumbar
+    el pipeline principal (planner -> orchestrator -> run_step), que resuelve
+    los agentes por `get_agent_by_name` y no usa el supervisor.
+    """
+    global pool_supervisor
+
+    try:
+        pool_supervisor = create_supervisor(
+            agents=_supervisor_agents,
+            model=_routing_llm,
+            prompt=SUPERVISOR_PROMPT,
+        ).compile()
+    except Exception:
+        pool_supervisor = None
+        logger.exception("create_supervisor failed; supervisor path disabled")
+
+
+# ================================================================
+# AGENT REGISTRY
+# ================================================================
+
+def get_agent_by_name(agent_name: AgentName):
+    """
+    Return the compiled agent graph for *agent_name*.
+    Raises ValueError if the agent is not yet registered.
+    """
+    _initialize()
+
+    agent = _agents.get(agent_name)
+    if agent is None:
+        raise ValueError(
+            f"Agent '{agent_name}' is not registered. "
+            f"Available agents: {list(_agents.keys())}"
+        )
+    return agent
+
+
+def get_supervisor():
+    """Devuelve el supervisor compilado, inicializando si es necesario."""
+    _initialize()
+    return pool_supervisor
