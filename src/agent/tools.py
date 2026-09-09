@@ -672,11 +672,22 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
         )
 
     partes: list[str] = []
-    for i, (doc, score) in enumerate(results, 1):
+    for i, (doc, _score) in enumerate(results, 1):
         m = doc.metadata or {}
         flag = " | REGULATORY" if m.get("is_regulatory") else ""
+        # El score NO se expone al modelo. El store corre en modo HYBRID
+        # (denso + sparse vía RRF), así que ese número es una fusión de
+        # rangos, no una similitud: da fracciones exactas (1/2, 1/3, 5/6),
+        # empata chunks distintos en 0.5000, y una query sin sentido
+        # ("purple monkey dishwasher") saca el mismo 0.5000 que una query
+        # legítima. Medido contra el store, no correlaciona con relevancia.
+        #
+        # Mostrarlo era falsa precisión: el modelo recibía tres chunks
+        # empatados y sin señal para jerarquizarlos, y gastaba el
+        # razonamiento en re-buscar en vez de responder. El rango sí es
+        # información honesta — la lista ya viene ordenada.
         partes.append(
-            f"--- Chunk {i} (score: {score:.4f}){flag} ---\n"
+            f"--- Chunk {i} of {len(results)}{flag} ---\n"
             f"Chapter: {m.get('chapter', '?')} | "
             f"Path: {m.get('hierarchy_path', 'unknown')}\n"
             f"Type: {m.get('fragment_type', '?')} | ID: {m.get('chunk_id', '')}\n"
@@ -687,8 +698,11 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
     encabezado = (
         f"[{len(results)} chunks, {n_reg} regulatory | "
         f"corpus: MAHC/OSHA/EPA, US-focused]\n"
-        "Este es el resultado completo de la búsqueda semántica para esta "
-        "tarea. No vuelvas a llamar a esta herramienta.\n\n"
+        "This is the complete result of the semantic search for this "
+        "task. Do not call this tool again.\n"
+        "The chunks are ordered by relevance: 1 is the most "
+        "relevant. A chunk that does not apply to the task is discarded, it is not "
+        "cited.\n\n"
     )
     return encabezado + "\n".join(partes)
 

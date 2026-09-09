@@ -13,7 +13,7 @@ from langgraph_supervisor import create_supervisor
 
 from ..tools_math.tools import MATH_TOOLS
 from .agent_names import AgentName
-from ..config.llm import create_routing_llm, create_synthesizer_llm, create_fallback_llm
+from ..config.llm import create_routing_llm, create_synthesizer_llm, create_fallback_llm, create_specialist_llm
 from ..prompts.prompts import (
     GENERAL_PROMPT,
     OOS_PROMPT,
@@ -39,6 +39,7 @@ from .tools import (
     search_seed_nodes,
     expand_subgraph,
 )
+from .middleware import ToolBudgetMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +93,14 @@ _initialized = False
 _routing_llm = None
 _synthesizer_llm = None
 _fallback_llm = None
+_specialist_llm = None
 _agents: dict[str, object] = {}
 _supervisor_agents: list[object] = []
 pool_supervisor = None
 
 
 def _initialize():
-    global _initialized, _routing_llm, _synthesizer_llm, _fallback_llm
+    global _initialized, _routing_llm, _synthesizer_llm, _fallback_llm, _specialist_llm
     global _agents, _supervisor_agents, pool_supervisor
 
     if _initialized:
@@ -107,6 +109,7 @@ def _initialize():
     _routing_llm     = create_routing_llm()
     _synthesizer_llm = create_synthesizer_llm()
     _fallback_llm    = create_fallback_llm()
+    _specialist_llm  = create_specialist_llm()
 
     # ---- general: primario + fallback ---------------------------------
     # El fallback tiene que ser OTRO AGENTE, no un LLM suelto: el primario
@@ -146,10 +149,11 @@ def _initialize():
     # ---- specialists (retrieval) --------------------------------------
     specialists = {
         node_name: create_agent(
-            model=_synthesizer_llm,
+            model=_specialist_llm,
             tools=RETRIEVAL_TOOLS,
             name=node_name,
-            system_prompt=build_agent_prompt(AGENT_REGISTRY[registry_key]),
+            system_prompt=build_agent_prompt(AGENT_REGISTRY[registry_key], node_name),
+            middleware=[ToolBudgetMiddleware()],
         )
         for node_name, registry_key in SPECIALIST_SPECS
     }
@@ -159,7 +163,7 @@ def _initialize():
         model=_synthesizer_llm,
         tools=MATH_TOOLS,
         name="math",
-        system_prompt=build_agent_prompt(AGENT_REGISTRY[MATH]),
+        system_prompt=build_agent_prompt(AGENT_REGISTRY[MATH], "math"),
     )
 
     _agents = {

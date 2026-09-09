@@ -11,6 +11,12 @@ from ..prompts.prompts import PLANNER_PROMPT
 def create_planner_chain(llm: BaseChatModel) -> Runnable:
     """
     Crea el chain del Planner con structured output.
+
+    method="json_schema" y no "function_calling": con
+    langchain-google-genai 4.3.1 el envoltorio de function_calling emite
+    una clave que Gemini rechaza ("Key 'parameters' is not supported in
+    schema, ignoring"). Los tres métodos producen el plan correcto; este
+    es el único que no ensucia el log.
     """
 
     system_prompt = PLANNER_PROMPT
@@ -20,14 +26,12 @@ def create_planner_chain(llm: BaseChatModel) -> Runnable:
         ("user", "{input}")
     ])
 
-    # Chain con structured output (forzado)
     planner_chain = (
-        prompt 
-        | llm.with_structured_output(
+        prompt
+            | llm.with_structured_output(
             schema=PlannerOutput,
-            method="function_calling",   # Mejor opción con modelos modernos
-            # method="json_mode"         # Alternativa si function calling no funciona bien
+            method="json_schema",
         )
-    )
+            )
 
     return planner_chain

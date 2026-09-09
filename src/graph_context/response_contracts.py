@@ -369,45 +369,6 @@ def agents_from_results(agent_results: Any) -> list:
     return agents
 
 
-def enforce_contract(
-    payload: SynthesizerOutput,
-    contract: dict,
-    agents: list[str],
-    detail_cls: type = DetailSection,
-) -> tuple[SynthesizerOutput, dict]:
-    """
-    Enforce contract on payload.
-    
-    Importa AgentResult solo si es necesario para validación.
-    """
-    # Import diferido si se necesita para validación
-    from ..agent.state import AgentResult  # Si se necesita
-    
-    report = {"valid": True, "issues": []}
-    
-    # Validar que los campos requeridos existen
-    required_fields = contract.get("required_fields", [])
-    for field in required_fields:
-        if not hasattr(payload, field) or getattr(payload, field) is None:
-            report["valid"] = False
-            report["issues"].append(f"Missing required field: {field}")
-    
-    # Validar seguridad según contrato
-    safety_required = contract.get("safety_required", False)
-    if safety_required and not payload.safety:
-        # Si es requerido y no hay safety, marcar como issue
-        report["valid"] = False
-        report["issues"].append("Safety field required but missing")
-    
-    # Validar que details no exceda lo permitido
-    max_details = contract.get("max_details", 5)
-    if len(payload.details) > max_details:
-        # Truncar details
-        payload.details = payload.details[:max_details]
-        report["issues"].append(f"Details truncated to {max_details}")
-    
-    return payload, report
-
 
 def fallback_payload(content: str, output_cls: type = SynthesizerOutput) -> SynthesizerOutput:
     """

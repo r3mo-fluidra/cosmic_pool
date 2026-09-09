@@ -824,10 +824,16 @@ def run_turn(
             messages = event["synthesizer"].get("messages", [])
             if messages:
                 final_response = messages[-1].content
-        elif "suggester" in event:
-            # El nodo SIEMPRE escribe la clave, aunque sea con []. Sin esta
-            # rama el evento caía al vacío y los chips del grafo no salían
-            # nunca de run_turn — los que se veían eran el deck estático.
+
+        # `if` suelto y NO un `elif` de la cadena anterior: con el fan-out
+        # del orchestrator, synthesizer y suggester corren en el mismo
+        # superstep y LangGraph los emite en el MISMO evento. Como `elif`,
+        # la rama del synthesizer ganaba y los chips se perdían siempre.
+        #
+        # El nodo SIEMPRE escribe la clave, aunque sea con []. Sin esta
+        # rama el evento caía al vacío y los chips del grafo no salían
+        # nunca de run_turn — los que se veían eran el deck estático.
+        if "suggester" in event:
             suggestions = _chip_texts(event["suggester"].get("suggestions"))
     return (
         final_response,
@@ -985,4 +991,6 @@ if prompt:
         st.session_state.messages.append(answer)
         # Rerun so the feedback widget renders from the history loop, where
         # it survives the reruns that its own buttons trigger.
+        if suggestions and final_response.rstrip().endswith(("?", "？")):
+            suggestions = []
         st.rerun()

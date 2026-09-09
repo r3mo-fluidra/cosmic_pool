@@ -20,10 +20,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 import concurrent.futures
 
+
 from .state import PoolAgentState, ExecutionStep, AgentResult
 from ..prompts.prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
 from .chains import create_planner_chain
-from ..config.llm import create_llm, create_suggester_llm
+from ..config.llm import create_llm, create_suggester_llm, create_routing_llm, create_fallback_llm, create_synthesis_llm 
 from .agents import get_agent_by_name, SPECIALIST_SPECS
 from .gates import (
     math_inputs_present,
@@ -42,7 +43,6 @@ from ..graph_context.suggestions import (
     SUPERNODES,
     Suggestion,
     SuggesterOutput,
-    answer_ends_with_question,
     apply_gates_with_report,
     roster_text,
 )
@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
-_SUGGESTER_DEADLINE_S = 6
+_SUGGESTER_DEADLINE_S = 25
 _MAX_MISROUTE_RETRIES = 2
 STEP_DEADLINE_S = 60.0 
 
@@ -139,7 +139,43 @@ def _direct_answer(state: PoolAgentState, system_prompt: str, deadline_s: float 
 # ================================================================
 
 _llm = None
+_planner_llm = None
 _planner_chain = None
+_fallback_llm = None
+_suggester_llm = None
+_synthesis_llm = None
+def _get_synthesis_llm():
+    """
+    Getter propio y no `create_llm()`: `_get_llm()` lo comparten el
+    summarizer, `general` y `oos` vía _direct_answer. A esos no se les
+    apaga el thinking sin medirlos aparte — `general` sí redacta desde
+    cero, el synthesizer no.
+    """
+    global _synthesis_llm
+    if _synthesis_llm is None:
+        _synthesis_llm = create_synthesis_llm()
+    return _synthesis_llm
+
+
+
+def _get_fallback_llm():
+    """
+    Modelo distinto para el reintento del synthesizer.
+
+    Antes el reintento usaba `_get_llm()`, o sea el mismo gemini-3.5-flash
+    que acababa de fallar: un 503 o un 429 de cuota se repetía por la misma
+    causa y el turno caía siempre al payload estático. Ese fallback no era
+    un fallback.
+
+    Sigue siendo la misma API key, así que un fallo a nivel cuenta (créditos
+    agotados) tampoco se salva acá. Cubre el caso de modelo saturado, que es
+    el frecuente.
+    """
+    global _fallback_llm
+    if _fallback_llm is None:
+        _fallback_llm = create_fallback_llm()
+    return _fallback_llm
+
 
 def _get_llm():
     global _llm
@@ -147,10 +183,22 @@ def _get_llm():
         _llm = create_llm()
     return _llm
 
+def _get_planner_llm():
+    """
+    El planner es clasificación estructurada, no redacción: no necesita
+    el modelo de síntesis. Getter propio y no `create_llm()` porque
+    `_get_llm()` lo comparten general, oos, el summarizer y el
+    synthesizer — cambiar ahí les cambiaría el modelo a todos.
+    """
+    global _planner_llm
+    if _planner_llm is None:
+        _planner_llm = create_routing_llm()
+    return _planner_llm
+
 def _get_planner_chain():
     global _planner_chain
     if _planner_chain is None:
-        _planner_chain = create_planner_chain(_get_llm())
+        _planner_chain = create_planner_chain(_get_planner_llm())
     return _planner_chain
 
 
@@ -610,9 +658,7 @@ def _suggest_block_reason(state: PoolAgentState) -> str | None:
     if streak >= _IGNORED_CHIP_LIMIT:
         return f"ignored_chip_streak:{streak}"
 
-    # El synthesizer ya cerró con una pregunta propia; un chip encima es ruido.
-    if answer_ends_with_question(state):
-        return "answer_ends_with_question"
+    
 
     return None
 
@@ -689,11 +735,26 @@ def _to_synthesizer(
     error: str | None = None,
     force_archetype: str | None = None,
 ) -> Command:
-    """Única salida hacia el synthesizer usando el helper unificado."""
+    """
+    Única salida del orchestrator: fan-out a synthesizer y suggester.
+
+    Los dos corren en el mismo superstep. El suggester ya no depende de
+    `state["response"]` — su materia prima es `agent_results`, igual que
+    la del synthesizer (ver _suggester_material). Con eso sus ~1.2s salen
+    del camino crítico del usuario.
+
+    Escrituras disjuntas: synthesizer toca response, validation, archetype
+    y messages; suggester solo suggestions. `response` y `suggestions` son
+    NotRequired sin reducer, así que un solapamiento daría InvalidUpdateError.
+
+    `general` y `oos` siguen con goto="synthesizer" directo, no pasan por
+    acá: fuerzan archetype a conversational/oos, los dos suprimidos, y
+    `general` no hace retrieval. Paralelizarlos no ahorraría nada.
+    """
     update = _resolve_and_update_archetype(
         execution_plan, agent_results, extra_results, error, force_archetype
     )
-    return Command(update=update, goto="synthesizer")
+    return Command(update=update, goto=["synthesizer", "suggester"])
 
  
 def _get_llm_suggester():
@@ -1264,7 +1325,7 @@ def synthesizer(state: PoolAgentState) -> dict:
     agent_results = _normalize_agent_results(state.get("agent_results") or {})
 
     # ============================================================
-    # ÚNICO ATAJO: clarificación de `general`
+    # clarificación de `general`
     # ------------------------------------------------------------
     # Se decide por el PLAN, no por keywords en el texto. Buscar
     # "provide"/"need"/"volume" en la salida de un especialista da falso
@@ -1293,6 +1354,31 @@ def synthesizer(state: PoolAgentState) -> dict:
                 "messages": [AIMessage(content=text, name="Marlin")],
             }
 
+        # ============================================================
+    # ATAJO OOS: el nodo `oos` ya emitió prosa lista para el usuario
+    # ------------------------------------------------------------
+    # Re-sintetizarla cuesta una llamada completa al LLM para producir
+    # el mismo texto. El contrato de oos no tiene actions ni safety, así
+    # que no hay nada que enforce_contract pueda agregar.
+    # ============================================================
+    if _is_oos(execution_plan):
+        single = next(iter(agent_results.values()), None)
+        if single and single.output and not single.error:
+            logger.info("synthesizer: atajo oos, se usa la prosa del nodo oos")
+            text = _strip_code_fences(single.output)
+            payload = SynthesizerOutput(
+                answer=text,
+                actions=[],
+                safety=None,
+                details=[],
+            )
+            return {
+                "archetype": "oos",
+                "response": payload,
+                "validation": {"direct_agent_message": True, "is_oos": True},
+                "messages": [AIMessage(content=text, name="Marlin")],
+            }
+        
     # ============================================================
     # OOS / IDIOMA
     # ============================================================
@@ -1357,13 +1443,13 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     validation: dict = {}
     try:
-        payload = _get_llm().with_structured_output(SynthesizerOutput).invoke(llm_messages)
+        payload = _get_synthesis_llm().with_structured_output(SynthesizerOutput).invoke(llm_messages)
     except Exception as exc:
         logger.warning(
             "synthesizer: structured output falló (%s); reintentando sin estructura", exc
         )
         try:
-            raw = _get_llm().invoke(llm_messages)
+            raw = _get_fallback_llm().invoke(llm_messages)
             payload = fallback_payload(_flatten(raw.content), SynthesizerOutput)
             validation = {"fallback": "unstructured", "reason": str(exc)}
         except Exception as exc2:

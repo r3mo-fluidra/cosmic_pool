@@ -170,8 +170,8 @@ def build_graph(checkpointer=None):
         "orchestrator",
         orchestrator,
         # "run_step" es el destino de fan-out (uno o más Send por invocación);
-        # "synthesizer" cuando ya no quedan steps pendientes.
-        destinations=["run_step", "synthesizer"],
+        # ["synthesizer", "suggester"] cuando ya no quedan steps pendientes.
+        destinations=["run_step", "synthesizer", "suggester"],
     )
 
     builder.add_node(
@@ -186,7 +186,8 @@ def build_graph(checkpointer=None):
     # ── Wire edges ────────────────────────────────────────────────────────────
 
     builder.add_edge(START, "build_context_node")
-    builder.add_edge("synthesizer", "suggester")   # antes: END
+    # Fan-out desde el orchestrator: cada rama cierra por su lado.
+    builder.add_edge("synthesizer", END)
     builder.add_edge("suggester", END)
     # All other transitions (build_context_node → summarize_memory_node | planner,
     # summarize_memory_node → planner, planner → orchestrator,

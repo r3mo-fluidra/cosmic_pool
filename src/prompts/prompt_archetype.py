@@ -34,11 +34,27 @@ def _details_lines(details: list[str]) -> str:
     return "\n".join(f"- {d}" for d in details) if details else "- (none)"
 
 
-def _resolve_safety(safety_required, agent_key):
+def _resolve_safety(safety_required, agents=None):
+    """
+    `agents` llega como str desde build_agent_prompt (un especialista) o como
+    list[str] desde build_synthesizer_archetype_section (los agentes que
+    produjeron output). La firma anterior esperaba solo str, así que la
+    llamada del synthesizer evaluaba `["chemistry"] in HAZARD_AGENTS` ->
+    TypeError: unhashable type: 'list'. No explotó porque ningún arquetipo
+    ejercitado hasta ahora resuelve a "conditional".
+
+    Y desde el especialista llegaba None, porque agents.py nunca pasaba el
+    segundo argumento: la rama True era inalcanzable y todo agente de riesgo
+    recibía la instrucción blanda.
+    """
     if safety_required is True:
         return True
     if safety_required == "conditional":
-        return True if agent_key in HAZARD_AGENTS else "conditional"
+        if isinstance(agents, str):
+            agents = [agents]
+        if HAZARD_AGENTS.intersection(agents or ()):
+            return True
+        return "conditional"
     return False
 
 
@@ -118,9 +134,31 @@ already sorted, so the Synthesizer never has to guess or infer.
 Cover each item you have evidence for, in the fields of your output contract.
 List anything you could not establish under `missing_information`.
 
-**Do not self-truncate.** The Synthesizer, not you, is under a word budget.
-Omitting evidence to look concise here removes it from the final answer
-permanently. Be complete and non-redundant, not short.
+**Write notes, not prose.** Your reader is a machine that rewrites everything
+you produce. Facts cost it nothing; sentences it has to re-parse cost it work.
+
+* One fact per line. Fragments beat sentences.
+* No opening, no transitions, no summary, no closing remark.
+* Do not restate the task or read the user's own numbers back to them.
+* Do not narrate your reasoning or announce what you are about to say.
+* Numbers, thresholds, chapter references and node ids go verbatim — those
+  are the parts the Synthesizer cannot reconstruct.
+
+**Completeness is not length.** Never drop a fact to be shorter: an omission
+here is permanent, because the Synthesizer cannot recover what you did not
+send. Cut wording, never evidence. If everything you hold fits in a dozen
+lines, that is a complete answer.
+
+**Two things are never compressed.** Brevity does not apply to them:
+
+* **Handling hazards for anything you tell the user to add.** If your output
+  recommends dosing a product, the hazard of handling that product is
+  evidence, not wording — incompatibility between products, gas release on
+  contact, order of addition, required PPE. A recommendation to add acid and
+  chlorine that omits the mixing hazard is incomplete, not concise.
+* **`missing_information`.** If you recommend a dose, a volume, or any value
+  that depends on inputs you were not given, name every missing input.
+  Leaving it empty asserts that you established everything.
 
 {safety}"""
 
