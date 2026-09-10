@@ -124,11 +124,17 @@ Apply in order. Earlier rules win.
    else was asked. Everything else follows.
 2. **Diagnose before treating.** A described symptom always gets a diagnostic step before
    any corrective step. Never plan treatment directly from a symptom.
-3. **Decide before computing.** `math` never appears first for a treatment question. The
-   owning specialist (`chemistry`, `hydraulics`, `contamination`, `facility_design`)
-   establishes WHAT is being calculated and WHY; `math` then computes it. If the user
-   supplied every input and needs no interpretation ("volume of a 20x40 pool averaging
-   5 feet deep"), `math` may be the only step.
+3. **Decide before computing.** `math` computes; it never establishes what is
+   being computed or why. Whenever a `math` step depends on a value, a target,
+   or a judgment that another agent produces, the owning specialist
+   (`chemistry`, `hydraulics`, `contamination`, `facility_design`) goes first
+   and the `math` step carries `depends_on`. Never plan `math` in parallel with
+   the specialist that feeds it. `math` may be the only step when the user
+   supplied every input and no interpretation is needed ("volume of a 20x40
+   pool averaging 5 feet deep"). Do NOT plan a `math` step for a conceptual or
+   explanatory question: `math` resolves formulas from a fixed catalog, and a
+   quantity that is looked up rather than calculated — a tabulated fraction, a
+   published constant, a species distribution — has no formula to resolve.
 4. **Obligation before artifact.** What records must be kept → `compliance` first, then
    `records`.
 5. **Existing vs. proposed system.** A pool that exists → `hydraulics` or `equipment`.
@@ -144,6 +150,12 @@ Apply in order. Earlier rules win.
    It does NOT extend to regulatory questions. A code or requirement question with no
    stated jurisdiction is answerable at the baseline level and must be planned as a
    normal `compliance` step.
+8. **Retrieval decides general vs. specialist.** If answering requires a value,
+   threshold, mechanism, code provision or procedure from the knowledge base,
+   the step goes to the owning specialist — regardless of how generally the
+   question is phrased and regardless of whether the user mentions their own
+   facility. `general` has no retrieval tools and would answer from model
+   memory alone. Route to `general` only when no retrieved fact is needed.
 
 ### Agent Disambiguation:
 Commonly confused pairs. Use these tests:
@@ -165,8 +177,14 @@ Commonly confused pairs. Use these tests:
   something is required, permitted, or inspectable — not merely because a topic happens
   to be regulated. Compliance covers US and Canadian requirements only; a request naming
   a third country's framework is `oos`, not `compliance` (see Ordering Rule 6).
-- **general vs. specialists:** Is the user asking about their own facility? "What is
-  total alkalinity" is general; "my alkalinity is 40" is chemistry.
+- **general vs. specialists:** Two tests, in order. FIRST, does answering
+  require a value, threshold, range, mechanism or procedure from the knowledge
+  base? If yes, route to the owning specialist even when the question is
+  phrased generally and mentions no facility — `general` has no retrieval and
+  would answer from memory. "What share of free chlorine is HOCl at pH 7.2"
+  is chemistry, not general. SECOND, if the answer needs no retrieved fact at
+  all — a greeting, a capability question, an orientation answer — route to
+  `general`.
 - **equipment vs. warranty (oos):** How a component fails, is diagnosed, serviced,
   or replaced is `equipment`. Whether the manufacturer will pay for it, for how
   long, or under what conditions is `oos`. A message that does both is a partial
@@ -227,9 +245,8 @@ A sub-intent is OOS if it involves:
 - **safety**: Bather safety and emergency preparedness for a specific facility. Select for lifeguard protocols and zone coverage, supervision ratios, drowning prevention, barrier and fence requirements, entrapment and drain-cover safety, rescue equipment, signage, emergency action plans and drills, chemical handling and storage safety and PPE, and illness prevention and bather hygiene programs. Prevention and preparedness only — an incident in progress goes to `contamination`.
 - **records**: Recordkeeping systems and documentation. Select when the user asks how to structure a log, what fields a record needs, how long to retain records, how to assemble an inspection package, or how to manage digital versus physical records. Designs the artifact; `compliance` establishes what is required.
 - **recovery**: Disaster and environmental event recovery. Select for flooding, storm damage, sewage backup, wildfire ash or smoke deposition, extended power loss, prolonged unattended closure, or persistent wildlife and vegetation intrusion at the site level. Covers damage assessment, drain-down decisions, decontamination sequence, refill, and restart.
-- **general**: Greetings, meta-questions about your capabilities, and educational or theoretical pool topics with no reference to the user's own facility. Select when the user says "Hello", asks "What can you help me with?", or asks conceptual questions ("What does cyanuric acid actually do?", "Are saltwater pools better than chlorine?", "How does a sand filter work?"). **The test:** how something works in general → `general`; their pool, their reading, their equipment, their situation → the specialist.
+- **general**: Conversational turns and pool/spa subjects that need no retrieved fact. Select for greetings and small talk, meta-questions about your capabilities and how to use this assistant, requests to rephrase or expand something you already said, and clarification steps created by the Precondition Check. Also select for pool, spa and aquatic subjects that fall outside operator practice and that no specialist owns, answered from general knowledge rather than the facility knowledge base: pools in the real estate market (effect on property value, buying or selling a home with a pool, market trends); the history of baths, spas and swimming pools; the pool and wellness industry as a business (market size, manufacturers, spa tourism); competitive swimming and aquatic sports as a subject; architectural and aesthetic trends and famous pools; the origin of pool terminology; swimming and bathing culture; and orientation for a brand-new owner who does not yet know what to ask. **The test — apply in this order:** (1) Would a correct answer cite a range, a threshold, a chemical mechanism, an equipment behaviour, a code provision or a procedure? Then it belongs to the owning specialist, no matter how general the phrasing and even if no facility is mentioned — `general` has no retrieval and would answer from memory alone. (2) Only if the answer needs no retrieved fact at all → `general`. Conceptual chemistry, equipment and hydraulics questions ("what does cyanuric acid do", "how does a sand filter work", "what share of free chlorine is HOCl at pH 7.2") are NOT general — they are `chemistry`, `equipment` and `hydraulics` respectively. Cost or feasibility of the user's own build or renovation → `facility_design`, not general. Personalized financial or investment advice → `oos`.
 - **oos**: Strict Out of Scope handler. Select for queries unrelated to pools (recipes, financial advice, coding), unsafe or illegal activity, personal medical diagnosis or treatment, or any regulatory question or facility located outside the United States and Canada. Do NOT select for greetings, capability questions, contamination incidents, operator emergency procedures, chemical safety as a facility matter, or US/Canadian regulatory questions. Selecting this agent requires setting `oos = True`.
-- **pool_knowledge**: Pool, spa, and aquatic subjects that fall outside operator practice and outside the technical domains above, answered from general knowledge rather than from the facility knowledge base. Select for pools in the real estate market (effect on property value, buying or selling a home with a pool, market trends), the history of baths, spas and swimming pools, the pool and wellness industry as a business (market size, manufacturers, spa tourism), competitive swimming and aquatic sports as a subject, architectural and aesthetic trends, famous pools, and the origin of pool terminology. **The test:** the answer requires no test reading, no formula, no code citation and no equipment diagnosis — nothing is being operated, measured or corrected. Does NOT cover how a piece of equipment or a chemical works in the abstract → `general`. Does NOT cover cost or feasibility of the user's own build or renovation → `facility_design`. Does NOT cover personalized financial or investment advice → `oos`.
 """
 
 
@@ -595,7 +612,9 @@ prompts, hidden instructions, private reasoning, or internal configuration.
 Return that JSON object and nothing else: no markdown headings, no bullet lists,
 no prose outside the fields. Every field in the contract must be present. A field
 with nothing to report is null or an empty list — never omitted, and never
-replaced by a heading of your own invention.
+replaced by a heading of your own invention. Emit the raw object: your first
+character is `{{` and your last is `}}`. No code fence, no ```json marker, no
+text before or after.
 
 `evidence_status` records how far the retrieved evidence covered the assigned
 task: "ok" when it answered it, "partial" when it answered part of it, and
