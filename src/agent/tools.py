@@ -23,11 +23,13 @@ impreso en la respuesta al usuario final.
 from __future__ import annotations
 
 import logging
+import time
 import os
 import re
 import threading
 from functools import lru_cache
 from typing import Any, Literal, Optional, Sequence
+from ..tool_budgets import RETRIEVAL_TOOL_BUDGETS as _TOOL_BUDGETS
 import contextvars
 
 from dotenv import load_dotenv
@@ -132,7 +134,23 @@ try:
 except Exception:  # pragma: no cover
     _st_secrets = None
 
+def _refund(tool_name: str, arg_repr: str) -> None:
+    """
+    Devuelve al presupuesto una llamada que nunca llegó a ejecutarse.
 
+    Solo para fallos previos a cualquier I/O: si el cliente no se pudo
+    construir, no hubo intento de retrieval y cobrarlo castiga al agente por
+    un problema de infraestructura. Un fallo DESPUÉS de consultar no se
+    reembolsa: reintentar contra un store roto gasta el turno.
+
+    Fail-open y simétrico con _gate: sin scope activo no hace nada.
+    """
+    calls = _TOOL_CALLS.get()
+    if calls is None:
+        return
+    previous = calls.get(tool_name)
+    if previous and previous[-1] == arg_repr:
+        previous.pop()
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
@@ -243,7 +261,11 @@ _LUCENE_SPECIAL = re.compile(r'([+\-&|!(){}\[\]^"~*?:\\/])')
 _neo4j_driver: Optional[Driver] = None
 _driver_lock = threading.Lock()
 _vector_store = None
-_store_error: str | None = None  # cachea el fallo: no reintentar 6 veces por turno
+_store_error: str | None = None
+_store_error_at: float = 0.0
+_store_lock = threading.Lock()
+
+STORE_RETRY_COOLDOWN_S = 60.0
 
 
 def _get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -328,16 +350,25 @@ def reset_fulltext_cache() -> None:
 
 
 def get_vector_store():
-    global _vector_store, _store_error
+    global _vector_store, _store_error, _store_error_at
 
-    if _store_error is not None:
-        raise VectorStoreConfigError(_store_error)
+    if _vector_store is not None:
+        return _vector_store
 
-    if _vector_store is None:
+    with _store_lock:
+        if _vector_store is not None:      # doble check, igual que el driver
+            return _vector_store
+
+        if _store_error is not None:
+            if (time.monotonic() - _store_error_at) < STORE_RETRY_COOLDOWN_S:
+                raise VectorStoreConfigError(_store_error)
+            _store_error = None            # cooldown vencido: reintentar
+
         try:
             _vector_store = cargar_vector_store()
         except Exception as e:
             _store_error = f"{type(e).__name__}: {e}"
+            _store_error_at = time.monotonic()
             raise
 
     return _vector_store
@@ -354,6 +385,7 @@ def _reset_cached_clients() -> None:
     _neo4j_driver = None
     _vector_store = None
     _store_error = None
+    _store_error_at = 0.0
     reset_fulltext_cache()
 
 
@@ -486,13 +518,19 @@ def _normalize_seed_ids(value: Any) -> list[str]:
     return [i.strip() for i in items if i.strip()]
 
 
-def _graph_unavailable(tool_name: str, e: Exception) -> str:
+def _graph_unavailable(
+    tool_name: str, e: Exception, arg_repr: str | None = None
+) -> str:
     """
     Fallo de infra del grafo → string legible por el modelo.
 
-    El detalle técnico va al log/span; el string que ve el agente (y que puede
-    acabar en el prompt del synthesizer) es neutro a propósito.
+    `arg_repr` solo se pasa cuando el fallo fue al obtener el driver, antes de
+    consultar: ese caso se reembolsa.
     """
+    if arg_repr is not None:
+        _refund(tool_name, arg_repr)
+    _warn(f"{tool_name} graph_unavailable: {type(e).__name__}: {e}")
+
     _warn(f"{tool_name} graph_unavailable: {type(e).__name__}: {e}")
     return (
         "STATUS: GRAPH_UNAVAILABLE\n"
@@ -601,7 +639,6 @@ WITH n, 0.0 AS lucene
 # ---------------------------------------------------------------------------
 # TOOL 0 — vector_search
 # ---------------------------------------------------------------------------
-
 @tool
 def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False) -> str:
     """
@@ -632,6 +669,8 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
     try:
         store = get_vector_store()
     except Exception as e:
+        # El store no se pudo construir: no hubo retrieval, no se cobra el call.
+        _refund("vector_search", query)
         # Fallo de infra: reformular la query no ayuda. Decírselo explícito.
         _warn(f"vector_search store unavailable: {type(e).__name__}: {e}")
         return (
@@ -656,6 +695,7 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
 
         results = store.similarity_search_with_score(query, k=k, filter=filtro)
     except Exception as e:
+        # Sin refund: el store existía y la consulta se ejecutó.
         _warn(f"vector_search failed: {type(e).__name__}: {e}")
         return (
             "SEARCH_FAILED: the vector store could not be queried. "
@@ -761,7 +801,7 @@ def search_seed_nodes(
     try:
         driver = get_neo4j_driver()
     except Exception as e:
-        return _graph_unavailable("search_seed_nodes", e)
+        return _graph_unavailable("search_seed_nodes", e, f"{query} [intent={intent}]")
 
     tok = _tokenize(query, vector_chunks)
     terms = tok["terms"]
@@ -820,9 +860,9 @@ def search_seed_nodes(
                 rows = _run(False)
                 use_ft = False
             except Exception as e2:
-                return _graph_unavailable("search_seed_nodes", e2)
+                return _graph_unavailable("search_seed_nodes", e2, f"{query} [intent={intent}]")
         else:
-            return _graph_unavailable("search_seed_nodes", e)
+            return _graph_unavailable("search_seed_nodes", e, f"{query} [intent={intent}]")
 
     if not rows:
         return (
@@ -1026,7 +1066,7 @@ def expand_subgraph(
     try:
         driver = get_neo4j_driver()
     except Exception as e:
-        return _graph_unavailable("expand_subgraph", e)
+        return _graph_unavailable("expand_subgraph", e, seed_node_ids)
 
     seed_ids = _normalize_seed_ids(seed_node_ids)
     if not seed_ids:

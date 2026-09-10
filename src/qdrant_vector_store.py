@@ -12,10 +12,11 @@ tambien, por eso bge-small-en alcanza y no hace falta un modelo multilingue.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 import uuid
-
+from dotenv import load_dotenv
 import pandas as pd
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_core.documents import Document
@@ -29,6 +30,10 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+DATA_DIR = PROJECT_ROOT / "src" / "data"
+load_dotenv(PROJECT_ROOT / ".env")
+
 # ========================= CONFIG =========================
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 DATA_DIR = PROJECT_ROOT / "src" / "data"
@@ -39,6 +44,51 @@ DEFAULT_CSV_PATH = (
 )
 
 COLLECTION_NAME = "pool_manual_vectors"
+
+QDRANT_ENDPOINT = "QDRANT_ENDPOINT"
+QDRANT_API_KEY = "QDRANT_API_KEY"
+
+
+def _secret(key: str) -> str | None:
+    """Env var primero, Streamlit secrets después.
+
+    Mismo patrón que _get_secret en agent/tools.py: en Streamlit Cloud los
+    secrets NO son variables de entorno, así que os.getenv no los ve.
+    """
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        from streamlit import secrets
+        return secrets.get(key) or None
+    except Exception:
+        return None
+
+def _make_client() -> QdrantClient:
+    """Punto UNICO de construccion del cliente Qdrant.
+
+    Servidor si QDRANT_URL esta definido. El modo embedded queda solo como
+    fallback de desarrollo: toma un lock exclusivo de archivo y es
+    incompatible con Streamlit, que reejecuta y paraleliza.
+    """
+    url = _secret(QDRANT_ENDPOINT)
+    if url:
+        return QdrantClient(
+            url=url,
+            api_key=_secret(QDRANT_API_KEY),
+            timeout=30,
+        )
+
+    if not QDRANT_PATH.exists():
+        raise VectorStoreConfigError(
+            f"No existe la BD en {QDRANT_PATH} y {QDRANT_ENDPOINT} no esta "
+            "definido. Corre `python -m src.qdrant_vector_store` o apunta a "
+            "un servidor Qdrant."
+        )
+    return QdrantClient(path=str(QDRANT_PATH))
+
+
+
 
 DENSE_MODEL = "BAAI/bge-small-en-v1.5"
 DENSE_DIM = 384
@@ -262,45 +312,43 @@ def inicializar_vector_store(
 # ========================= CARGA (produccion) =========================
 def cargar_vector_store() -> QdrantVectorStore:
     """Carga sin recrear. Lo que debe usar el tool vector_search."""
-    if not QDRANT_PATH.exists():
-        raise VectorStoreConfigError(
-            f"No existe la BD en {QDRANT_PATH}. "
-            "Corre `python -m src.qdrant_vector_store` primero."
-        )
+    client = _make_client()
+    try:
+        if not client.collection_exists(COLLECTION_NAME):
+            raise VectorStoreConfigError(
+                f"Coleccion '{COLLECTION_NAME}' no existe."
+            )
 
-    client = QdrantClient(path=str(QDRANT_PATH))
+        cfg = client.get_collection(COLLECTION_NAME).config.params
+        vectors = cfg.vectors
 
-    if not client.collection_exists(COLLECTION_NAME):
-        raise VectorStoreConfigError(
-            f"Coleccion '{COLLECTION_NAME}' no existe en {QDRANT_PATH}."
-        )
+        if vectors is None or hasattr(vectors, "size"):
+            raise VectorStoreConfigError(
+                f"La coleccion tiene un vector denso SIN NOMBRE; se esperaba "
+                f"'{DENSE_VECTOR_NAME}'. Fue creada por otro pipeline: re-ingesta."
+            )
+        if DENSE_VECTOR_NAME not in vectors:
+            raise VectorStoreConfigError(
+                f"Vector '{DENSE_VECTOR_NAME}' ausente. Presentes: {list(vectors)}"
+            )
+        if vectors[DENSE_VECTOR_NAME].size != DENSE_DIM:
+            raise VectorStoreConfigError(
+                f"Dimension {vectors[DENSE_VECTOR_NAME].size} != {DENSE_DIM} "
+                f"esperada por {DENSE_MODEL}. Re-ingesta."
+            )
+        if SPARSE_VECTOR_NAME not in (cfg.sparse_vectors or {}):
+            raise VectorStoreConfigError(
+                f"Vector sparse '{SPARSE_VECTOR_NAME}' ausente; HYBRID no puede "
+                "funcionar. Re-ingesta."
+            )
 
-    # Validar que la coleccion en disco coincide con lo que el codigo espera.
-    # Sin esto, el desalineamiento se manifiesta como un error opaco en runtime.
-    cfg = client.get_collection(COLLECTION_NAME).config.params
-    vectors = cfg.vectors
-
-    if vectors is None or hasattr(vectors, "size"):
-        raise VectorStoreConfigError(
-            f"La coleccion tiene un vector denso SIN NOMBRE; se esperaba "
-            f"'{DENSE_VECTOR_NAME}'. Fue creada por otro pipeline: re-ingesta."
-        )
-    if DENSE_VECTOR_NAME not in vectors:
-        raise VectorStoreConfigError(
-            f"Vector '{DENSE_VECTOR_NAME}' ausente. Presentes: {list(vectors)}"
-        )
-    if vectors[DENSE_VECTOR_NAME].size != DENSE_DIM:
-        raise VectorStoreConfigError(
-            f"Dimension {vectors[DENSE_VECTOR_NAME].size} != {DENSE_DIM} "
-            f"esperada por {DENSE_MODEL}. Re-ingesta."
-        )
-    if SPARSE_VECTOR_NAME not in (cfg.sparse_vectors or {}):
-        raise VectorStoreConfigError(
-            f"Vector sparse '{SPARSE_VECTOR_NAME}' ausente; HYBRID no puede "
-            "funcionar. Re-ingesta."
-        )
-
-    return _build_store(client)
+        return _build_store(client)
+    except Exception:
+        try:
+            client.close()
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":

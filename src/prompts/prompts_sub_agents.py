@@ -69,6 +69,11 @@ BASE_OUTPUT_CONTRACT = (
     "escalation_target."
 )
 
+BASE_OUTPUT_CONTRACT = (
+    "Return a JSON object with: status, evidence_status, findings, evidence, "
+    "assumptions, missing_information, recommendations, escalation_required, "
+    "escalation_target."
+)
 
 def _contract(*extra_fields: str) -> str:
     """Extend the base contract with agent-specific fields."""

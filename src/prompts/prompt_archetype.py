@@ -17,6 +17,8 @@ Every literal that the validator enforces is imported, never retyped.
 
 from __future__ import annotations
 
+
+from ..tool_budgets import RETRIEVAL_TOOL_BUDGETS, RETRIEVAL_TOTAL
 from ..graph_context.response_contracts import get_contract, NO_CAP
 from ..graph_context.response_validator import (
     MAX_ACTIONS,
@@ -233,6 +235,32 @@ def build_synthesizer_archetype_section(archetype: str,
 # =====================================================================
 # Builder corregido
 # =====================================================================
+def _render_tool_budget(config) -> str:
+    """
+    Declara al agente el presupuesto REAL que _gate va a aplicar.
+
+    Para los agentes de retrieval el límite no es un pozo común: son caps por
+    tool. Anunciar un total intercambiable hace que el agente reintente la
+    misma tool creyendo que le queda saldo, y cada rechazo cuesta un round
+    trip de LLM sin devolver evidencia.
+    """
+    caps = {t: RETRIEVAL_TOOL_BUDGETS[t] for t in config.tools
+            if t in RETRIEVAL_TOOL_BUDGETS}
+
+    if not caps:
+        return (
+            f"Hard limit: **{config.tool_budget} tool calls** this turn. "
+            "Count every call to any authorized tool."
+        )
+
+    lineas = "\n".join(f"  {t:<20} {n}" for t, n in caps.items())
+    return (
+        f"Hard limit: **{sum(caps.values())} tool calls** this turn, allocated "
+        f"per tool. They are NOT interchangeable:\n\n{lineas}\n\n"
+        "Spending the vector_search call does not free a second "
+        "search_seed_nodes. A call beyond a tool's own cap is refused by the "
+        "system and returns nothing — it does not fail over to another tool."
+    )
 
 def build_agent_prompt(config, agent_key: str | None = None) -> str:
     """
@@ -253,5 +281,5 @@ def build_agent_prompt(config, agent_key: str | None = None) -> str:
         archetype_section=build_subagent_archetype_section(
             config.archetype, agent_key
         ),
-        tool_budget=config.tool_budget
+        tool_budget_block=_render_tool_budget(config),
     )
