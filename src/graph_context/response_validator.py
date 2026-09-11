@@ -88,21 +88,47 @@ class ValidationReport:
 # Lecturas obligatorias en el tier visible
 # --------------------------------------------------------------------------
 
-#: Cómo se nombra cada estado cuando hay que añadirlo a mano. Texto mínimo y
-#: factual: sale de los datos del especialista, no interpreta nada.
-_STATUS_PHRASE = {
-    "es": {
-        "below_minimum": "por debajo del mínimo",
-        "above_maximum": "por encima del máximo",
-        "at_ceiling": "en el límite máximo, sin margen",
-        "at_floor": "en el mínimo, sin margen",
-    },
+#: El fraseo de cada estado, por plantilla. NO lo redacta el modelo.
+#:
+#: Cuatro rondas de evaluación sobre la misma consulta mostraron que como
+#: instrucción de prompt no se sostiene. Los fallos observados, todos sobre
+#: datos que el especialista había clasificado bien:
+#:   - "extremely high" sobre un at_ceiling (intensificación)
+#:   - un in_range convertido en "above the maximum" (recalificación)
+#:   - "above the 120 ppm operating ceiling" sobre una entrada sin límite
+#:     (un objetivo operativo presentado como techo normativo)
+#: Los tres llegan igual de lejos: un operador que los repite ante un
+#: inspector reporta un incumplimiento que no existe.
+#:
+#: `{limit}` se rellena con `regulatory_limit`. Las plantillas que lo usan
+#: solo se eligen cuando ese campo tiene valor: un estado de violación sin
+#: límite que lo respalde se degrada antes de llegar aquí (coherent_status).
+_STATUS_PHRASING = {
     "en": {
-        "below_minimum": "below the minimum",
-        "above_maximum": "above the maximum",
-        "at_ceiling": "at its ceiling, no headroom",
-        "at_floor": "at its floor, no headroom",
+        "below_minimum": "in violation, below the {limit} minimum",
+        "at_floor":      "compliant, no margin at the floor",
+        "in_range":      "in range",
+        "at_ceiling":    "compliant, no margin at the ceiling",
+        "above_maximum": "in violation, above the {limit} cap",
     },
+    "es": {
+        "below_minimum": "en infracción, por debajo del mínimo de {limit}",
+        "at_floor":      "cumple, sin margen sobre el mínimo",
+        "in_range":      "en rango",
+        "at_ceiling":    "cumple, sin margen bajo el máximo",
+        "above_maximum": "en infracción, por encima del máximo de {limit}",
+    },
+}
+
+#: Para una lectura cuyo estado no se sostiene: se informa el valor y, si lo
+#: hay, el objetivo, sin lenguaje de cumplimiento en ninguna dirección.
+_SIN_VEREDICTO = {
+    "en": "reported; no code bound available",
+    "es": "reportado; sin límite normativo disponible",
+}
+_CON_OBJETIVO = {
+    "en": "reported; operating target {target}",
+    "es": "reportado; objetivo operativo {target}",
 }
 
 
@@ -136,19 +162,35 @@ def unsupported_numbers(payload, raw_content: str) -> list[str]:
     if not raw_content:
         return []
 
-    numeros_origen = set(_NUMERO_RE.findall(raw_content))
+    def _canon(x: str) -> str:
+        """3.0 y 3 son el mismo número; 90 y 9 no.
+
+        `rstrip("0")` a secas convertía "90" en "9", así que un 90 del panel
+        no casaba con el 90.0 del origen y se denunciaba como inventado. Solo
+        se recortan ceros cuando hay parte decimal que recortar.
+        """
+        x = x.replace(",", ".")
+        return x.rstrip("0").rstrip(".") if "." in x else x
+
+    numeros_origen = {_canon(o) for o in _NUMERO_RE.findall(raw_content)}
+
+    # Solo `answer`, `actions` y `safety`: lo que el MODELO escribe. El campo
+    # `readings` lo construye este módulo desde el propio payload del
+    # especialista, así que sus cifras vienen del origen por definición y
+    # contarlas solo produciría ruido.
+    escrito_por_el_modelo = " ".join([
+        getattr(payload, "answer", "") or "",
+        getattr(payload, "safety", "") or "",
+        *(getattr(payload, "actions", None) or []),
+    ])
+
     # "thirty to forty percent" no lleva dígitos: los números en palabras se
     # escapan de este chequeo, y es una limitación consciente. Cubre el caso
     # frecuente (cifras) sin arriesgar falsos positivos con un parser de
     # numerales en dos idiomas.
     sospechosos = []
-    for n in _NUMERO_RE.findall(_visible_text(payload)):
-        if n in _TRIVIALES or n in numeros_origen:
-            continue
-        # Tolerancia de formato: 3 frente a 3.0, 0,5 frente a 0.5.
-        normalizado = n.replace(",", ".").rstrip("0").rstrip(".")
-        if any(normalizado == o.replace(",", ".").rstrip("0").rstrip(".")
-               for o in numeros_origen):
+    for n in _NUMERO_RE.findall(escrito_por_el_modelo):
+        if n in _TRIVIALES or _canon(n) in numeros_origen:
             continue
         sospechosos.append(n)
 
@@ -292,56 +334,134 @@ def required_readings(test_interpretation) -> list[dict]:
     ]
 
 
-def enforce_visible_readings(payload, readings: list[dict], language: str,
-                             report: ValidationReport) -> None:
+def _format_number(valor) -> str:
     """
-    Garantiza que toda lectura fuera de rango aparezca donde el usuario lee.
+    Sin ceros de relleno: 2.0 -> '2', 7.8 -> '7.8'.
 
-    El contrato de `assessment` ya lo exige en palabras — "una lectura que el
-    usuario reportó y la respuesta no menciona se lee como una lectura que te
-    pareció aceptable" — y aun así, medido sobre tres turnos, el modelo dejó
-    fuera del tier visible un pH en above_maximum (violación de código) usando
-    80 palabras de un presupuesto de 900. No fue falta de sitio: relocalizó
-    teniendo 820 palabras libres.
-
-    Por eso esto no pide nada: comprueba, y si falta, lo añade. El texto
-    añadido es deliberadamente escueto y factual — parámetro, valor y estado —
-    porque no puede inventar lo que el especialista no dijo.
+    Una cadena se devuelve intacta: si el especialista escribió "0.8 ppm", esa
+    unidad es suya y vale más que el número pelado.
     """
-    faltantes = [r for r in readings if not _reading_is_visible(r, _visible_text(payload))]
-    if not faltantes:
-        return
+    if isinstance(valor, str):
+        return valor.strip()
+    if isinstance(valor, float) and valor.is_integer():
+        return str(int(valor))
+    return f"{valor}"
 
-    report.readings_missing = [str(r.get("parameter", "?")) for r in faltantes]
 
-    # Van al campo `readings`, que renderiza como lista. Antes se concatenaban
-    # al final del `answer` con puntos y comas: resolvía la cobertura por
-    # acumulación en vez de por redacción, y en un móvil se leía como JSON
-    # traducido. El contrato pide una a tres oraciones de prosa, y siete
-    # parámetros no caben ahí por mucho que se doblen.
-    linea_cls = _infer_reading_cls(payload)
-    if linea_cls is None:
-        return
+#: Parámetros cuya grafía no sobrevive a un .title(). "ph" -> "Ph" es un
+#: nombre que ningún operador escribe.
+_GRAFIA = {
+    "ph": "pH", "orp": "ORP", "tds": "TDS", "cya": "CYA", "lsi": "LSI",
+    "fc": "FC", "cc": "CC", "ta": "TA", "ch": "CH", "ppm": "ppm",
+}
 
-    frases = _STATUS_PHRASE.get(language, _STATUS_PHRASE["es"])
-    nuevas = []
-    for r in faltantes:
-        nombre = str(r.get("parameter", "")).replace("_", " ").strip()
+
+def _format_parameter(nombre: str) -> str:
+    limpio = nombre.replace("_", " ").strip()
+    if not limpio:
+        return limpio
+    if limpio.lower() in _GRAFIA:
+        return _GRAFIA[limpio.lower()]
+    if not limpio.islower():
+        # Ya viene con mayúsculas: el especialista eligió su grafía.
+        return limpio
+    return " ".join(_GRAFIA.get(w, w.capitalize()) for w in limpio.split())
+
+
+def reading_note(reading: dict, language: str) -> str:
+    """
+    La nota de una lectura, armada por plantilla desde sus propios campos.
+
+    El modelo no interviene: elige la frase el `status`, y el número que la
+    acompaña sale de `regulatory_limit`, nunca de `operating_target`. Mezclar
+    los dos fue el último fallo observado — "above the 120 ppm operating
+    ceiling" presenta un objetivo de industria como si fuera un techo de
+    código.
+    """
+    idioma = _STATUS_PHRASING.get(language, _STATUS_PHRASING["es"])
+    status = coherent_status(reading)
+    limite = reading.get("regulatory_limit")
+
+    if status is None or status not in idioma:
+        objetivo = reading.get("operating_target")
+        if objetivo is not None:
+            return _CON_OBJETIVO.get(language, _CON_OBJETIVO["es"]).format(
+                target=_format_number(objetivo))
+        return _SIN_VEREDICTO.get(language, _SIN_VEREDICTO["es"])
+
+    plantilla = idioma[status]
+    if "{limit}" in plantilla:
+        if limite is None:
+            # No debería ocurrir — coherent_status ya degrada esos casos —
+            # pero una plantilla con un hueco sin rellenar es peor que una
+            # frase sin cifra.
+            return _SIN_VEREDICTO.get(language, _SIN_VEREDICTO["es"])
+        return plantilla.format(limit=_format_number(limite))
+    return plantilla
+
+
+def build_readings(test_interpretation: list[dict], language: str, linea_cls):
+    """
+    Todas las líneas del panel, construidas desde los datos del especialista.
+
+    SUSTITUYE lo que el synthesizer haya escrito en `readings`; no lo
+    completa. La versión anterior solo añadía lo que faltaba, y por eso una
+    línea mal redactada por el modelo pasaba intacta mientras las ausentes se
+    corregían — la mitad del problema arreglada y la otra mitad no.
+
+    Se incluyen TODOS los parámetros reportados, también los que están en
+    rango: el operador entregó siete lecturas y ver las siete es la
+    confirmación de que se leyeron todas. Omitir las correctas obliga a
+    deducir por ausencia.
+    """
+    lineas = []
+    for r in test_interpretation or []:
+        if not isinstance(r, dict):
+            continue
+        nombre = _format_parameter(str(r.get("parameter", "")))
         medido = r.get("measured")
         if not nombre or medido is None:
             continue
-        nuevas.append(linea_cls(
+        lineas.append(linea_cls(
             parameter=nombre,
-            measured=f"{medido}",
-            note=frases.get(str(r.get("status")), ""),
+            measured=_format_number(medido),
+            note=reading_note(r, language),
         ))
+    return lineas
 
-    if not nuevas:
+
+def enforce_visible_readings(payload, readings: list[dict], language: str,
+                             report: ValidationReport) -> None:
+    """
+    Sustituye `readings` por las líneas construidas desde los datos.
+
+    No comprueba lo que escribió el modelo ni completa lo que falta: lo
+    reemplaza. Cuatro rondas de evaluación sobre la misma consulta mostraron
+    que el fraseo por estado no se sostiene como instrucción de prompt, y la
+    versión que solo completaba dejaba pasar intacta una línea mal redactada
+    mientras corregía las ausentes — media solución.
+
+    Lo que el modelo sigue escribiendo es la prosa de arriba: el veredicto, el
+    razonamiento, la causa. El panel de cifras se arma acá.
+    """
+    linea_cls = _infer_reading_cls(payload)
+    if linea_cls is None or not readings:
         return
 
-    payload.readings = list(getattr(payload, "readings", None) or []) + nuevas
+    previas = {
+        (getattr(r, "parameter", ""), getattr(r, "note", ""))
+        for r in (getattr(payload, "readings", None) or [])
+    }
+    payload.readings = build_readings(readings, language, linea_cls)
+
+    ahora = {(r.parameter, r.note) for r in payload.readings}
     report.readings_appended = True
-    report.notes.append(f"lecturas añadidas al tier visible: {report.readings_missing}")
+    # Telemetría: qué líneas no coincidían con lo que el modelo había puesto.
+    # Si esto viene lleno turno tras turno, el prompt sigue sin conseguirlo y
+    # el enforcement lo está tapando.
+    report.readings_missing = sorted(
+        {p for p, _ in ahora - previas}
+    ) if previas else [r.parameter for r in payload.readings]
 
 
 def _infer_reading_cls(payload):

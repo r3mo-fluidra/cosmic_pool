@@ -48,11 +48,7 @@ from ..graph_context.response_contracts import (
     SynthesizerOutput, get_contract, resolve_archetype,
     usable_results, DetailSection, agents_from_results
 )
-from ..graph_context.response_validator import (
-    enforce_contract,
-    fallback_payload,
-    required_readings,
-)
+from ..graph_context.response_validator import enforce_contract, fallback_payload
 from ..prompts.prompt_archetype import build_synthesizer_archetype_section
 from ..graph_context.suggestions import (
     SUPERNODES,
@@ -1677,18 +1673,65 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     # FASE 2 — enforcement (siempre, venga el payload de donde venga)
     # ============================================================
-    try:
-        payload, report = enforce_contract(
-            payload, contract, agents, detail_cls=DetailSection,
-            # Las lecturas fuera de rango no son negociables con el modelo:
-            # el validador comprueba que estén en el tier visible y, si no,
-            # las añade. Ver enforce_visible_readings.
-            readings=required_readings(_readings_from_results(agent_results)),
+    def _aplicar_contrato(p):
+        return enforce_contract(
+            p, contract, agents, detail_cls=DetailSection,
+            # El panel COMPLETO, también los parámetros en rango: el operador
+            # entregó siete lecturas y ver las siete confirma que se leyeron
+            # todas. El fraseo de cada una lo arma el validador por plantilla
+            # elegida por su `status` — el modelo no lo redacta.
+            readings=_readings_from_results(agent_results),
             language=language_code,
             # Para detectar cantidades que el synthesizer no pudo haber sacado
             # de ningún sitio. Ver unsupported_numbers.
             raw_content=raw_content,
         )
+
+    try:
+        payload, report = _aplicar_contrato(payload)
+
+        # El único reintento del nodo, y hasta ahora no existía: el docstring
+        # de enforce_contract prometía que "el caller puede reintentar UNA vez
+        # con instrucción correctiva" y nadie consultaba `needs_retry`.
+        #
+        # Cubre lo que el validador no puede arreglar solo. `safety` es el
+        # caso real: el contrato la exige cuando hay un agente de riesgo, el
+        # modelo la omitió, y no hay forma honesta de inventarla — una línea
+        # de seguridad genérica es ruido, y una específica sería contenido que
+        # los especialistas no dieron.
+        if report.needs_retry:
+            faltan = []
+            if report.safety_missing:
+                faltan.append(
+                    "the `safety` line: this turn involves chemical handling and "
+                    "the contract requires one. Give the hazard the operator "
+                    "cannot work out alone, not a generic precaution, and not a "
+                    "restatement of an action already listed."
+                )
+            if report.answer_exceeds_budget:
+                faltan.append(
+                    "`answer` is over the visible word budget: tighten it, and "
+                    "move the surplus into `details` rather than deleting it."
+                )
+            logger.info("synthesizer: reintento por contrato (%s)", faltan)
+            try:
+                reintento = _get_synthesis_llm().with_structured_output(
+                    SynthesizerOutput
+                ).invoke(llm_messages + [
+                    HumanMessage(content=(
+                        "Your previous response did not satisfy the contract. "
+                        "Fix exactly this, changing nothing else:\n- "
+                        + "\n- ".join(faltan)
+                    ))
+                ])
+                payload, report = _aplicar_contrato(reintento)
+                report.notes.append("regenerado por incumplimiento de contrato")
+            except Exception as exc:
+                # El primer payload sigue siendo válido salvo por lo que
+                # faltaba: es mejor que nada y mejor que un texto estático.
+                logger.warning("synthesizer: el reintento falló (%s)", exc)
+                report.notes.append(f"reintento fallido: {exc}")
+
         validation = {**validation, **report.to_dict()}
     except Exception as exc:
         # Un bug del validador no debe costar otra llamada al modelo.

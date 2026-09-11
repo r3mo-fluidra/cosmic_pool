@@ -72,86 +72,100 @@ class TestQueLecturasSonObligatorias:
         assert required_readings("{}") == []
 
 
-class TestDeteccionDeOmisiones:
-    def test_nombrar_en_una_accion_no_cuenta_como_reportar(self):
-        """El caso del trace: 'baja el pH' sin decir que marcó 7.9."""
-        from src.graph_context.response_validator import ValidationReport
-        p = _payload("Tu cloro libre 0.8 está bajo el mínimo.",
-                     ["Añade ácido para bajar el pH"])
-        rep = ValidationReport()
-        enforce_visible_readings(p, [_lectura("pH", 7.9, "above_maximum")], "es", rep)
-        assert rep.readings_missing == ["pH"]
+class TestFraseoDeterminista:
+    """
+    El fraseo de cada lectura sale de una plantilla elegida por su `status`.
+    El modelo no lo redacta.
 
-    def test_con_nombre_y_valor_si_cuenta(self):
-        from src.graph_context.response_validator import ValidationReport
-        p = _payload("El pH 7.9 supera el máximo permitido.")
-        rep = ValidationReport()
-        enforce_visible_readings(p, [_lectura("pH", 7.9, "above_maximum")], "es", rep)
-        assert rep.readings_missing == []
-        assert rep.readings_appended is False
+    Cuatro rondas de evaluación sobre la misma consulta mostraron que como
+    instrucción de prompt no se sostiene. Los tres fallos, todos sobre datos
+    que el especialista había clasificado bien:
+      - "extremely high" sobre un at_ceiling
+      - un in_range convertido en "above the maximum"
+      - "above the 120 ppm operating ceiling" sobre una entrada sin límite
+    """
 
+    def _nota(self, lectura, idioma="en"):
+        from src.graph_context.response_validator import reading_note
+        return reading_note(lectura, idioma)
 
-class TestPromocionAlTierVisible:
-    def test_añade_las_omitidas_con_valor_y_estado(self):
-        from src.graph_context.response_validator import ValidationReport
-        p = _payload("El cloro libre 0.8 está por debajo del mínimo de 2.0.")
-        rep = ValidationReport()
-        enforce_visible_readings(p, required_readings(PANEL), "es", rep)
+    def test_below_minimum_cita_el_limite(self):
+        assert self._nota(_lectura("FC", 0.8, "below_minimum", 3.0, 2.0)) == \
+            "in violation, below the 2 minimum"
 
-        assert rep.readings_appended is True
-        # Van al campo `readings` (lista), no concatenadas al `answer`: el
-        # volcado con puntos y comas se leía como JSON traducido en un móvil.
-        nombres = {r.parameter for r in p.readings}
-        assert nombres == {"pH", "Cyanuric Acid", "Combined Chlorine"}
-        assert {r.measured for r in p.readings} == {"7.9", "90", "0.4"}
+    def test_above_maximum_cita_el_limite(self):
+        assert self._nota(_lectura("pH", 7.9, "above_maximum", 7.5, 7.8)) == \
+            "in violation, above the 7.8 cap"
 
-    def test_el_texto_añadido_dice_el_estado(self):
-        from src.graph_context.response_validator import ValidationReport
-        p = _payload("Cloro libre 0.8 bajo mínimo.")
-        rep = ValidationReport()
-        enforce_visible_readings(p, [_lectura("pH", 7.9, "above_maximum")], "es", rep)
-        assert p.readings[0].note == "por encima del máximo"
+    def test_at_ceiling_es_cumplimiento(self):
+        nota = self._nota(_lectura("CYA", 90, "at_ceiling", 40.0, 90.0))
+        assert nota == "compliant, no margin at the ceiling"
+        assert "violation" not in nota
 
-    def test_at_ceiling_se_describe_como_sin_margen_no_como_violacion(self):
+    def test_at_floor_es_cumplimiento(self):
+        assert "compliant" in self._nota(_lectura("FC", 2.0, "at_floor", 3.0, 2.0))
+
+    def test_in_range_no_dramatiza(self):
+        assert self._nota(_lectura("CH", 380, "in_range", 300.0, 1000.0)) == "in range"
+
+    def test_el_limite_nunca_sale_del_objetivo_operativo(self):
         """
-        El error de las cuatro evaluaciones: un techo exacto descrito como
-        infracción. El texto que añade el validador nunca puede cometerlo.
+        El último fallo: "above the 120 ppm operating ceiling" presentaba un
+        objetivo de industria como techo de código. La plantilla solo se
+        rellena con regulatory_limit.
         """
-        from src.graph_context.response_validator import ValidationReport
-        p = _payload("Cloro libre bajo.")
-        rep = ValidationReport()
-        enforce_visible_readings(p, [_lectura("Cyanuric Acid", 90, "at_ceiling")], "es", rep)
-        nota = p.readings[0].note
-        assert "sin margen" in nota
-        for prohibido in ["excede", "viola", "infracción", "por encima del máximo"]:
-            assert prohibido not in nota.lower()
+        nota = self._nota(_lectura("TA", 130, "above_maximum", 100.0, 180.0))
+        assert "180" in nota and "100" not in nota
 
-    def test_respeta_el_idioma(self):
-        from src.graph_context.response_validator import ValidationReport
-        p = _payload("Free chlorine is low.")
-        rep = ValidationReport()
-        enforce_visible_readings(p, [_lectura("pH", 7.9, "above_maximum")], "en", rep)
-        assert p.readings[0].note == "above the maximum"
+    def test_un_status_sin_limite_no_afirma_infraccion(self):
+        # coherent_status lo degrada; la nota informa sin veredicto.
+        nota = self._nota(_lectura("TA", 130, "above_maximum", 100.0))
+        assert "violation" not in nota
+        assert "100" in nota
 
-    def test_una_lectura_ya_puesta_en_readings_no_se_duplica(self):
-        """`readings` también es tier 1: si el synthesizer la puso, ya está."""
+    def test_sin_limite_ni_objetivo_lo_dice(self):
+        nota = self._nota(_lectura("Temp", 82, "above_maximum"))
+        assert nota == "reported; no code bound available"
+
+    def test_los_enteros_no_arrastran_ceros(self):
+        assert "2 minimum" in self._nota(_lectura("FC", 0.8, "below_minimum", 3.0, 2.0))
+
+    def test_en_espanol(self):
+        nota = self._nota(_lectura("pH", 7.9, "above_maximum", 7.5, 7.8), "es")
+        assert nota == "en infracción, por encima del máximo de 7.8"
+
+
+class TestElPanelSeConstruyeEntero:
+    def _construir(self, panel, idioma="en"):
         from src.graph_context.response_contracts import ReadingLine
-        from src.graph_context.response_validator import ValidationReport
-        p = _payload("Cloro libre bajo.")
-        p.readings = [ReadingLine(parameter="pH", measured="7.9", note="sobre el máximo")]
-        rep = ValidationReport()
-        enforce_visible_readings(p, [_lectura("pH", 7.9, "above_maximum")], "es", rep)
-        assert len(p.readings) == 1
-        assert rep.readings_appended is False
+        from src.graph_context.response_validator import build_readings
+        return build_readings(panel, idioma, ReadingLine)
 
-    def test_no_toca_nada_si_estan_todas(self):
-        from src.graph_context.response_validator import ValidationReport
-        p = _payload("Free chlorine 0.8, combined chlorine 0.4, pH 7.9, cyanuric acid 90.")
-        antes = p.answer
+    def test_incluye_todos_los_parametros_tambien_los_en_rango(self):
+        """
+        El operador entregó siete lecturas: ver las siete confirma que se
+        leyeron todas. Omitir las correctas obliga a deducir por ausencia.
+        """
+        assert len(self._construir(PANEL)) == len(PANEL)
+
+    def test_reemplaza_lo_que_escribio_el_modelo(self):
+        from src.graph_context.response_contracts import ReadingLine
+        from src.graph_context.response_validator import ValidationReport, enforce_visible_readings
+        p = _payload("Cierra la pileta.")
+        p.readings = [ReadingLine(parameter="pH", measured="7.9",
+                                  note="extremely high, way over the limit")]
         rep = ValidationReport()
-        enforce_visible_readings(p, required_readings(PANEL), "en", rep)
-        assert p.answer == antes
-        assert rep.readings_appended is False
+        enforce_visible_readings(p, PANEL, "en", rep)
+        notas = {r.note for r in p.readings}
+        assert "extremely high, way over the limit" not in notas
+        assert "in violation, above the 7.8 cap" in notas
+
+    def test_ignora_entradas_sin_valor(self):
+        assert self._construir([{"parameter": "pH", "status": "in_range"}]) == []
+
+    def test_normaliza_el_nombre(self):
+        lineas = self._construir([_lectura("free_chlorine", 0.8, "below_minimum", 3.0, 2.0)])
+        assert lineas[0].parameter == "Free Chlorine"
 
 
 class TestIntegracionConElContrato:
@@ -400,3 +414,100 @@ class TestVozEnSegundaPersona:
     def test_vacio_es_mejor_que_duplicado(self, P):
         assert "An empty\n  field is better than a duplicate one" in P or \
                "An empty field is better than a duplicate one" in P
+
+
+class TestGrafiaYUnidades:
+    def _linea(self, lectura):
+        from src.graph_context.response_contracts import ReadingLine
+        from src.graph_context.response_validator import build_readings
+        return build_readings([lectura], "en", ReadingLine)[0]
+
+    def test_ph_no_se_convierte_en_ph_capitalizado(self):
+        # .title() producía "Ph", que ningún operador escribe.
+        assert self._linea(_lectura("ph", 7.9, "in_range")).parameter == "pH"
+
+    def test_las_siglas_se_respetan(self):
+        for sigla, esperado in [("cya", "CYA"), ("orp", "ORP"), ("tds", "TDS")]:
+            assert self._linea(_lectura(sigla, 1, "in_range")).parameter == esperado
+
+    def test_los_guiones_bajos_se_deshacen(self):
+        assert self._linea(
+            _lectura("free_chlorine", 0.8, "in_range")).parameter == "Free Chlorine"
+
+    def test_una_grafia_ya_elegida_se_respeta(self):
+        assert self._linea(
+            _lectura("Combined Chlorine", 0.4, "in_range")).parameter == "Combined Chlorine"
+
+    def test_conserva_la_unidad_si_el_especialista_la_dio(self):
+        # "0.8 ppm" vale más que el número pelado.
+        assert self._linea(_lectura("fc", "0.8 ppm", "in_range")).measured == "0.8 ppm"
+
+    def test_los_enteros_no_arrastran_el_cero(self):
+        assert self._linea(_lectura("cya", 90.0, "in_range")).measured == "90"
+
+
+class TestReintentoPorContrato:
+    """
+    `needs_retry` existía desde el principio y NADIE lo consultaba: el
+    docstring de enforce_contract prometía que "el caller puede reintentar UNA
+    vez con instrucción correctiva" y el synthesizer nunca lo miraba.
+
+    El caso real es `safety`: el contrato la exige cuando hay un agente de
+    riesgo, el modelo la omitió, y el validador no puede inventarla — una
+    línea genérica es ruido y una específica sería contenido que los
+    especialistas no dieron.
+    """
+
+    def test_safety_ausente_pide_reintento(self):
+        p = _payload("Cierra la pileta.", ["Cerrar a los bañistas"])
+        _, rep = enforce_contract(p, get_contract("assessment"), ["chemistry"],
+                                  detail_cls=DetailSection)
+        assert rep.safety_missing is True
+        assert rep.needs_retry is True
+
+    def test_con_safety_no_hay_reintento(self):
+        p = _payload("Cierra la pileta.", ["Cerrar a los bañistas"])
+        p.safety = "No mezcles ácido con hipoclorito."
+        _, rep = enforce_contract(p, get_contract("assessment"), ["chemistry"],
+                                  detail_cls=DetailSection)
+        assert rep.needs_retry is False
+
+    def test_un_agente_sin_riesgo_no_exige_safety(self):
+        p = _payload("Los registros se guardan cinco años.")
+        _, rep = enforce_contract(p, get_contract("assessment"), ["records"],
+                                  detail_cls=DetailSection)
+        assert rep.needs_retry is False
+
+    def test_el_synthesizer_consulta_needs_retry(self):
+        import inspect
+        from src.agent import nodes
+        src = inspect.getsource(nodes.synthesizer)
+        assert "report.needs_retry" in src, "el reintento seguía sin conectarse"
+        assert "safety_missing" in src
+
+
+class TestCanonicalizacionDeNumeros:
+    def _sin_respaldo(self, visible, origen):
+        from src.graph_context.response_validator import unsupported_numbers
+        return unsupported_numbers(_payload(visible), origen)
+
+    def test_un_entero_no_pierde_su_cero_final(self):
+        """`"90".rstrip("0")` daba "9", así que un 90 no casaba con 90.0."""
+        assert self._sin_respaldo("El cianúrico está en 90.", "cyanuric 90.0 ppm") == []
+
+    def test_decimal_contra_entero(self):
+        assert self._sin_respaldo("Apunta a 3 ppm.", '"operating_target": 3.0') == []
+
+    def test_entero_contra_decimal(self):
+        assert self._sin_respaldo("Mínimo 2.0 ppm.", "minimum is 2 ppm") == []
+
+    def test_sigue_detectando_lo_inventado(self):
+        assert "37.5" in self._sin_respaldo("Drena el 37.5%.", "cyanuric 90 ppm")
+
+    def test_las_readings_no_cuentan_como_inventadas(self):
+        """Las construye este módulo desde el payload: su origen es el dato."""
+        from src.graph_context.response_contracts import ReadingLine
+        from src.graph_context.response_validator import unsupported_numbers
+        p = _payload("Cierra la pileta.")
+        p.readings = [ReadingLine(parameter="CYA", measured="417", note="en rango")]
+        assert unsupported_numbers(p, "sin cifras relevantes") == []

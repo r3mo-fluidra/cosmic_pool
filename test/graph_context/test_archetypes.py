@@ -224,17 +224,22 @@ class TestElSynthesizerHonraLosStatus:
         from src.prompts.prompts import SYNTHESIZER_PROMPT
         return SYNTHESIZER_PROMPT
 
-    def test_declara_los_cinco_estados(self, P):
-        for e in ["below_minimum", "at_floor", "in_range", "at_ceiling", "above_maximum"]:
-            assert e in P
+    def test_el_panel_no_lo_escribe_el_modelo(self, P):
+        """
+        Cuatro rondas mostraron que el fraseo por estado no se sostiene como
+        instrucción. Ahora se genera por plantilla y al modelo se le dice que
+        no lo escriba, en vez de pedirle que lo escriba bien.
+        """
+        assert "The panel is generated, not written" in P
+        assert "leave it empty. Always" in P
 
-    def test_at_ceiling_y_at_floor_son_cumplimiento(self, P):
-        assert "`at_floor` and `at_ceiling` are PASSES" in P
+    def test_at_ceiling_sigue_siendo_cumplimiento(self, P):
+        assert "compliant-with-no-margin" in P
 
-    def test_prohibe_intensificar_por_encima_del_status(self, P):
+    def test_prohibe_intensificar_en_la_prosa(self, P):
         # El caso literal del trace: "high" -> "extremely high".
-        assert "Never intensify past the status" in P
-        assert 'you do not\nwrite "extremely high"' in P
+        assert 'no "extremely high"' in P
+        assert "misstates the facility's regulatory position" in P
 
     def test_exige_atribuir_el_cierre_a_su_causa(self, P):
         assert "Attribute a closure to the reading that causes it" in P
