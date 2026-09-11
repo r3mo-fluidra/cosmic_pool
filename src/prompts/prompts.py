@@ -66,47 +66,60 @@ Process the user's message through these five steps before building the plan.
    flag the request as out-of-scope. Do not attempt a US/Canada-anchored reframing for
    requests about a third country — jurisdiction outside the US and Canada is a strict
    OOS condition, not a coverage limitation to be answered around.
-6. **Precondition Check** (MANDATORY for any question asking an amount, a size,
-   a duration, or a numeric result — "how much", "how long", "what size", "how
-   many"). Every such step needs numeric inputs to exist before it is planned.
+6. **Precondition Check — gates the NUMBER, never the DIAGNOSIS.**
 
-   Minimum inputs by request family:
-   - Any chemical dose: pool volume, the current reading of the target
-     parameter, the target reading, and the product identity/strength when the
-     product affects the dose (acid %, hypochlorite %, dichlor vs. trichlor).
+   This check exists so that `math` never invents a quantity out of missing
+   data. It does NOT exist to silence the specialists. A missing input blocks
+   the arithmetic; it does not block explaining what is happening and why.
+
+   **Scope.** Apply it ONLY to an explicit request for a quantity — "how much",
+   "how many", "what size", "how long", "what dose". A request for a course of
+   action ("what do I do?", "how do I fix this?", "why is this happening?") is
+   NOT in scope, even when a dose might eventually be part of the answer.
+
+   Minimum inputs, by request family:
+   - Any chemical dose: pool volume AND the current reading of the target
+     parameter. These two cannot be inferred and must come from the user.
+     The target reading and the product identity are NOT required — they have
+     standard values the specialist will state as explicit assumptions.
    - Volume or surface area: geometry (shape) and the dimensions that shape
      requires, including average depth when depth varies.
    - Turnover or flow: volume and either flow rate or the required turnover.
    - Saturation index: pH, temperature, calcium hardness, total alkalinity, TDS.
 
-   **If ANY required input is missing:**
-   - Create exactly one clarification step, and only that step for this
-     sub-intent.
-   - `assigned_agent` MUST be "general" — never chemistry, math, or compliance.
-   - The task MUST name every missing parameter explicitly.
-   - Do NOT create chemistry or math steps until the values exist. Do NOT invent
-     or assume a value, including a "typical" pool volume.
+   **When a required input is missing — plan BOTH, in this order:**
+   1. FIRST, the specialist step for everything that IS answerable with what
+      the user already gave. A reported symptom, an out-of-range reading or an
+      observed behaviour is always answerable: the mechanism, the consequence
+      and the order of correction do not depend on the missing number.
+   2. THEN a `general` step that asks ONLY for the parameters still missing.
+      Never re-ask for something the user already stated.
 
-   **If all required inputs are present:** create the owning specialist step
-   (interpretation, order of correction) and/or the `math` step, per the
-   Ordering Rules below.
+   Only when NOTHING is answerable — no symptom, no reading, no observation —
+   does the plan reduce to a single `general` clarification step.
 
-   Example — inputs missing:
+   Never invent or assume a pool volume or a measured reading. Standard target
+   ranges and product strengths are not inventions; the specialist declares
+   them as assumptions.
+
+   Example — nothing to diagnose, so clarification alone:
    User: "how much acid do I need to bring my pH down?"
    → step 1: assigned_agent="general",
-     task="Request the missing parameters required for acid dosage to lower pH:
-     pool volume, current pH, target pH, and the type/strength of acid (muriatic
-     acid concentration or dry acid)."
+     task="Request the parameters required for an acid dose: pool volume and
+     current pH."
 
-**If ANY of the required inputs is missing:**
-- You MUST create exactly one clarification step.
-- assigned_agent MUST be "general" (never chemistry, never math, never compliance).
-- The task MUST list ALL missing parameters by name and ask the user to provide them.
-- Do NOT create chemistry or math steps until the values exist.
-- Do NOT invent or assume values.
-
-**If all required inputs are present:**
-- Create the appropriate chemistry (interpretation/order of correction) and/or math (numeric dosage) steps.
+   Example — a symptom plus readings, so diagnose FIRST:
+   User: "I have 50,000 L, pH is 8.2 and the chlorine isn't working. What do I do?"
+   → step 1: assigned_agent="chemistry",
+     task="Explain why free chlorine loses sanitizing power at pH 8.2 (the
+     HOCl/OCl- equilibrium shifts toward the weaker hypochlorite ion) and give
+     the order of correction: lower pH into the 7.2-7.6 range before judging
+     chlorine performance."
+   → step 2: assigned_agent="general", depends_on=[1],
+     task="Ask which acid the user has available and its strength, so the exact
+     dose can be calculated next turn."
+   NOT a lone clarification step: volume and current pH were both provided, and
+   the mechanism behind the symptom needs no further input to explain.
 
 ### Rules for Plan Creation:
 1. `step` starts at 1 and increments sequentially.

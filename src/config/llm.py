@@ -53,12 +53,52 @@ _MAX_RETRIES = 1        # un reintento. Un 429 no se arregla insistiendo 3
 
 
 def create_llm():
+    """
+    Modelo del summarizer. Conserva el thinking dinámico.
+
+    Comprimir una conversación larga sin perder los hechos que importan SÍ es
+    trabajo de razonamiento, y además corre fuera del camino crítico habitual
+    (solo por encima de TOKEN_LIMIT). Es el único consumidor que queda de esta
+    factory desde que `general` y `oos` tienen la suya.
+    """
     return ChatGoogleGenerativeAI(
         model="gemini-3.5-flash",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=_STANDARD_TIMEOUT,
         temperature=0.2,
         max_retries=_MAX_RETRIES,
+    )
+
+
+def create_direct_answer_llm():
+    """
+    Modelo de los nodos `general` y `oos`, con el thinking apagado.
+
+    Medido en dos traces reales: 631 tokens de razonamiento para producir 270
+    visibles, y 725 para producir 189. Latencias de 4.71s y 3.83s, con el
+    primer token a los 3.64s y 3.37s. En un turno de 5-6s eso es el ~70% del
+    tiempo total, y lo que se estaba razonando era un acuse de recibo y una
+    petición de datos.
+
+    Estos dos nodos no investigan ni deciden: `general` redacta desde material
+    que el planner ya acotó en su `task`, y `oos` declina. El razonamiento
+    latente no aporta nada que el prompt no diga ya.
+
+    thinking_budget=0 y no un valor bajo, por el mismo motivo documentado en
+    create_synthesis_llm(): cualquier valor > 0 se trata como objetivo blando
+    y el modelo lo excede.
+
+    Separado de create_llm() a propósito: esa factory alimenta al summarizer,
+    que es el único sitio donde comprimir sin perder hechos sí justifica
+    razonar.
+    """
+    return ChatGoogleGenerativeAI(
+        model="gemini-3.5-flash",
+        google_api_key=_get_secret("GEMINI_API_KEY"),
+        timeout=_STANDARD_TIMEOUT,
+        temperature=0.2,
+        max_retries=_MAX_RETRIES,
+        thinking_budget=0,
     )
 
 def create_routing_llm():

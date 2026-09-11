@@ -68,8 +68,10 @@ class ExecutionStep(BaseModel):
             "controls to investigate.'\n"
             "- 'Retrieve the relevant maintenance records and identify recurring "
             "equipment failures associated with the reported pump issue.'\n"
-            "- 'Request the missing parameters required for acid dosage to lower pH: "
-            "pool volume, current pH, target pH, and type/strength of acid.'"
+            "- 'Request the parameters still missing for an acid dose: pool volume "
+            "and current pH.' (Only what the user has NOT given, and never the "
+            "target or the product type — the specialist assumes standard values "
+            "for those.)"
         ),
     )
 
@@ -79,8 +81,9 @@ class ExecutionStep(BaseModel):
             "Select the agent whose domain expertise best matches the task.\n"
             "Rules:\n"
             "- 'general': Greetings, capability questions, educational topics with no "
-            "reference to the user's facility, AND clarification requests when required "
-            "numeric inputs for dosing/sizing are missing.\n"
+            "reference to the user's facility, AND clarification requests asking only "
+            "for the inputs still missing after the specialists have covered what is "
+            "already answerable.\n"
             "- 'chemistry': Water chemistry of a specific pool, symptoms, test results, "
             "corrective chemical actions (not the numeric dosage itself).\n"
             "- 'equipment': Faulty/worn/fouled components, service procedures, parts.\n"
@@ -96,8 +99,12 @@ class ExecutionStep(BaseModel):
             "- 'math': Pure numeric computation once inputs and formula are known.\n"
             "- 'oos': Unsafe, medical advice for a person, illegal activity, or any "
             "jurisdiction outside the US and Canada.\n"
-            "For dosing questions with missing volume/current/target/chemical type → "
-            "ALWAYS use 'general' (never chemistry, math, compliance, or operations)."
+            "A missing input blocks the NUMBER, never the DIAGNOSIS. If the user "
+            "reports a symptom, a reading or an observation, the owning specialist "
+            "ALWAYS gets a step — the mechanism and the order of correction do not "
+            "depend on the missing value. Add a 'general' step afterwards asking only "
+            "for what is still missing. Route to 'general' alone only when nothing at "
+            "all is answerable yet."
         ),
     )
 
@@ -145,8 +152,11 @@ class PlannerOutput(BaseModel):
         max_length=5,
         description=(
             "Ordered list of steps to fulfill the user's request. "
-            "If missing_inputs is non-empty, this MUST be empty (or contain only a "
-            "single 'general' clarification step — prefer empty + missing_inputs). "
+            "A non-empty missing_inputs does NOT empty this list: it only blocks the "
+            "'math' step. Whatever the user already reported — a symptom, a reading, "
+            "an observation — still gets its specialist step, because explaining the "
+            "mechanism and the order of correction needs no further input. Leave this "
+            "empty only when nothing at all is answerable yet. "
             "If the query is fully out of scope, return a single step with "
             "assigned_agent='oos' and oos=True."
         ),
@@ -155,10 +165,13 @@ class PlannerOutput(BaseModel):
     missing_inputs: List[str] = Field(
         default_factory=list,
         description=(
-            "Required parameters absent from the user message for a dosing/sizing "
-            "question (e.g. 'pool volume', 'current pH', 'target pH', 'acid type'). "
-            "If non-empty, do NOT create chemistry/math steps; either leave "
-            "execution_plan empty or put a single general clarification step."
+            "Parameters the user has NOT provided that are required to compute a "
+            "number: pool volume and the current reading of the target parameter. "
+            "Do NOT list the target reading or the product type — those have standard "
+            "values the specialist states as assumptions, so they are never blockers. "
+            "A non-empty list blocks only the 'math' step; the specialist step for the "
+            "reported symptom is still planned, followed by a 'general' step asking "
+            "for exactly these parameters and nothing the user already gave."
         ),
     )
 

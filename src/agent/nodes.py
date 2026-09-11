@@ -26,7 +26,14 @@ from .state import PoolAgentState, ExecutionStep, AgentResult
 # system del template. Importarlo era lo que invitaba a mandarlo otra vez.
 from ..prompts.prompts import SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
 from .chains import create_planner_chain
-from ..config.llm import create_llm, create_suggester_llm, create_routing_llm, create_fallback_llm, create_synthesis_llm 
+from ..config.llm import (
+    create_llm,
+    create_suggester_llm,
+    create_routing_llm,
+    create_fallback_llm,
+    create_synthesis_llm,
+    create_direct_answer_llm,
+)
 from .agents import get_agent_by_name, SPECIALIST_SPECS
 from .gates import (
     math_inputs_present,
@@ -155,7 +162,7 @@ def _direct_answer(state: PoolAgentState, system_prompt: str, deadline_s: float 
     try:
         # Ejecutar con deadline
         def _invoke():
-            return _get_llm().invoke([
+            return _get_direct_answer_llm().invoke([
                 SystemMessage(content=f"{system_prompt}\n\nRespond in: {language}"),
                 HumanMessage(
                     content=f"{memory_block}Task: {task}\n\nUser context: {user_message}"
@@ -177,6 +184,7 @@ def _direct_answer(state: PoolAgentState, system_prompt: str, deadline_s: float 
 # ================================================================
 
 _llm = None
+_direct_answer_llm = None
 _planner_llm = None
 _planner_chain = None
 _fallback_llm = None
@@ -216,10 +224,25 @@ def _get_fallback_llm():
 
 
 def _get_llm():
+    """Summarizer. Único consumidor que queda de create_llm()."""
     global _llm
     if _llm is None:
         _llm = create_llm()
     return _llm
+
+
+def _get_direct_answer_llm():
+    """
+    `general` y `oos`, sin thinking. Ver create_direct_answer_llm().
+
+    Compartían `_get_llm()` con el summarizer, y por eso no se les había
+    tocado el thinking: no se podía sin cambiárselo también a él. Con la
+    factory separada, sí.
+    """
+    global _direct_answer_llm
+    if _direct_answer_llm is None:
+        _direct_answer_llm = create_direct_answer_llm()
+    return _direct_answer_llm
 
 def _get_planner_llm():
     """
