@@ -64,6 +64,7 @@ from ..graph_context.suggestions import (
 from ..graph_context.turn_cache import reset_turn
 from ..graph_context.turn_cache import get_touched
 from .tools import begin_tool_scope
+from ..tool_budgets import RETRIEVAL_TOOL_BUDGETS
 # ================================================================
 # CONFIGURATION
 # ================================================================
@@ -526,21 +527,53 @@ _SLUG_TO_CONFIG = {
 _SLUG_TO_CONFIG["math"] = AGENT_REGISTRY[MATH]
 
 
+#: Llamadas rechazadas que un step puede absorber sin morir.
+#:
+#: El presupuesto se aplica en dos capas: ToolBudgetMiddleware retira del
+#: schema lo agotado, y `_gate` rechaza en microsegundos lo que aun así llegue.
+#: La segunda capa existe porque la primera no siempre alcanza — un modelo
+#: puede pedir una tool que no está en el esquema que se le pasó, y en el trace
+#: 9caf725c pidió dos.
+#:
+#: Cada rechazo consume dos pasos de recursión (modelo + nodo de tools) sin
+#: aportar evidencia. Sin margen, un par de ellos agota el límite y el step
+#: entero muere con TOOL_BUDGET_EXCEEDED: el usuario recibe "el sistema se
+#: quedó sin tiempo de proceso" en lugar de una respuesta, habiendo cinco
+#: recuperaciones correctas en el historial.
+_REJECTED_CALL_MARGIN = 3
+
+
 def _recursion_limit_for(agent_name: str) -> int:
     """
-    The 'tool budget' in each AgentConfig is currently just text in the prompt --
-    confirmed by two traces where the model exceeded it (12/6 and 9/6) despite
-    saying "Hard limit ... non-negotiable". recursion_limit is the only real
-    cutoff: each turn of create_agent's internal graph = 1 model node +
-    1 tool node, so we need double the tool budget, plus margin for the final
-    response that doesn't call any tool.
+    Techo real de iteraciones del ReAct interno de create_agent.
 
-    No entry in _SLUG_TO_CONFIG (general/OOS don't go through run_step, or a
-    new agent not yet registered) -> conservative default of 6.
+    El "tool budget" del AgentConfig es solo texto en el prompt — confirmado
+    por dos traces donde el modelo lo excedió (12/6 y 9/6) pese al "Hard limit
+    ... non-negotiable". recursion_limit es el único corte de verdad.
+
+    Se deriva del presupuesto REAL por tool (tool_budgets.py), no del
+    `tool_budget` declarado en el config: los dos se desincronizaron en cuanto
+    se tocó uno. En el trace 9caf725c `chemistry` declaraba 6 mientras la suma
+    de sus caps era 5, y el límite calculado sobre el número equivocado no
+    dejaba margen para los rechazos.
+
+    Cuentas: cada iteración del grafo interno son 2 pasos (nodo de modelo +
+    nodo de tools), más 1 para la respuesta final que no llama a ninguna, más
+    2 de holgura.
+
+    Un agente sin caps por tool (math y su catálogo) cae al `tool_budget` del
+    config, que ahí sí es la única cifra que hay.
     """
     config = _SLUG_TO_CONFIG.get(_normalize_agent(agent_name))
-    budget = getattr(config, "tool_budget", 6) if config else 6
-    return budget * 2 + 2
+
+    caps = {t: RETRIEVAL_TOOL_BUDGETS[t]
+            for t in (getattr(config, "tools", None) or ())
+            if t in RETRIEVAL_TOOL_BUDGETS}
+    presupuesto = sum(caps.values()) if caps else (
+        getattr(config, "tool_budget", 6) if config else 6
+    )
+
+    return (presupuesto + _REJECTED_CALL_MARGIN) * 2 + 3
 
 def _flatten(content) -> str:
     """Tu lógica actual de parseo, ahora solo para el camino de fallback."""

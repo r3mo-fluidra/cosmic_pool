@@ -129,3 +129,62 @@ class TestPresupuestos:
         """
         from src.tool_budgets import RETRIEVAL_TOOL_BUDGETS
         assert _TOOL_BUDGETS is RETRIEVAL_TOOL_BUDGETS
+
+
+# =====================================================================
+# Techo de recursión: margen para las llamadas que el gate rechaza
+# =====================================================================
+# Trace 9caf725c. `chemistry` hizo 7 tool calls — 5 útiles y 2 rechazadas por
+# presupuesto — y murió con TOOL_BUDGET_EXCEEDED. El usuario recibió "el
+# sistema se quedó sin tiempo de proceso" teniendo cinco recuperaciones
+# correctas en el historial.
+#
+# Cuentas: 7 tool calls son 15 pasos del grafo interno (modelo + tools por
+# iteración, más la respuesta final). El límite era 14, calculado sobre el
+# `tool_budget` declarado en el config (6) y no sobre la suma real de los caps
+# por tool (5). Los dos se desincronizaron en cuanto se tocó uno.
+#
+# El presupuesto se aplica en dos capas: el middleware retira del schema, y
+# `_gate` rechaza lo que aun así llegue. La segunda existe porque la primera
+# no siempre alcanza — un modelo puede pedir una tool que no está en el
+# esquema que se le pasó. Cada rechazo cuesta dos pasos sin aportar evidencia,
+# así que el techo tiene que preverlos.
+
+class TestTechoDeRecursion:
+    def _limite(self, agente):
+        from src.agent.nodes import _recursion_limit_for
+        return _recursion_limit_for(agente)
+
+    def test_el_caso_del_trace_ahora_cabe(self):
+        # 7 tool calls = 7*2 + 1 = 15 pasos.
+        assert self._limite("chemistry") >= 15
+
+    def test_se_deriva_del_presupuesto_real_no_del_declarado(self):
+        """
+        chemistry declara tool_budget=6 y la suma de sus caps es 5. Calcular
+        sobre el número equivocado fue lo que dejó el techo sin margen.
+        """
+        from src.prompts.prompts_sub_agents import AGENT_REGISTRY, CHEMISTRY
+        from src.tool_budgets import RETRIEVAL_TOTAL
+        declarado = AGENT_REGISTRY[CHEMISTRY].tool_budget
+        assert self._limite("chemistry") != declarado * 2 + 2
+        assert self._limite("chemistry") > RETRIEVAL_TOTAL * 2 + 1
+
+    def test_absorbe_varias_llamadas_rechazadas(self):
+        from src.agent.nodes import _REJECTED_CALL_MARGIN
+        from src.tool_budgets import RETRIEVAL_TOTAL
+        pasos_peor_caso = (RETRIEVAL_TOTAL + _REJECTED_CALL_MARGIN) * 2 + 1
+        assert self._limite("chemistry") >= pasos_peor_caso
+
+    def test_todos_los_especialistas_de_retrieval_comparten_techo(self):
+        limites = {self._limite(a) for a in
+                   ["chemistry", "equipment", "hydraulics", "safety", "records"]}
+        assert len(limites) == 1, "usan las mismas tres tools, mismo techo"
+
+    def test_math_usa_su_propio_presupuesto(self):
+        # No tiene caps por tool: su catálogo es determinista y el config es
+        # la única cifra disponible.
+        assert self._limite("math") != self._limite("chemistry")
+
+    def test_un_agente_desconocido_no_revienta(self):
+        assert self._limite("no_existe") > 0
