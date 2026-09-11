@@ -181,11 +181,35 @@ def _validar_esquema(df: pd.DataFrame) -> None:
         )
 
 
+def _asegurar_indices_payload(client: QdrantClient) -> None:
+    """
+    Índices de payload, siempre. create_payload_index es idempotente.
+
+    Vivían detrás del early return de _crear_coleccion, así que una colección
+    preexistente se quedaba sin ellos para siempre. Consecuencia concreta:
+    `vector_search(regulatory_only=True)` filtra sobre metadata.is_regulatory,
+    y sin índice eso es un escaneo de payload en vez de un filtro indexado.
+    """
+    for field, schema in INDEXED_PAYLOAD_FIELDS.items():
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name=field,
+                field_schema=schema,
+            )
+        except Exception as e:
+            # Ya existente, o una versión del servidor que lo rechaza: ninguna
+            # de las dos justifica abortar una ingesta ya escrita.
+            print(f"ℹ️  indice de payload '{field}': {type(e).__name__}")
+    print(f"✅ Indices de payload: {list(INDEXED_PAYLOAD_FIELDS)}")
+
+
 def _crear_coleccion(client: QdrantClient, force_recreate: bool) -> None:
     existe = client.collection_exists(COLLECTION_NAME)
 
     if existe and not force_recreate:
         print(f"ℹ️  Coleccion '{COLLECTION_NAME}' ya existe.")
+        _asegurar_indices_payload(client)
         return
 
     if existe:
@@ -208,13 +232,7 @@ def _crear_coleccion(client: QdrantClient, force_recreate: bool) -> None:
         f"sparse='{SPARSE_VECTOR_NAME}' (bm25)"
     )
 
-    for field, schema in INDEXED_PAYLOAD_FIELDS.items():
-        client.create_payload_index(
-            collection_name=COLLECTION_NAME,
-            field_name=field,
-            field_schema=schema,
-        )
-    print(f"✅ Indices de payload: {list(INDEXED_PAYLOAD_FIELDS)}")
+    _asegurar_indices_payload(client)
 
 
 def _fila_a_documento(row) -> Document:
@@ -266,10 +284,13 @@ def inicializar_vector_store(
     archivo_csv = Path(path_csv) if path_csv else DEFAULT_CSV_PATH
     if not archivo_csv.exists():
         raise FileNotFoundError(f"CSV no encontrado: {archivo_csv.resolve()}")
-    
+
     df = pd.read_csv(archivo_csv)
-    documents = [_fila_a_documento(r) for r in df.itertuples()]
-    ids = [_point_id(d.metadata["chunk_id"]) for d in documents]
+
+    # Validar ANTES de construir nada. Estaba después de _fila_a_documento, así
+    # que un CSV con columnas faltantes moría con un AttributeError opaco desde
+    # dentro del constructor, en vez de con el mensaje que esta función escribió
+    # justamente para ese caso.
     _validar_esquema(df)
 
     if df.empty:
@@ -282,33 +303,49 @@ def inicializar_vector_store(
 
     print(f"📊 {len(df)} filas en {archivo_csv.name}")
 
+    # Filtrar ANTES de construir los documentos. `documents` se armaba con el df
+    # COMPLETO y el filtro venía después, sobre un df que ya no alimentaba nada:
+    # exclude_stubs era un no-op y los encabezados puros acababan indexados,
+    # compitiendo por el top-k de vector_search con chunks que sí tienen
+    # contenido. El aviso de descuadre de abajo tampoco saltaba nunca, porque
+    # comparaba contra el conteo inflado.
     if exclude_stubs:
         n_stub = int(df.is_stub.sum())
         df = df[~df.is_stub].copy()
         print(f"🔻 {n_stub} stubs excluidos -> {len(df)} indexables")
 
-    
-    
+    documents = [_fila_a_documento(r) for r in df.itertuples()]
+    ids = [_point_id(d.metadata["chunk_id"]) for d in documents]
 
     n_reg = sum(d.metadata["is_regulatory"] for d in documents)
     print(f"📄 {len(documents)} documentos ({n_reg} regulatorios)")
 
-    # El lock de archivo de Qdrant es exclusivo: cerra Streamlit antes.
-    if force_recreate and QDRANT_PATH.exists():
-        shutil.rmtree(QDRANT_PATH)
-        print("🗑️  Directorio anterior eliminado.")
-    QDRANT_PATH.mkdir(parents=True, exist_ok=True)
+    # Mismo constructor que usa la app en runtime. Estaba hardcodeado a
+    # QdrantClient(path=...), así que esta función NUNCA podía poblar el
+    # servidor: definieras o no QDRANT_URL, escribía en el índice embebido.
+    client = _make_client()
+    es_servidor = bool(_secret(QDRANT_ENDPOINT) or _secret(QDRANT_ENDPOINT_LEGACY))
+    destino = "servidor Qdrant" if es_servidor else str(QDRANT_PATH)
 
-    client = QdrantClient(path=str(QDRANT_PATH))
+    # El rmtree solo tiene sentido contra el índice embebido. Ejecutarlo cuando
+    # el destino es el servidor borraba la copia local — la única con datos —
+    # sin escribir una sola fila en el remoto.
+    if not es_servidor:
+        # El lock de archivo de Qdrant es exclusivo: cerra Streamlit antes.
+        if force_recreate and QDRANT_PATH.exists():
+            shutil.rmtree(QDRANT_PATH)
+            print("🗑️  Directorio anterior eliminado.")
+        QDRANT_PATH.mkdir(parents=True, exist_ok=True)
+
     _crear_coleccion(client, force_recreate)
 
     store = _build_store(client)
 
-    print(f"📥 Indexando (dense + bm25)...")
+    print(f"📥 Indexando (dense + bm25) en {destino}...")
     store.add_documents(documents, ids=ids)
 
     n_final = client.count(COLLECTION_NAME).count
-    print(f"✅ {n_final} puntos en {QDRANT_PATH}")
+    print(f"✅ {n_final} puntos en {destino}")
     if n_final != len(documents):
         print(f"⚠️  Esperados {len(documents)}, escritos {n_final}")
 
