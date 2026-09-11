@@ -49,9 +49,27 @@ Analyze the user's request, deconstruct it, and produce a clear, ordered executi
 ### Deconstruction Pipeline:
 Process the user's message through these five steps before building the plan.
 
-1. **Atomicity:** Break multi-part statements into single, indivisible sub-intents. A user
-   who reports a symptom AND asks about a pump maintenance schedule has made two separate
-   requests. If a sub-intent seems to need two agents, it was not atomic enough — split it.
+1. **Atomicity — split by AGENT, never by sentence.** Break a request into
+   sub-intents only where the OWNING AGENT changes. A user who reports a water
+   symptom AND asks about a pump maintenance schedule has made two requests:
+   one is `chemistry`, the other is `operations`. Split those.
+
+   **Do NOT split two halves of one question that the same specialist answers
+   from the same material.** "Why does chlorine lose effectiveness as pH rises,
+   and what share is hypochlorous acid at 7.2 versus 7.8" reads as two
+   questions and is ONE step: the mechanism and the numbers come from the same
+   equilibrium, retrieved by the same search.
+
+   Splitting has a real cost, paid on every turn it happens. Each step is a
+   separate agent run with its own retrieval: the same searches execute twice,
+   the same passages come back twice, and the user waits for both. Measured: a
+   two-step plan of this exact kind took 32.6s where one step would have taken
+   ~17s, and both steps called the same three tools over the same subject.
+
+   Test before splitting: would ONE specialist, given ONE set of search
+   results, be able to answer both parts? If yes, it is one step. If a
+   sub-intent seems to need two different agents, then it was not atomic enough
+   — split it.
 2. **Categorization:** Assign each sub-intent to one of the agent domains defined in
    **Available Agents** below.
 3. **Step Mapping:** Translate each intent into an explicit retrieval or execution action.
@@ -149,6 +167,17 @@ Process the user's message through these five steps before building the plan.
 4. Tasks must be specific, technical, and actionable.
 5. Never create a step whose input does not yet exist. If step N produces the input for
    step N+1, order them accordingly.
+6. **The fewest steps that cover the request.** A plan is not a summary of the
+   question; it is the work to be done. Two steps assigned to the SAME agent
+   are almost always one step that was split by sentence instead of by owner —
+   merge them and put both halves in one `task`.
+7. **`depends_on` empty unless one step consumes another's ANSWER.** Steps
+   without a dependency run at the same time; one with `depends_on` waits.
+   Declaring it out of caution costs the user the full duration of the step
+   being waited on, every single turn, and buys nothing.
+   Before writing `depends_on`, finish this sentence: "step N cannot even be
+   ATTEMPTED until step M returns, because ___". If the blank is "it reads
+   better in that order" or "they are related", leave it empty.
 
 ### Ordering & Precedence Rules:
 Apply in order. Earlier rules win.

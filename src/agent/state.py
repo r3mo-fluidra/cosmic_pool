@@ -120,8 +120,21 @@ class ExecutionStep(BaseModel):
     depends_on: List[int] = Field(
         default_factory=list,
         description=(
-            "Step numbers this step must wait for. Leave empty if independent. "
-            "Only populate when this step genuinely needs the OUTPUT of another step."
+            "Step numbers whose OUTPUT this step consumes. Default is empty, and "
+            "empty is the common case.\n"
+            "Steps with no dependency between them run AT THE SAME TIME; a step "
+            "with depends_on waits for the other to finish first. So a "
+            "dependency declared out of caution, or just because one step reads "
+            "as coming 'after' another, adds its full duration to the turn for "
+            "nothing. Measured: two steps of roughly 16s each took 32.6s "
+            "serialized where they would have taken ~17s in parallel.\n"
+            "The test is data, not narrative order: would this step's task be "
+            "impossible to write without knowing the other step's ANSWER? "
+            "Needing the same background, covering a related topic, or reading "
+            "as the natural next thing to say are NOT dependencies.\n"
+            "Genuine: a dose calculation that needs the target value another "
+            "step establishes. Not a dependency: explaining a mechanism and "
+            "quantifying it — both come from the same retrieved material."
         ),
     )
 

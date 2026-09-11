@@ -22,6 +22,8 @@ Regla nueva: un input que falta bloquea el NÚMERO, nunca el DIAGNÓSTICO.
 
 import re
 
+import pytest
+
 from src.agent.state import ExecutionStep, PlannerOutput
 from src.prompts.prompts import PLANNER_PROMPT
 
@@ -135,3 +137,97 @@ class TestElPlanDelTraceSigueSiendoConstruible:
         )
         despachados = [s.arg["step"].step for s in cmd.goto]
         assert despachados == [1], "el paso 2 no puede correr antes que su dependencia"
+
+
+# =====================================================================
+# Coste de dividir un plan
+# =====================================================================
+# Origen: trace 03045b32. "Why does free chlorine get less effective as pH
+# rises? What share is hypochlorous acid at 7.2 versus 7.8?" produjo DOS steps
+# de `chemistry`, el segundo con depends_on=[1].
+#
+# Ninguna de las dos decisiones era necesaria. Las dos mitades salen del mismo
+# equilibrio y del mismo retrieval, y el pKa del paso 2 no depende de la
+# explicación del paso 1. El resultado fueron dos agent runs que llamaron a las
+# MISMAS tres tools sobre el MISMO tema, ejecutados en serie: 32.6s donde uno
+# solo habría tardado ~17s.
+#
+# La regla de Atomicity lo empujaba: decía "parte los enunciados de varias
+# partes" sin decir que partir hacia el mismo agente duplica el trabajo.
+
+
+class TestCosteDeDividir:
+    @pytest.fixture
+    def P(self):
+        from src.prompts.prompts import PLANNER_PROMPT
+        return PLANNER_PROMPT
+
+    def test_la_atomicidad_se_define_por_agente_no_por_frase(self, P):
+        assert "split by AGENT, never by sentence" in P
+
+    def test_prohibe_partir_hacia_el_mismo_especialista(self, P):
+        assert "Do NOT split two halves of one question that the same specialist" in P
+
+    def test_declara_el_coste_medido_de_partir(self, P):
+        # Un coste con número se respeta más que un "evita dividir".
+        assert "32.6s" in P and "~17s" in P
+
+    def test_da_un_test_accionable_antes_de_partir(self, P):
+        assert "would ONE specialist, given ONE set of search" in P
+
+    def test_pide_el_minimo_numero_de_pasos(self, P):
+        assert "The fewest steps that cover the request" in P
+
+
+class TestDisciplinaDeDependencias:
+    def test_el_schema_explica_que_las_dependencias_serializan(self):
+        doc = _field_doc(ExecutionStep, "depends_on")
+        assert "run AT THE SAME TIME" in doc
+        assert "32.6s" in doc
+
+    def test_el_schema_da_el_criterio_de_dato_no_de_orden(self):
+        doc = _field_doc(ExecutionStep, "depends_on")
+        assert "The test is data, not narrative order" in doc
+
+    def test_el_schema_desmiente_las_falsas_dependencias(self):
+        doc = _field_doc(ExecutionStep, "depends_on")
+        assert "are NOT dependencies" in doc
+
+    def test_el_prompt_exige_completar_la_frase_antes_de_declararla(self):
+        from src.prompts.prompts import PLANNER_PROMPT
+        assert "cannot even be\n   ATTEMPTED until step M returns" in PLANNER_PROMPT
+
+    def test_el_caso_del_trace_se_nombra_como_no_dependencia(self):
+        doc = _field_doc(ExecutionStep, "depends_on")
+        assert "explaining a mechanism and" in doc
+
+
+class TestElOrchestradorParaleizaCuandoPuede:
+    """
+    El otro lado del contrato: si el planner deja de sobre-declarar, el
+    orchestrator tiene que despachar en paralelo de verdad.
+    """
+
+    def _cmd(self, plan):
+        import time
+        from src.agent.nodes import orchestrator
+        return orchestrator({
+            "execution_plan": plan, "agent_results": {}, "messages": [],
+            "turn_started_at": time.time(), "conversation_summary": "",
+        })
+
+    def test_dos_steps_del_mismo_agente_sin_dependencia_van_juntos(self):
+        plan = [
+            ExecutionStep(step=1, task="explain the equilibrium", assigned_agent="chemistry"),
+            ExecutionStep(step=2, task="quantify the fractions", assigned_agent="chemistry"),
+        ]
+        cmd = self._cmd(plan)
+        assert len(cmd.goto) == 2, "deberían despacharse en el mismo superstep"
+
+    def test_una_dependencia_real_sigue_serializando(self):
+        plan = [
+            ExecutionStep(step=1, task="establish the target", assigned_agent="chemistry"),
+            ExecutionStep(step=2, task="compute the dose", assigned_agent="math", depends_on=[1]),
+        ]
+        cmd = self._cmd(plan)
+        assert [s.arg["step"].step for s in cmd.goto] == [1]
