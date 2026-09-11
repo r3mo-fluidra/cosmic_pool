@@ -70,15 +70,20 @@ python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-`requirements.txt` is the only manifest that matters: it is what Streamlit
-Cloud installs and what [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json)
-runs on `pip3 install --user -r requirements.txt`. `requirements-dev.txt`
-adds `pytest` on top and is never installed by a deployment.
+Poetry also works — `poetry install` resolves the project's `.venv`, and
+`poetry run pytest` / `poetry run streamlit run app.py` behave the same.
 
-> **`pyproject.toml` and `poetry.lock` are stale.** No environment reads
-> them — not Streamlit Cloud, not the Dev Container, not CI. They also
-> disagree with `requirements.txt` (`langchain >=1.3` vs `>=0.3`). Treat
-> `requirements.txt` as the source of truth until one of the two is deleted.
+> **Two manifests disagree, and only one is deployed.** Streamlit Cloud and
+> [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json) both
+> install `requirements.txt` (`pip3 install --user -r requirements.txt`) and
+> never read `pyproject.toml`. The two also specify different floors —
+> `langchain >=0.3` vs `>=1.3` — so a local Poetry environment and a
+> deployed one can resolve to different versions of the same library.
+> `requirements.txt` is what ships; keep it authoritative, or generate it
+> from `pyproject.toml`, but do not maintain both by hand.
+>
+> `requirements-dev.txt` adds `pytest` on top and is never installed by a
+> deployment.
 
 Copy the environment template and fill in your own credentials — never commit `.env`:
 
