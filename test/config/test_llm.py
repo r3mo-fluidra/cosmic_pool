@@ -87,3 +87,75 @@ def test_get_secret_returns_default_when_nothing_is_configured(monkeypatch):
     monkeypatch.delenv("SOME_MISSING_KEY", raising=False)
 
     assert llm_module._get_secret("SOME_MISSING_KEY", "fallback") == "fallback"
+
+
+# =====================================================================
+# Presupuesto de razonamiento por rol
+# =====================================================================
+# Medido en traces reales, no elegido a ojo. El thinking latente es la
+# mayor fuente de latencia y de varianza del turno, y se pierde con
+# facilidad: basta que un nodo nuevo reutilice la factory equivocada.
+#
+# Trace 84fda7b8: `general` gastó 631 tokens de razonamiento para 270
+# visibles. Trace b0496bf9: 725 para 189. Trace 6bb32a41: el AGENTE
+# `general` (otro camino distinto del NODO) gastó 471 más, porque el
+# primer arreglo solo cubrió uno de los dos.
+
+def _budget(factory):
+    return getattr(factory(), "thinking_budget", None)
+
+
+class TestPresupuestoDeRazonamiento:
+    """Quién puede razonar y quién no. Un cambio acá se paga en cada turno."""
+
+    def test_el_planner_no_razona(self):
+        # Clasifica contra un schema cerrado, y es el PRIMER nodo del turno:
+        # su latencia la espera el usuario mirando una pantalla vacía.
+        from src.config.llm import create_routing_llm
+        assert _budget(create_routing_llm) == 0
+
+    def test_el_synthesizer_no_razona(self):
+        # Reescribe material que los sub-agentes ya resolvieron.
+        from src.config.llm import create_synthesis_llm
+        assert _budget(create_synthesis_llm) == 0
+
+    def test_general_y_oos_no_razonan(self):
+        # Redactan desde un `task` que el planner ya acotó, o declinan.
+        from src.config.llm import create_direct_answer_llm
+        assert _budget(create_direct_answer_llm) == 0
+
+    def test_los_especialistas_si_razonan_pero_acotado(self):
+        # Investigan: eligen qué tool llamar y qué evidencia vale.
+        from src.config.llm import create_specialist_llm
+        assert _budget(create_specialist_llm) == 1024
+
+    def test_el_summarizer_conserva_el_thinking_dinamico(self):
+        # Comprimir sin perder los hechos que importan sí es deliberación,
+        # y corre fuera del camino crítico (solo sobre TOKEN_LIMIT).
+        from src.config.llm import create_llm
+        assert _budget(create_llm) is None
+
+
+class TestTechosDeTiempo:
+    def test_ninguna_llamada_puede_exceder_el_deadline_del_paso(self):
+        """
+        El peor caso de una llamada es timeout * max_retries. Estaba en
+        120*3 = 360s contra un turno de 110: el cliente no acotaba nada, y
+        como future.cancel() no mata el thread, una llamada colgada ocupaba
+        un worker del _STEP_POOL durante todo ese tiempo.
+        """
+        from src.agent.nodes import STEP_DEADLINE_S
+        from src.config import llm
+
+        factories = [
+            llm.create_llm, llm.create_routing_llm, llm.create_synthesizer_llm,
+            llm.create_suggester_llm, llm.create_fallback_llm,
+            llm.create_synthesis_llm, llm.create_specialist_llm,
+            llm.create_direct_answer_llm,
+        ]
+        for f in factories:
+            m = f()
+            peor_caso = m.timeout * (m.max_retries + 1)
+            assert peor_caso <= STEP_DEADLINE_S, (
+                f"{f.__name__}: {peor_caso}s > STEP_DEADLINE_S ({STEP_DEADLINE_S}s)"
+            )

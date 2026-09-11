@@ -13,7 +13,13 @@ from langgraph_supervisor import create_supervisor
 
 from ..tools_math.tools import MATH_TOOLS
 from .agent_names import AgentName
-from ..config.llm import create_routing_llm, create_synthesizer_llm, create_fallback_llm, create_specialist_llm
+from ..config.llm import (
+    create_routing_llm,
+    create_synthesizer_llm,
+    create_fallback_llm,
+    create_specialist_llm,
+    create_direct_answer_llm,
+)
 from ..prompts.prompts import (
     GENERAL_PROMPT,
     OOS_PROMPT,
@@ -94,6 +100,7 @@ _routing_llm = None
 _synthesizer_llm = None
 _fallback_llm = None
 _specialist_llm = None
+_direct_answer_llm = None
 _agents: dict[str, object] = {}
 _supervisor_agents: list[object] = []
 pool_supervisor = None
@@ -101,22 +108,34 @@ pool_supervisor = None
 
 def _initialize():
     global _initialized, _routing_llm, _synthesizer_llm, _fallback_llm, _specialist_llm
+    global _direct_answer_llm
     global _agents, _supervisor_agents, pool_supervisor
 
     if _initialized:
         return
 
-    _routing_llm     = create_routing_llm()
-    _synthesizer_llm = create_synthesizer_llm()
-    _fallback_llm    = create_fallback_llm()
-    _specialist_llm  = create_specialist_llm()
+    _routing_llm       = create_routing_llm()
+    _synthesizer_llm   = create_synthesizer_llm()
+    _fallback_llm      = create_fallback_llm()
+    _specialist_llm    = create_specialist_llm()
+    _direct_answer_llm = create_direct_answer_llm()
 
     # ---- general: primario + fallback ---------------------------------
     # El fallback tiene que ser OTRO AGENTE, no un LLM suelto: el primario
     # recibe y devuelve estado de grafo ({"messages": [...]}), un chat model
     # no acepta esa firma.
+    #
+    # _direct_answer_llm (thinking_budget=0) y no _synthesizer_llm.
+    #
+    # Hay DOS `general` en el sistema y es fácil arreglar solo uno: el NODO
+    # de nodes.py, al que el planner rutea directo cuando el plan tiene un
+    # único step, y este AGENTE, que corre por run_step cuando `general` es
+    # un paso más de un plan mayor. Medido en el trace 6bb32a41: este
+    # segundo camino gastó 471 tokens de razonamiento y 4.0s para preguntar
+    # al usuario qué ácido tenía disponible — la tarea entera venía escrita
+    # en el `task` del planner.
     primary_general = create_agent(
-        model=_synthesizer_llm,
+        model=_direct_answer_llm,
         tools=[pool_general_knowledge],
         name="general",
         system_prompt=GENERAL_PROMPT,
@@ -139,8 +158,10 @@ def _initialize():
     )
 
     # ---- oos ----------------------------------------------------------
+    # Mismo modelo sin thinking: declinar una petición fuera de alcance es
+    # la tarea menos deliberativa del sistema. El prompt ya dice qué decir.
     oos_agent = create_agent(
-        model=_synthesizer_llm,
+        model=_direct_answer_llm,
         tools=[],
         name="oos",
         system_prompt=OOS_PROMPT,
