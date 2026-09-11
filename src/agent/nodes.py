@@ -48,7 +48,7 @@ from ..graph_context.response_contracts import (
     usable_results, DetailSection, agents_from_results
 )
 from ..graph_context.response_validator import enforce_contract, fallback_payload
-from ..graph_context.response_contracts import build_synthesizer_archetype_section
+from ..prompts.prompt_archetype import build_synthesizer_archetype_section
 from ..graph_context.suggestions import (
     SUPERNODES,
     Suggestion,
@@ -379,6 +379,12 @@ def _resolve_and_update_archetype(
     archetype = force_archetype or resolve_archetype(
         agents=agents,
         is_oos=_is_oos(execution_plan),
+        # Cualquier step marcado como explicativo tiñe el turno: si el usuario
+        # preguntó por qué pasa algo, la respuesta tiene que contener el porqué
+        # aunque el plan trajera además pasos operativos.
+        explanatory=any(
+            getattr(s, "explanatory", False) for s in (execution_plan or [])
+        ),
     )
 
     update: dict = {"archetype": archetype}

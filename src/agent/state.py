@@ -125,6 +125,27 @@ class ExecutionStep(BaseModel):
         ),
     )
 
+    explanatory: bool = Field(
+        default=False,
+        description=(
+            "True when the user asked to UNDERSTAND something rather than to fix "
+            "it: a mechanism, an equilibrium, why one parameter affects another, "
+            "what a reading means, or a specific quantity or fraction. The tell is "
+            "that a correct answer is information, not a task — nothing needs to "
+            "be done to the pool once it is read.\n"
+            "Examples that ARE explanatory: 'why does chlorine lose effectiveness "
+            "as pH rises', 'what share of free chlorine is hypochlorous acid at "
+            "pH 7.2 versus 7.8', 'what does cyanuric acid actually do', 'my ORP "
+            "and DPD disagree, which one do I trust'.\n"
+            "Examples that are NOT: 'what is out of range in these readings', "
+            "'how do I fix cloudy water', 'how much acid do I need'.\n"
+            "A question can report readings and still be explanatory if what it "
+            "asks for is the reason behind them. Setting this wrong is costly: "
+            "an explanatory question forced into the operational format loses the "
+            "answer to make room for advice nobody asked for."
+        ),
+    )
+
     @model_validator(mode="after")
     def oos_requires_oos_agent(self) -> "ExecutionStep":
         if self.oos and self.assigned_agent != "oos":

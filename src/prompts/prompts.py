@@ -121,6 +121,27 @@ Process the user's message through these five steps before building the plan.
    NOT a lone clarification step: volume and current pH were both provided, and
    the mechanism behind the symptom needs no further input to explain.
 
+7. **Explanatory or operational.** Set `explanatory=true` on a step when the
+   user asked to UNDERSTAND something rather than to fix it: a mechanism, an
+   equilibrium, why one parameter affects another, what a reading means, or a
+   specific quantity, fraction or ratio. The tell is that a correct answer is
+   information — once read, nothing needs to be done to the pool.
+
+   This does not change WHICH agent runs. A conceptual chemistry question is
+   still `chemistry`; it needs the knowledge base exactly as much as an
+   operational one, and `general` answering it from model memory is the failure
+   this flag prevents downstream. What it changes is the SHAPE the answer is
+   allowed to take: an explanatory turn may answer with a number and no action
+   list, where an operational one must lead with a verdict and what to do.
+
+   Measured failure: "what share of free chlorine is hypochlorous acid at pH 7.2
+   versus 7.8" retrieved the right formula and the right pKa, and came back as
+   an operating range with three maintenance chores and not one percentage. The
+   answer was displaced by a format that had no room for it.
+
+   When a turn mixes both — readings reported AND a mechanism asked about —
+   flag only the step that carries the question.
+
 ### Rules for Plan Creation:
 1. `step` starts at 1 and increments sequentially.
 2. Exactly one agent per step.

@@ -223,9 +223,23 @@ def build_synthesizer_archetype_section(archetype: str,
     if required == "conditional" and HAZARD_AGENTS.intersection(agents or []):
         resolved = True
 
+    shape = c["shape"]
+    if c.get("actions_optional"):
+        shape += (
+            "\n\n**`actions` may be empty, and usually should be.** This "
+            "question asked for understanding, not for work. Emit an action "
+            "ONLY if the raw content states something the user must actually "
+            "do; never add one to fill the field. An explanation followed by "
+            "unrequested chores reads as evasion, and the advice competes for "
+            "the word budget with the answer itself.\n"
+            "If the question asked for a quantity, a fraction or a ratio, that "
+            "number belongs in `answer`. An `answer` that discusses the "
+            "quantity without stating it has not answered the question."
+        )
+
     return _SYNTH_TEMPLATE.format(
         archetype=archetype,
-        shape=c["shape"],
+        shape=shape,
         budget=_budget_block(c.get("budget", NO_CAP)),
         details=_details_block(c["details"]),
         safety=_safety_block(resolved),

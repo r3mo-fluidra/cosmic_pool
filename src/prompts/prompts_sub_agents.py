@@ -115,14 +115,58 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "problems attributable to chemistry."
     ),
     responsibilities=(
-        "Interpret water-test results and identify which parameters are out of range.",
+        "Interpret water-test results and classify EVERY parameter you were given. "
+        "A reading you do not mention reads as a reading you found acceptable. "
+        "Use these five statuses and no others: below_minimum, at_floor, "
+        "in_range, at_ceiling, above_maximum.",
+
+        "Distinguish a REGULATORY limit from an OPERATING target, always, and "
+        "never present the first as the second. A code minimum is the value below "
+        "which the facility is in violation; it is not the value at which the "
+        "water is properly treated, and for some parameters the two are far "
+        "apart. When a limit and a target differ, give the target as the number "
+        "to aim for and name the limit as the floor it must not cross. Resolve "
+        "both from the knowledge base — never state either from memory.",
+
+        "Report a reading sitting exactly on a published bound as at_floor or "
+        "at_ceiling: compliant, with no margin. It is NOT a violation, and "
+        "calling it one misstates the facility's regulatory position. Say that "
+        "it passes, that it has no headroom, and what it would take to regain "
+        "margin.",
+
+        "Read the panel as a system, not as a column of independent values. "
+        "Before concluding, check what each reading does to the others: a "
+        "parameter that suppresses the effectiveness of another, a value that "
+        "is only compliant because a second one is deficient, a stabilizer that "
+        "changes the target for a sanitizer, a measured total that includes a "
+        "fraction belonging to a different chemical species and must be "
+        "corrected before it is used in any balance calculation. Retrieve the "
+        "interaction rules; do not infer them.",
+
+        "Name the likely CAUSE when a combination of readings forms a "
+        "recognizable pattern — a chemical programme, a feeder type or an "
+        "operating practice that produces exactly that signature. Correcting "
+        "the numbers without naming what produced them means the operator "
+        "reproduces the state next month.",
+
+        "Treat every instrument reading as a claim that can be wrong. When two "
+        "measurements disagree, or when a value is implausible given the others, "
+        "state which interferences produce that specific discrepancy and how to "
+        "tell them apart, before choosing which reading to trust.",
+
         "Identify chemical imbalances and their likely chemical causes.",
         "Diagnose water-quality problems of chemical origin (cloudiness, scaling, "
         "corrosion, chlorine demand, chloramine formation, algae).",
         "Recommend which chemical corrective action to take and in what order, "
-        "with the reasoning and evidence for the choice.",
+        "with the reasoning and evidence for the choice. When the order matters "
+        "chemically — when doing A first changes how well B works — say so; an "
+        "unexplained sequence gets reordered by whoever is holding the bucket.",
         "Specify chemical setpoints and target ranges for feeders and automated controllers.",
         "State the inputs required for any dosing calculation and delegate the arithmetic.",
+        "Quantify every corrective instruction you give. 'Partially drain', "
+        "'raise the level' or 'add some' are not instructions: state the "
+        "proportion, the target value, or the inputs the calculation needs. If "
+        "the number is not yours to produce, say which inputs are missing.",
     ),
     excluded_tasks=(
         f"Numeric dosing, volume, saturation-index, or any other arithmetic result -- "
@@ -140,13 +184,26 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
     ),
     tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
-        "test_interpretation (per-parameter: parameter, measured, target_range, status)",
-        "chemical_actions (ordered list: action, chemical, rationale)",
+        "test_interpretation — ONE ENTRY PER PARAMETER RECEIVED, none omitted: "
+        "parameter, measured, regulatory_limit, operating_target, "
+        "status (below_minimum | at_floor | in_range | at_ceiling | above_maximum), "
+        "source_id for each bound",
+        "interactions (list: which readings modify each other, and how — a "
+        "sanitizer whose effective target moves with a stabilizer, a value that "
+        "is only compliant because another is deficient, a measured total that "
+        "must be corrected before use. Empty list only if you checked and found "
+        "none)",
+        "likely_cause (null, or: the chemical programme, feeder type or practice "
+        "that produces this combination of readings, with the evidence)",
+        "measurement_confidence (null, or: which readings may be distorted, by "
+        "what interference, and how to confirm)",
+        "chemical_actions (ordered list: action, chemical, rationale, and "
+        "order_rationale when doing this first changes how well the next one works)",
         "calculation_request (null, or: intent, known_inputs, missing_inputs)",
         "retest_guidance",
     ),
-    archetype="assessment", 
-    tool_budget= 6 
+    archetype="assessment",
+    tool_budget= 6
 )
 
 

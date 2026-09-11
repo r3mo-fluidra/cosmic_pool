@@ -143,6 +143,16 @@ AGENT_TO_ARCHETYPE: dict[str, str] = {
 PRECEDENCE: list[str] = [
     "critical",
     "calculation",
+    # explanation por encima de assessment: cuando la pregunta es conceptual,
+    # el molde de assessment ("veredicto de qué está fuera de rango, luego la
+    # primera verificación") no tiene hueco para la respuesta. Medido: a la
+    # pregunta "qué fracción del cloro libre es HOCl a pH 7.2 frente a 7.8" el
+    # especialista recuperó la fórmula y el pKa correctos, y la respuesta final
+    # fue un rango operativo sin un solo número — el contrato empujaba a
+    # producir un veredicto y unas acciones, así que los números sobraban.
+    # Por debajo de critical y calculation: una advertencia y un número
+    # calculado siguen mandando sobre una explicación.
+    "explanation",
     "assessment",
     "procedure",
     "reference",
@@ -185,6 +195,30 @@ ARCHETYPE_CONTRACTS = {
             "How to confirm"
         ],
         "safety_required": False,
+    },
+
+    # Para preguntas que piden entender algo, no arreglarlo: mecanismos,
+    # equilibrios, por qué un parámetro afecta a otro, qué significa una
+    # lectura. La diferencia con `assessment` no es el agente que responde
+    # sino lo que se preguntó — `chemistry` produce los dos.
+    "explanation": {
+        "shape": (
+            "Answer exactly what was asked, in the form in which it was asked. "
+            "A question about a quantity is answered with the quantity, stated "
+            "before any advice. Then the mechanism that produces it."
+        ),
+        "budget": 900,
+        "details": [
+            "Why this happens",
+            "What changes it",
+            "Where this comes from",
+        ],
+        "safety_required": False,
+        # Único arquetipo donde la lista vacía es el resultado NORMAL, no una
+        # degradación. Una pregunta conceptual no genera tareas, y forzar el
+        # andamio de acciones es lo que desplazó la respuesta: se produjo
+        # "Test pool pH daily" en lugar de los dos porcentajes pedidos.
+        "actions_optional": True,
     },
 
     "procedure": {
@@ -241,7 +275,11 @@ for _name, _contract in ARCHETYPE_CONTRACTS.items():
 # 4. RESOLUCIÓN
 # =====================================================================
 
-def resolve_archetype(agents: list[str], is_oos: bool = False) -> str:
+def resolve_archetype(
+    agents: list[str],
+    is_oos: bool = False,
+    explanatory: bool = False,
+) -> str:
     """
     Pure function: agents that produced content -> response archetype.
 
@@ -249,6 +287,14 @@ def resolve_archetype(agents: list[str], is_oos: bool = False) -> str:
         agents: agents that produced usable output (no error, non-empty output).
                 This is NOT the planner's plan: it represents what was actually obtained.
         is_oos: True if any step in the plan was marked as oos.
+        explanatory: True if the planner marked the request as a question about
+                a mechanism or a quantity rather than about what to do. The map
+                below is keyed by AGENT, and the same agent answers both kinds:
+                `chemistry` interprets a test panel (assessment) and explains the
+                HOCl/OCl- equilibrium (explanation). Without this flag the agent
+                decides the shape, and a conceptual question inherits a contract
+                whose shape is "verdict on what is out of range" — leaving the
+                answer nowhere to go.
 
     Returns:
         Key of ARCHETYPE_CONTRACTS.
@@ -267,6 +313,13 @@ def resolve_archetype(agents: list[str], is_oos: bool = False) -> str:
     if not candidates:
         return DEFAULT_ARCHETYPE
 
+    if explanatory:
+        # Se añade como candidato en lugar de imponerse: la precedencia sigue
+        # decidiendo. Un turno explicativo que además destapó un peligro sale
+        # como `critical`, y uno que además calculó un número, como
+        # `calculation`. Explicar nunca debe enterrar una advertencia.
+        candidates.add("explanation")
+
     return min(candidates, key=lambda c: PRECEDENCE.index(c)
                if c in PRECEDENCE else len(PRECEDENCE))
 
@@ -277,23 +330,21 @@ def get_contract(archetype: str) -> dict:
                                    ARCHETYPE_CONTRACTS[DEFAULT_ARCHETYPE])
 
 
-def build_synthesizer_archetype_section(archetype: str, agents: list[str]) -> str:
-    """
-    Build archetype section for synthesizer prompt.
-    """
-    if archetype == "conversational":
-        return "conversational"
-    if archetype == "oos":
-        return "out_of_scope"
-    if archetype == "critical":
-        return "critical"
-    if archetype == "compliance":
-        return "compliance"
-    if archetype == "calculation":
-        return "calculation"
-    if archetype == "reference":
-        return "reference"
-    return "assessment"
+# build_synthesizer_archetype_section vivía acá y devolvía el NOMBRE del
+# arquetipo — la cadena "assessment" — y nada más.
+#
+# nodes.py la importaba desde este módulo, así que el synthesizer recibía como
+# `{archetype_section}` de su prompt una única palabra: sin la forma exigida,
+# sin el presupuesto de palabras, sin las categorías de `details`, sin la
+# instrucción de `safety`. Todo el sistema de contratos de este fichero estaba
+# escrito y no llegaba al modelo.
+#
+# La implementación real, que renderiza el contrato entero, está en
+# prompts/prompt_archetype.py y nadie la llamaba. Dos funciones con el mismo
+# nombre en módulos distintos, y el import apuntando a la que no era.
+#
+# No se deja un alias: reexportarla desde acá es lo que permitió la confusión.
+# Importar de prompt_archetype.py, que es de donde sale el texto.
 
 
 # =====================================================================
