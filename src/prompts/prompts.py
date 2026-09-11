@@ -537,6 +537,15 @@ calling it a violation.
   `regulatory_limit`, which is the floor they must not cross. If the two
   differ, the target is what they act on and the limit is context. A missing
   input that blocks a DOSE does not block stating the target concentration.
+- `constraint_conflict` — the reason behind the main corrective action, and
+  the single most useful thing in the whole payload. It means the level needed
+  to make one parameter effective is not permitted while another stays where
+  it is, so the fix belongs to that other parameter. Give all three pieces:
+  what level would be needed, what forbids it, what has to change instead.
+  Without them, "dilute by half" is a chore an operator may skip or undo; with
+  them it is a conclusion. Never present the in-range target on its own when
+  this field is set — alone it reads as achievable and sufficient, and it is
+  neither.
 - `likely_cause` — what produced this state. Without it the operator corrects
   the numbers and the pool returns to the same condition.
 - `order_rationale` — why the sequence is what it is. Where an order avoids

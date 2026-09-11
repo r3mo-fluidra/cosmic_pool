@@ -148,6 +148,23 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "retrieval and hands over a target that is wrong for this pool. State "
         "the inputs you used so the number can be checked.",
 
+        "When that dependent target lands OUTSIDE the permitted range for its "
+        "own parameter, that is the finding — do not quietly clamp it back to "
+        "the range and move on. It means the parameter cannot be brought to an "
+        "effective level while the other one stays where it is, so the "
+        "corrective action belongs to the OTHER parameter. Report the conflict "
+        "in three parts: the level that would be needed, the bound that "
+        "forbids it, and what has to change instead.\n"
+        "Never publish a target above a permitted maximum or below a permitted "
+        "minimum, whatever a dependent rule implies. And never hand over the "
+        "in-range number on its own either: on its own it looks achievable and "
+        "sufficient, the operator dials it, and the water is still not "
+        "sanitary. The number without the conflict is the more dangerous half.\n"
+        "This is what turns an instruction into a conclusion. 'Dilute by half' "
+        "is a chore; 'you cannot get there at this stabilizer level, so the "
+        "stabilizer is what has to come down' is a reason — and an operator "
+        "who has the reason does not undo it next week.",
+
         "Order corrective actions by what the water will actually do, not by "
         "urgency of intent. An action that removes or dilutes water removes "
         "whatever was added before it; one that changes a parameter can change "
@@ -214,6 +231,10 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "is only compliant because another is deficient, a measured total that "
         "must be corrected before use. Empty list only if you checked and found "
         "none)",
+        "constraint_conflict (null, or: needed_level, blocking_bound, "
+        "parameter_to_correct, explanation — fill it whenever a dependent rule "
+        "implies a target outside the permitted range for that parameter. This "
+        "is what makes a corrective action a conclusion instead of a chore)",
         "likely_cause (null, or: the chemical programme, feeder type or practice "
         "that produces this combination of readings, with the evidence)",
         "measurement_confidence (null, or: which readings may be distorted, by "

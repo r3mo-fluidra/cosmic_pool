@@ -272,3 +272,83 @@ class TestChemistryNoSeContradice:
         # Clorar y luego diluir el 50% tira la mitad del cloro recién añadido.
         assert "removes\n  whatever was added before it" in prompt or \
                "removes whatever was added before it" in prompt
+
+
+# =====================================================================
+# Conflicto de restricción: por qué diluir es una conclusión, no una tarea
+# =====================================================================
+# El corpus (CH13-13.4) reconoce el ratio FC/CYA — "captura correctamente la
+# dirección del efecto real" — y se niega a darle un número: "circulan varios
+# porcentajes", "expresamente no es un estándar regulatorio". Y resuelve el
+# conflicto: "donde un cálculo por ratio implique un cloro libre por encima
+# del máximo permitido, la respuesta correcta es reducir el cianúrico".
+#
+# Con el rango del corpus en 1-4 ppm (nodo free_chlorine), un CYA de 90 pide
+# por ratio ~6.75 ppm: fuera de rango. De ahí que la vía sea diluir.
+#
+# El sistema recomendaba diluir y acertaba, pero sin decir por qué. Un
+# operador que recibe "drena la mitad" sin la razón lo pospone o lo deshace;
+# uno que entiende que no puede desinfectar a ese nivel de estabilizador, no.
+#
+# El peligro simétrico, y el motivo de que el target solo no baste: 3 ppm
+# entregados sin el conflicto parecen alcanzables y suficientes. El operador
+# los dosifica, reabre, y el agua sigue sin desinfectar. Fue el error de la
+# primera versión de B1 con su "por encima de 2.0 ppm".
+
+
+class TestConflictoDeRestriccion:
+    @pytest.fixture
+    def chem(self):
+        from src.prompts.prompt_archetype import build_agent_prompt
+        from src.prompts.prompts_sub_agents import AGENT_REGISTRY, CHEMISTRY
+        return build_agent_prompt(AGENT_REGISTRY[CHEMISTRY], "chemistry")
+
+    @pytest.fixture
+    def synth(self):
+        from src.prompts.prompts import SYNTHESIZER_PROMPT
+        return SYNTHESIZER_PROMPT
+
+    def test_un_target_fuera_de_rango_es_el_hallazgo(self, chem):
+        assert "that is the finding" in chem
+        assert "do not quietly clamp it back" in chem
+
+    def test_la_correccion_pasa_al_otro_parametro(self, chem):
+        assert "belongs to the OTHER parameter" in chem
+
+    def test_exige_las_tres_partes_del_conflicto(self, chem):
+        assert "the level that would be needed" in chem
+        assert "the bound that\nforbids it" in chem or "the bound that forbids it" in chem
+        assert "what has to change instead" in chem
+
+    def test_prohibe_publicar_un_target_fuera_de_limites(self, chem):
+        # Dar 6.75 ppm a un operador cuyo código tope en 4 lo pone en
+        # infracción: la química no autoriza a saltarse el código.
+        assert "Never publish a target above a permitted maximum" in chem
+
+    def test_prohibe_el_target_a_secas_que_es_la_mitad_peligrosa(self, chem):
+        # El error de la primera versión: "sube por encima de 2.0 ppm".
+        assert "The number without the conflict is the more dangerous half" in chem
+
+    def test_el_campo_esta_en_el_contrato_de_salida(self):
+        from src.prompts.prompts_sub_agents import AGENT_REGISTRY, CHEMISTRY
+        oc = AGENT_REGISTRY[CHEMISTRY].output_contract
+        assert "constraint_conflict" in oc
+        for parte in ["needed_level", "blocking_bound", "parameter_to_correct"]:
+            assert parte in oc
+
+    def test_el_synthesizer_lo_arrastra_al_tier_visible(self, synth):
+        assert "`constraint_conflict`" in synth
+        assert "what level would be needed" in synth
+
+    def test_el_synthesizer_no_puede_dar_el_target_solo(self, synth):
+        assert "Never present the in-range target on its own" in synth
+
+    def test_sigue_sin_hardcodear_el_ratio(self, chem):
+        """
+        La decisión se mantiene: el corpus no da un porcentaje, y el prompt
+        tampoco lo inventa. El razonamiento es genérico; los números salen del
+        grafo o no salen.
+        """
+        import re
+        for patron in [r"\b7\.5\s*%", r"\b6\.75", r"\b1\s*to\s*4\s*ppm"]:
+            assert not re.search(patron, chem), f"valor de dominio hardcodeado: {patron}"
