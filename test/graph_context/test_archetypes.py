@@ -389,3 +389,37 @@ class TestLimiteVsObjetivo:
 
     def test_el_status_se_juzga_contra_el_limite(self, oc):
         assert "never against a target" in oc
+
+
+class TestPracticaDeIndustriaVsCodigo:
+    """
+    La relación proporcional FC/CYA se añadió al grafo como práctica de
+    industria (fc_cya_proportional_target), no como norma: el corpus se niega
+    expresamente a darle un número y advierte de que no es estándar
+    regulatorio. El nodo arrastra esa advertencia por QUALIFIED_BY.
+
+    El prompt tiene que mantener la distinción, porque el riesgo es simétrico:
+    citar una práctica como si fuera código expone al operador ante un
+    inspector, y descartarla lo deja sin la razón por la que hay que diluir.
+    """
+
+    @pytest.fixture
+    def prompt(self):
+        from src.prompts.prompt_archetype import build_agent_prompt
+        from src.prompts.prompts_sub_agents import AGENT_REGISTRY, CHEMISTRY
+        return build_agent_prompt(AGENT_REGISTRY[CHEMISTRY], "chemistry")
+
+    def test_separa_practica_de_requisito(self, prompt):
+        assert "Keep industry practice and code requirement apart" in prompt
+
+    def test_prohibe_atribuirla_a_una_seccion_de_codigo(self, prompt):
+        assert "never\nattribute it to a code section" in prompt or \
+               "never attribute it to a code section" in prompt
+
+    def test_el_status_se_juzga_contra_la_norma_no_contra_la_practica(self, prompt):
+        assert "A `status` is judged against the\nregulatory bound" in prompt or \
+               "A `status` is judged against the regulatory bound" in prompt
+
+    def test_puede_informar_el_objetivo_operativo(self, prompt):
+        # Descartarla dejaría al operador sin el porqué de la dilución.
+        assert "can inform the" in prompt and "operating_target" in prompt

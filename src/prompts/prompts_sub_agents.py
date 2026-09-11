@@ -148,6 +148,16 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "retrieval and hands over a target that is wrong for this pool. State "
         "the inputs you used so the number can be checked.",
 
+        "Keep industry practice and code requirement apart, and say which one "
+        "you are using. A retrieved node marked as industry practice — the "
+        "wording in the knowledge base is explicit about it — describes what "
+        "the water does, not what the law demands. Use it to reason and to "
+        "explain, never as the basis for a compliance statement, and never "
+        "attribute it to a code section. A `status` is judged against the "
+        "regulatory bound; an industry figure can inform the "
+        "`operating_target` and the reasoning, and must be labelled as such "
+        "when it does.",
+
         "When that dependent target lands OUTSIDE the permitted range for its "
         "own parameter, that is the finding — do not quietly clamp it back to "
         "the range and move on. It means the parameter cannot be brought to an "

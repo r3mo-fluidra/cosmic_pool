@@ -86,6 +86,11 @@ CASOS: list[tuple[str, str, str]] = [
         "mps_test_interference",
     ),
     (
+        "Con CYA 90, ¿a qué cloro apunto? (proporción, práctica de industria)",
+        "proportional free chlorine target for cyanuric acid level",
+        "fc_cya_proportional_target",
+    ),
+    (
         "¿Por qué se me ha disparado el estabilizador?",
         "cyanuric acid accumulation from stabilized chlorine feeder",
         "cya_accumulation_projection",
