@@ -155,6 +155,11 @@ def unsupported_numbers(payload, raw_content: str) -> list[str]:
 def _visible_text(payload) -> str:
     partes = [getattr(payload, "answer", "") or "", getattr(payload, "safety", "") or ""]
     partes += list(getattr(payload, "actions", None) or [])
+    # `readings` también es tier 1: una lectura que el synthesizer ya puso ahí
+    # está reportada, y volver a añadirla la duplicaría.
+    for r in (getattr(payload, "readings", None) or []):
+        partes += [getattr(r, "parameter", "") or "", getattr(r, "measured", "") or "",
+                   getattr(r, "note", "") or ""]
     return " ".join(partes).lower()
 
 
@@ -162,20 +167,28 @@ def _reading_is_visible(reading: dict, visible: str) -> bool:
     """
     ¿Está esta lectura REPORTADA en el tier visible, no solo nombrada?
 
-    Nombrar el parámetro dentro de una acción ("baja el pH") no cuenta: el
-    operador no se entera de cuánto marcó ni de que incumple. Se exige el
-    nombre Y el valor medido, que es lo que convierte una tarea en un dato.
-    """
-    nombre = str(reading.get("parameter", "")).replace("_", " ").strip().lower()
-    if not nombre or nombre not in visible:
-        return False
+    La señal es el VALOR MEDIDO, no el nombre del parámetro. Nombrarlo dentro
+    de una acción ("baja el pH") no cuenta: el operador no se entera de cuánto
+    marcó ni de que incumple. El valor es lo que convierte una tarea en un dato.
 
+    Y el nombre no sirve para decidirlo: el especialista emite sus parámetros
+    en inglés ("Free Chlorine") y el turno puede estar en español, así que
+    buscar el nombre daba ausente en TODAS las lecturas de cualquier turno en
+    español — y el validador las duplicaba todas. Las cifras no se traducen.
+
+    El coste es un falso positivo posible: si el mismo número aparece en el
+    texto por otro motivo, la lectura se da por reportada. Prefiero eso a
+    duplicar, porque el synthesizer sí tiene instrucciones de poblar
+    `readings` y este chequeo es la red, no la vía principal.
+    """
     medido = reading.get("measured")
     if medido is None:
+        # Sin valor no hay nada que comprobar ni que añadir.
         return True
 
-    texto = f"{medido}".rstrip("0").rstrip(".")
-    return texto in visible or f"{medido}" in visible
+    crudo = f"{medido}"
+    normalizado = crudo.rstrip("0").rstrip(".") if "." in crudo else crudo
+    return crudo in visible or normalizado in visible
 
 
 #: Estados que afirman un incumplimiento. Solo son sostenibles si hay un
@@ -244,23 +257,45 @@ def enforce_visible_readings(payload, readings: list[dict], language: str,
 
     report.readings_missing = [str(r.get("parameter", "?")) for r in faltantes]
 
+    # Van al campo `readings`, que renderiza como lista. Antes se concatenaban
+    # al final del `answer` con puntos y comas: resolvía la cobertura por
+    # acumulación en vez de por redacción, y en un móvil se leía como JSON
+    # traducido. El contrato pide una a tres oraciones de prosa, y siete
+    # parámetros no caben ahí por mucho que se doblen.
+    linea_cls = _infer_reading_cls(payload)
+    if linea_cls is None:
+        return
+
     frases = _STATUS_PHRASE.get(language, _STATUS_PHRASE["es"])
-    trozos = []
+    nuevas = []
     for r in faltantes:
         nombre = str(r.get("parameter", "")).replace("_", " ").strip()
         medido = r.get("measured")
-        estado = frases.get(str(r.get("status")))
         if not nombre or medido is None:
             continue
-        trozos.append(f"{nombre} {medido}" + (f" ({estado})" if estado else ""))
+        nuevas.append(linea_cls(
+            parameter=nombre,
+            measured=f"{medido}",
+            note=frases.get(str(r.get("status")), ""),
+        ))
 
-    if not trozos:
+    if not nuevas:
         return
 
-    encabezado = "Además:" if language == "es" else "Also:"
-    payload.answer = f"{(payload.answer or '').rstrip()} {encabezado} {'; '.join(trozos)}.".strip()
+    payload.readings = list(getattr(payload, "readings", None) or []) + nuevas
     report.readings_appended = True
     report.notes.append(f"lecturas añadidas al tier visible: {report.readings_missing}")
+
+
+def _infer_reading_cls(payload):
+    """La clase de ReadingLine, desde el propio modelo. None si no la tiene."""
+    existentes = getattr(payload, "readings", None)
+    if existentes:
+        return type(existentes[0])
+    try:  # pydantic v2
+        return type(payload).model_fields["readings"].annotation.__args__[0]
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -540,7 +575,7 @@ def _infer_detail_cls(payload):
     if payload.details:
         return type(payload.details[0])
     try:  # pydantic v2
-        return payload.model_fields["details"].annotation.__args__[0]
+        return type(payload).model_fields["details"].annotation.__args__[0]
     except Exception:  # fallback laxo
         from types import SimpleNamespace
         return lambda label, body: SimpleNamespace(label=label, body=body)

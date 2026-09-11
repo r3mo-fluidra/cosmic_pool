@@ -33,6 +33,36 @@ if TYPE_CHECKING:
 # 1. ESQUEMA DE SALIDA
 # =====================================================================
 
+class ReadingLine(BaseModel):
+    """
+    Una lectura de análisis en el tier 1, renderizada como línea de lista.
+
+    Existe porque la cobertura no cabía en la prosa. El contrato pide un
+    `answer` de una a tres oraciones, y un panel de agua trae siete
+    parámetros: forzarlos dentro producía un volcado con puntos y comas que
+    en un móvil se lee como JSON traducido. Separando el campo, la prosa
+    vuelve a ser prosa y las cifras se leen como lo que son, una tabla.
+    """
+
+    parameter: str = Field(
+        description="Parameter name as the operator knows it: pH, Free Chlorine, Cyanuric Acid."
+    )
+
+    measured: str = Field(
+        description="The measured value with its unit, as reported: '0.8 ppm', '7.9'."
+    )
+
+    note: str = Field(
+        description=(
+            "What this value means, in a handful of words and in the user's "
+            "language: 'below the 2.0 ppm minimum', 'at its ceiling, no "
+            "headroom'. Never intensify past the status the specialist "
+            "assigned — a value sitting exactly on a published bound complies "
+            "with it and is never described as a breach."
+        )
+    )
+
+
 class DetailSection(BaseModel):
     """Collapsible section (Tier 2). The user opens it with a tap."""
 
@@ -82,6 +112,18 @@ class SynthesizerOutput(BaseModel):
         ),
     )
 
+    readings: List["ReadingLine"] = Field(
+        default_factory=list,
+        description=(
+            "TIER 1. One entry per reported measurement that is NOT comfortably "
+            "in range — the panel the operator scans before doing anything. "
+            "Renders as a list, so it does not have to be forced into prose: "
+            "`answer` stays one to three sentences and carries the verdict and "
+            "the reasoning, while the per-parameter figures live here. "
+            "Empty for any turn that did not interpret test results."
+        ),
+    )
+
     details: List[DetailSection] = Field(
         default_factory=list,
         description=(
@@ -100,6 +142,13 @@ class SynthesizerOutput(BaseModel):
         the history must not carry Tier 2 content that the user never read.
         """
         parts = [self.answer.strip()]
+        # Las lecturas van entre el veredicto y las acciones: el operador lee
+        # qué pasa, comprueba los números, y entonces actúa.
+        if self.readings:
+            parts.append("\n".join(
+                f"- **{r.parameter}** {r.measured}" + (f" — {r.note}" if r.note else "")
+                for r in self.readings
+            ))
         if self.actions:
             parts.append("\n".join(f"- {a}" for a in self.actions))
         if self.safety:
@@ -192,10 +241,13 @@ ARCHETYPE_CONTRACTS = {
             "Lead with the verdict in one sentence: what is wrong and, when a "
             "closure or a stop is called for, WHICH single reading triggers it. "
             "That sentence is the opening, not the whole answer.\n"
-            "Then, still in the visible tier: every reading that is not "
-            "comfortably in range, each with its measured value and what it "
-            "means. A reading the user reported and the answer never mentions "
-            "reads as a reading you found acceptable. When the raw content "
+            "Then `readings`, one entry per reported value that is not "
+            "comfortably in range: that is where measured figures belong, and "
+            "it renders as a list so the prose does not have to carry them. A "
+            "reading the user reported and the answer never mentions reads as "
+            "a reading you found acceptable. Keep `answer` to the verdict and "
+            "the reasoning — one to three sentences — and let the panel be a "
+            "panel. When the raw content "
             "carries an operating target, give it — the target is the number "
             "the operator acts on. When it carries a likely cause, name it: "
             "correcting the values without naming what produced them means the "

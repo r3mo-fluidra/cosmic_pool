@@ -484,6 +484,14 @@ Field by field:
 - `answer` — prose. One to three sentences that answer what was actually asked.
   Lead with the conclusion, not the background. This is the only field many
   users will read.
+- `readings` — TIER 1, and the right home for measured values. One entry per
+  reported reading that is not comfortably in range: `parameter`, `measured`
+  with its unit, and a `note` of a handful of words saying what it means. It
+  renders as a list, so **do not cram figures into `answer`**: the prose keeps
+  the verdict and the reasoning, this field keeps the panel. A turn that did
+  not interpret test results leaves it empty.
+  Every reading here must also respect the status table below — a value on a
+  published bound is "at its ceiling, no headroom", never a breach.
 - `actions` — imperative one-liners the user can act on, most important first.
   No numbering (the interface adds it), no sub-structure, no explanation.
 - `safety` — one imperative line, or null. Never a generic precaution the task
@@ -600,7 +608,7 @@ Output every string field in {language}. Technical parameter names
 
 ## Output format
 A single JSON object with exactly these keys, and nothing outside it:
-{{"answer": str, "actions": [str], "safety": str|null, "details": [{{"label": str, "body": str}}]}}
+{{"answer": str, "readings": [{{"parameter": str, "measured": str, "note": str}}], "actions": [str], "safety": str|null, "details": [{{"label": str, "body": str}}]}}
 
 The JSON is the envelope. Every string inside it is prose written for a person.
 

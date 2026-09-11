@@ -99,16 +99,18 @@ class TestPromocionAlTierVisible:
         enforce_visible_readings(p, required_readings(PANEL), "es", rep)
 
         assert rep.readings_appended is True
-        for omitido in ["pH", "Cyanuric Acid", "Combined Chlorine"]:
-            assert omitido.lower() in p.answer.lower()
-        assert "7.9" in p.answer and "90" in p.answer
+        # Van al campo `readings` (lista), no concatenadas al `answer`: el
+        # volcado con puntos y comas se leía como JSON traducido en un móvil.
+        nombres = {r.parameter for r in p.readings}
+        assert nombres == {"pH", "Cyanuric Acid", "Combined Chlorine"}
+        assert {r.measured for r in p.readings} == {"7.9", "90", "0.4"}
 
     def test_el_texto_añadido_dice_el_estado(self):
         from src.graph_context.response_validator import ValidationReport
         p = _payload("Cloro libre 0.8 bajo mínimo.")
         rep = ValidationReport()
         enforce_visible_readings(p, [_lectura("pH", 7.9, "above_maximum")], "es", rep)
-        assert "por encima del máximo" in p.answer
+        assert p.readings[0].note == "por encima del máximo"
 
     def test_at_ceiling_se_describe_como_sin_margen_no_como_violacion(self):
         """
@@ -119,17 +121,28 @@ class TestPromocionAlTierVisible:
         p = _payload("Cloro libre bajo.")
         rep = ValidationReport()
         enforce_visible_readings(p, [_lectura("Cyanuric Acid", 90, "at_ceiling")], "es", rep)
-        assert "sin margen" in p.answer
+        nota = p.readings[0].note
+        assert "sin margen" in nota
         for prohibido in ["excede", "viola", "infracción", "por encima del máximo"]:
-            assert prohibido not in p.answer.lower()
+            assert prohibido not in nota.lower()
 
     def test_respeta_el_idioma(self):
         from src.graph_context.response_validator import ValidationReport
         p = _payload("Free chlorine is low.")
         rep = ValidationReport()
         enforce_visible_readings(p, [_lectura("pH", 7.9, "above_maximum")], "en", rep)
-        assert "above the maximum" in p.answer
-        assert "Also:" in p.answer
+        assert p.readings[0].note == "above the maximum"
+
+    def test_una_lectura_ya_puesta_en_readings_no_se_duplica(self):
+        """`readings` también es tier 1: si el synthesizer la puso, ya está."""
+        from src.graph_context.response_contracts import ReadingLine
+        from src.graph_context.response_validator import ValidationReport
+        p = _payload("Cloro libre bajo.")
+        p.readings = [ReadingLine(parameter="pH", measured="7.9", note="sobre el máximo")]
+        rep = ValidationReport()
+        enforce_visible_readings(p, [_lectura("pH", 7.9, "above_maximum")], "es", rep)
+        assert len(p.readings) == 1
+        assert rep.readings_appended is False
 
     def test_no_toca_nada_si_estan_todas(self):
         from src.graph_context.response_validator import ValidationReport
@@ -150,7 +163,7 @@ class TestIntegracionConElContrato:
             readings=required_readings(PANEL), language="es",
         )
         assert rep.readings_appended is True
-        assert "7.9" in p.answer
+        assert "7.9" in {r.measured for r in p.readings}
 
     def test_sin_readings_el_comportamiento_no_cambia(self):
         p = _payload("Una respuesta cualquiera.")
