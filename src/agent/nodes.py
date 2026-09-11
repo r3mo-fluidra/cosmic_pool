@@ -1652,6 +1652,9 @@ def synthesizer(state: PoolAgentState) -> dict:
             # las añade. Ver enforce_visible_readings.
             readings=required_readings(_readings_from_results(agent_results)),
             language=language_code,
+            # Para detectar cantidades que el synthesizer no pudo haber sacado
+            # de ningún sitio. Ver unsupported_numbers.
+            raw_content=raw_content,
         )
         validation = {**validation, **report.to_dict()}
     except Exception as exc:

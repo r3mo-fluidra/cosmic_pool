@@ -67,12 +67,18 @@ class ValidationReport:
     #: que deja de ser una instrucción y pasa a ser una comprobación.
     readings_missing: list[str] = field(default_factory=list)
     readings_appended: bool = False
+    #: Cantidades del tier visible que no aparecen en el material de origen.
+    #: El peor modo de fallo según el propio prompt del synthesizer.
+    unsupported_numbers: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
     def needs_retry(self) -> bool:
         """Un solo retry. Si vuelve a fallar, se acepta la degradación."""
         return self.safety_missing or self.answer_exceeds_budget
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 # --------------------------------------------------------------------------
@@ -95,6 +101,55 @@ _STATUS_PHRASE = {
         "at_floor": "at its floor, no headroom",
     },
 }
+
+
+#: Números que no hace falta respaldar: son lenguaje, no cantidades.
+#: Rangos horarios, ordinales y unidades sueltas aparecen en prosa normal.
+_NUMERO_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_TRIVIALES = frozenset({"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                        "12", "24", "48", "72", "100"})
+
+
+def unsupported_numbers(payload, raw_content: str) -> list[str]:
+    """
+    Cantidades que aparecen en el tier visible y no en el material de origen.
+
+    El SYNTHESIZER_PROMPT llama a esto el peor modo de fallo del sistema
+    ("never invent a dosage... filling a gap to satisfy a shape"), y aun así
+    ocurrió: con el `calculation_request` sin ejecutar, el synthesizer escribió
+    "drena y rellena entre un treinta y un cuarenta por ciento". El número no
+    estaba en ningún sitio del payload, y además era erróneo — ninguna de las
+    dos fracciones alcanzaba el objetivo de estabilizador que el propio agente
+    había pedido.
+
+    Un número inventado es peor que un dato ausente: llega con la misma
+    confianza que los verdaderos y el operador no tiene forma de distinguirlos.
+
+    Detecta, no corrige. Reescribir la frase que lo contiene exigiría entender
+    la frase; lo que se puede afirmar sin ambigüedad es que ese número no tiene
+    respaldo, y eso basta para decidir un reintento y para medir la frecuencia
+    en Langfuse.
+    """
+    if not raw_content:
+        return []
+
+    numeros_origen = set(_NUMERO_RE.findall(raw_content))
+    # "thirty to forty percent" no lleva dígitos: los números en palabras se
+    # escapan de este chequeo, y es una limitación consciente. Cubre el caso
+    # frecuente (cifras) sin arriesgar falsos positivos con un parser de
+    # numerales en dos idiomas.
+    sospechosos = []
+    for n in _NUMERO_RE.findall(_visible_text(payload)):
+        if n in _TRIVIALES or n in numeros_origen:
+            continue
+        # Tolerancia de formato: 3 frente a 3.0, 0,5 frente a 0.5.
+        normalizado = n.replace(",", ".").rstrip("0").rstrip(".")
+        if any(normalizado == o.replace(",", ".").rstrip("0").rstrip(".")
+               for o in numeros_origen):
+            continue
+        sospechosos.append(n)
+
+    return sospechosos
 
 
 def _visible_text(payload) -> str:
@@ -123,13 +178,47 @@ def _reading_is_visible(reading: dict, visible: str) -> bool:
     return texto in visible or f"{medido}" in visible
 
 
+#: Estados que afirman un incumplimiento. Solo son sostenibles si hay un
+#: límite normativo contra el que medirlos.
+_VIOLATION_STATUSES = ("below_minimum", "above_maximum")
+
+
+def coherent_status(reading: dict) -> str | None:
+    """
+    El estado de una lectura, degradado si se contradice a sí mismo.
+
+    Un `above_maximum` con `regulatory_limit` en null afirma que se superó un
+    máximo que la propia entrada dice no conocer. Medido: el especialista
+    devolvió la alcalinidad total como above_maximum sin límite, juzgándola
+    contra su operating_target — y el parámetro no solo cumplía, estaba
+    prácticamente en objetivo. Declarar infracción a un parámetro sano es el
+    mismo error que llamar violación a un techo, y llega igual de lejos: un
+    operador que lo repite ante un inspector reporta un incumplimiento que no
+    existe.
+
+    Se degrada a None en vez de a "in_range": no sabemos que esté en rango,
+    sabemos que no podemos afirmar lo contrario. None deja la lectura fuera de
+    las obligatorias y fuera del texto que este módulo genera, que es la
+    conducta segura cuando el dato se contradice.
+    """
+    status = reading.get("status")
+    if status in _VIOLATION_STATUSES and reading.get("regulatory_limit") is None:
+        return None
+    return status
+
+
 def required_readings(test_interpretation) -> list[dict]:
-    """Las lecturas que el tier visible NO puede omitir."""
+    """
+    Las lecturas que el tier visible NO puede omitir.
+
+    Filtra también las incoherentes: una violación sin límite que la respalde
+    no se reporta como violación.
+    """
     if not isinstance(test_interpretation, list):
         return []
     return [
         r for r in test_interpretation
-        if isinstance(r, dict) and r.get("status") not in (None, "in_range")
+        if isinstance(r, dict) and coherent_status(r) not in (None, "in_range")
     ]
 
 
@@ -172,9 +261,6 @@ def enforce_visible_readings(payload, readings: list[dict], language: str,
     payload.answer = f"{(payload.answer or '').rstrip()} {encabezado} {'; '.join(trozos)}.".strip()
     report.readings_appended = True
     report.notes.append(f"lecturas añadidas al tier visible: {report.readings_missing}")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 # --------------------------------------------------------------------------
@@ -385,7 +471,8 @@ def promote_safety_from_details(payload, report: ValidationReport) -> None:
 
 def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
                      detail_cls=None, readings: list[dict] | None = None,
-                     language: str = "es") -> tuple[Any, ValidationReport]:
+                     language: str = "es",
+                     raw_content: str = "") -> tuple[Any, ValidationReport]:
     """
     Aplica el contrato al payload del synthesizer.
 
@@ -434,6 +521,15 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
 
     # 4. Podar secciones vacías.
     payload.details = [d for d in payload.details if d.body and d.body.strip()]
+
+    # 5. Cantidades sin respaldo. Al final, sobre el texto definitivo, para
+    #    que no se le escape lo que el propio validador haya añadido.
+    if raw_content:
+        report.unsupported_numbers = unsupported_numbers(payload, raw_content)
+        if report.unsupported_numbers:
+            report.notes.append(
+                f"cantidades sin respaldo en el tier visible: {report.unsupported_numbers}"
+            )
 
     report.visible_words_after = _visible_words(payload)
     return payload, report

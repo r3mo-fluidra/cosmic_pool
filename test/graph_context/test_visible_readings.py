@@ -31,18 +31,20 @@ from src.graph_context.response_validator import (
 from src.graph_context.response_contracts import get_contract
 
 
-def _lectura(parametro, medido, status, target=None):
+def _lectura(parametro, medido, status, target=None, limite=None):
     return {"parameter": parametro, "measured": medido, "status": status,
-            "operating_target": target}
+            "operating_target": target, "regulatory_limit": limite}
 
 
-# El panel exacto del trace.
+# El panel del trace 6660e14f, con los límites que trae el especialista.
+# Un status de violación SIN límite es incoherente y se degrada: ver
+# TestCoherenciaDelStatus.
 PANEL = [
-    _lectura("Free Chlorine", 0.8, "below_minimum", 3.0),
-    _lectura("Combined Chlorine", 0.4, "at_ceiling", 0.2),
-    _lectura("pH", 7.9, "above_maximum", 7.5),
-    _lectura("Cyanuric Acid", 90, "at_ceiling", 40.0),
-    _lectura("Total Alkalinity", 130, "in_range", 90.0),
+    _lectura("Free Chlorine", 0.8, "below_minimum", 3.0, 2.0),
+    _lectura("Combined Chlorine", 0.4, "at_ceiling", 0.2, 0.4),
+    _lectura("pH", 7.9, "above_maximum", 7.5, 7.8),
+    _lectura("Cyanuric Acid", 90, "at_ceiling", 40.0, 90.0),
+    _lectura("Total Alkalinity", 130, "in_range", 90.0, 180.0),
     _lectura("Calcium Hardness", 380, "in_range", 300.0),
     _lectura("Temperature", 82, "in_range", None),
 ]
@@ -203,3 +205,103 @@ class TestExtraccionDesdeLosSubAgentes:
 
         res = {"step_1": AgentResult(agent="general", step=1, output="Hola, ¿en qué ayudo?")}
         assert _readings_from_results(res) == []
+
+
+class TestCoherenciaDelStatus:
+    """
+    Trace 4e3153ed: el especialista devolvió la alcalinidad total como
+    above_maximum con regulatory_limit en null — la juzgó contra su
+    operating_target. El parámetro no solo cumplía: con la corrección de
+    cianurato estaba prácticamente en objetivo.
+
+    Declarar infracción a un parámetro sano llega igual de lejos que negar
+    una real: el operador lo repite ante un inspector y reporta un
+    incumplimiento que no existe.
+    """
+
+    def test_una_violacion_sin_limite_no_se_sostiene(self):
+        from src.graph_context.response_validator import coherent_status
+        assert coherent_status(
+            _lectura("Total Alkalinity", 130, "above_maximum", 100.0)) is None
+
+    def test_una_violacion_con_limite_se_respeta(self):
+        from src.graph_context.response_validator import coherent_status
+        assert coherent_status(
+            _lectura("pH", 7.9, "above_maximum", 7.5, 7.8)) == "above_maximum"
+
+    def test_at_ceiling_no_necesita_degradarse(self):
+        # Un techo se afirma contra el valor publicado, que la entrada trae.
+        from src.graph_context.response_validator import coherent_status
+        assert coherent_status(
+            _lectura("Cyanuric Acid", 90, "at_ceiling", 40.0, 90.0)) == "at_ceiling"
+
+    def test_la_incoherente_no_llega_al_tier_visible(self):
+        incoherente = _lectura("Total Alkalinity", 130, "above_maximum", 100.0)
+        assert required_readings([incoherente]) == []
+
+    def test_el_caso_completo_del_trace(self):
+        panel = PANEL[:4] + [_lectura("Total Alkalinity", 130, "above_maximum", 100.0)]
+        nombres = {r["parameter"] for r in required_readings(panel)}
+        assert "Total Alkalinity" not in nombres
+        assert nombres == {"Free Chlorine", "Combined Chlorine", "pH", "Cyanuric Acid"}
+
+
+class TestCantidadesSinRespaldo:
+    """
+    El synthesizer escribió "drena y rellena entre un treinta y un cuarenta
+    por ciento" con el calculation_request sin ejecutar. El número no estaba
+    en el payload del agente, y encima era erróneo: ninguna de las dos
+    fracciones alcanzaba el objetivo de estabilizador que él mismo pidió.
+
+    Un número inventado es peor que un dato ausente: llega con la misma
+    confianza que los verdaderos.
+    """
+
+    def test_detecta_una_cantidad_que_no_esta_en_el_origen(self):
+        from src.graph_context.response_validator import unsupported_numbers
+        p = _payload("Drena el 37.5% del vaso.")
+        assert "37.5" in unsupported_numbers(p, "El cianúrico está en 90 ppm.")
+
+    def test_un_numero_del_origen_pasa(self):
+        from src.graph_context.response_validator import unsupported_numbers
+        p = _payload("El cianúrico está en 90 ppm.")
+        assert unsupported_numbers(p, "cyanuric acid 90 ppm at ceiling") == []
+
+    def test_tolera_diferencias_de_formato(self):
+        from src.graph_context.response_validator import unsupported_numbers
+        p = _payload("Cloro libre 3 ppm.")
+        assert unsupported_numbers(p, '"operating_target": 3.0') == []
+
+    def test_los_numeros_de_lenguaje_no_cuentan(self):
+        # "las 24 horas", "los 3 pasos": no son cantidades que respaldar.
+        from src.graph_context.response_validator import unsupported_numbers
+        p = _payload("Repite el test en 24 horas, en 3 puntos del vaso.")
+        assert unsupported_numbers(p, "sin cifras") == []
+
+    def test_sin_material_de_origen_no_acusa(self):
+        from src.graph_context.response_validator import unsupported_numbers
+        assert unsupported_numbers(_payload("47 ppm"), "") == []
+
+    def test_enforce_contract_lo_registra(self):
+        p = _payload("Drena el 37.5% del vaso.")
+        _, rep = enforce_contract(
+            p, get_contract("assessment"), ["chemistry"],
+            detail_cls=DetailSection, raw_content="cyanuric acid 90 ppm",
+        )
+        assert "37.5" in rep.unsupported_numbers
+
+
+class TestElReporteSigueSiendoSerializable:
+    def test_to_dict_es_un_metodo_de_la_clase(self):
+        """
+        Regresión de un bug propio: al insertar funciones de módulo dentro del
+        bloque de la clase, to_dict quedó huérfano a nivel de módulo. El
+        synthesizer llama report.to_dict() y el AttributeError se tragaba
+        en su except, anulando el enforcement ENTERO sin que se notara salvo
+        por una línea en `validation`.
+        """
+        from src.graph_context.response_validator import ValidationReport
+        rep = ValidationReport()
+        assert callable(getattr(rep, "to_dict", None))
+        d = rep.to_dict()
+        assert "readings_missing" in d and "unsupported_numbers" in d
