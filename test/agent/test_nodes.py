@@ -1,70 +1,81 @@
 """
-Tests para src/agent/nodes.py
+Tests de los nodos "simples" de src/agent/nodes.py: helpers puros,
+build_context_node, summarize_memory_node, planner y synthesizer.
 
-Estrategia de mocking (por qué está hecho así):
+El orchestrator tiene fichero propio (test_orchestrator.py): su superficie
+—fan-out, dependencias, circuit breaker— no entra cómodamente acá.
 
-1. `_get_llm()` y `_get_planner_chain()` son singletons perezosos definidos como
-   funciones a nivel de módulo en nodes.py. En vez de mockear `create_llm` /
-   `create_planner_chain` (lo que obligaría a lidiar con el caché global `_llm`
-   / `_planner_chain` entre tests), se parchea directamente
-   `nodes._get_llm` / `nodes._get_planner_chain` con `monkeypatch.setattr`.
-   Como las funciones del módulo llaman a estos nombres como globals en tiempo
-   de ejecución (no los capturan como bound methods), el parche surte efecto
-   sin fugas de estado entre tests.
+Estrategia de mocking
+─────────────────────
+1. Los getters de LLM (`_get_llm`, `_get_synthesis_llm`, `_get_planner_chain`)
+   son singletons perezosos a nivel de módulo. Se parchean con
+   monkeypatch.setattr sobre el módulo `nodes`, no sobre `config.llm`: las
+   funciones los resuelven como globals en runtime, así que el parche surte
+   efecto sin tener que limpiar el caché global entre tests.
 
-2. `get_agent_by_name` se importa dentro de nodes.py con
-   `from .agents import get_agent_by_name`, quedando como global del módulo
-   `nodes`. Se parchea igual: `monkeypatch.setattr(nodes, "get_agent_by_name", ...)`.
-   Esto evita inicializar el supervisor real (LLMs, Neo4j, Qdrant, etc.).
+2. `langfuse.observe` se neutraliza en test/conftest.py, que corre antes de
+   cualquier import — la decoración ocurre en tiempo de import, no de
+   ejecución.
 
-3. `ExecutionStep` y `AgentResult` se importan tal cual del `state.py` real del
-   proyecto (son modelos pydantic simples, sin dependencias pesadas), para que
-   los tests validen contra los mismos tipos que usa la app en producción.
-
-4. `langfuse.observe` decora `planner`, `orchestrator` y `synthesizer`. No se
-   mockea explícitamente: se asume que `langfuse` está instalado en el entorno
-   de test (como lo está en producción) y que el decorador no requiere
-   credenciales para envolver la función — solo para el tracing real, que en
-   test simplemente no se reporta a ningún backend.
-
-Requisitos para correr: pytest, y que el proyecto exponga `src` como paquete
-importable (por eso el bootstrap de sys.path al inicio, para que el archivo
-funcione sin importar cómo esté configurado pytest.ini / pyproject.toml).
+Ningún test de este fichero toca la red.
 """
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
-# --- Bootstrap: garantiza que "src" sea importable sin importar la config de pytest ---
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.types import Command
 
 from src.agent import nodes
 from src.agent.state import ExecutionStep, AgentResult
+from src.graph_context.response_contracts import SynthesizerOutput
 
 
 # ================================================================
 # HELPERS / FACTORIES
 # ================================================================
 
-def make_step(step=1, agent="diagnosis", task="do something", oos=False) -> ExecutionStep:
-    """Nota: `agent` debe ser uno de los AgentName válidos:
-    diagnosis | dosage | equipment | maintenance | oos
-    ("general" NO es válido para ExecutionStep aunque exista como agente registrado
-    en agents.py — no usarlo aquí o pydantic lo rechazará en el proyecto real)."""
-    return ExecutionStep(step=step, task=task, assigned_agent=agent, oos=oos)
+def make_step(step=1, agent="chemistry", task="do something", oos=False, depends_on=None):
+    return ExecutionStep(
+        step=step,
+        task=task,
+        assigned_agent=agent,
+        oos=oos,
+        depends_on=depends_on or [],
+    )
 
 
-def make_result(step=1, agent="diagnosis", output="ok", error=None) -> AgentResult:
-    return AgentResult(agent=agent, step=step, output=output, error=error)
+def make_result(step=1, agent="chemistry", output="ok", error=None, status=None):
+    kwargs = {} if status is None else {"status": status}
+    return AgentResult(agent=agent, step=step, output=output, error=error, **kwargs)
+
+
+CONFIG = {"configurable": {"thread_id": "test-thread"}}
+
+
+@pytest.fixture
+def fake_synthesis_llm(monkeypatch):
+    """
+    Sustituye `_get_synthesis_llm()`. El synthesizer llama
+    `.with_structured_output(SynthesizerOutput).invoke(messages)`, así que el
+    doble tiene que respetar esa cadena.
+
+    Devuelve el mock estructurado para poder inspeccionar el prompt enviado.
+    """
+    structured = MagicMock()
+    structured.invoke.return_value = SynthesizerOutput(
+        answer="respuesta final", actions=[], safety=None, details=[]
+    )
+
+    llm = MagicMock()
+    llm.with_structured_output.return_value = structured
+    monkeypatch.setattr(nodes, "_get_synthesis_llm", lambda: llm)
+    return structured
+
+
+def system_content_of(structured_mock) -> str:
+    return structured_mock.invoke.call_args.args[0][0].content
 
 
 # ================================================================
@@ -79,8 +90,7 @@ class TestExtractText:
         assert nodes._extract_text(123) == "123"
 
     def test_list_of_text_blocks_joined(self):
-        content = [{"text": "hello"}, {"text": "world"}]
-        assert nodes._extract_text(content) == "hello world"
+        assert nodes._extract_text([{"text": "hello"}, {"text": "world"}]) == "hello world"
 
     def test_list_skips_blank_and_non_dict_items(self):
         content = [{"text": "hello"}, {"text": "   "}, "not-a-dict", {"other": "x"}]
@@ -91,17 +101,49 @@ class TestExtractText:
 
 
 # ================================================================
+# _normalize_agent
+# ================================================================
+
+class TestNormalizeAgent:
+    def test_none_becomes_the_empty_string(self):
+        assert nodes._normalize_agent(None) == ""
+
+    def test_trims_and_lowercases(self):
+        assert nodes._normalize_agent("  Math  ") == "math"
+
+    def test_unwraps_the_value_of_an_enum_like_object(self):
+        assert nodes._normalize_agent(SimpleNamespace(value="Chemistry")) == "chemistry"
+
+
+# ================================================================
+# _route_from_plan
+# ================================================================
+
+class TestRouteFromPlan:
+    def test_an_empty_plan_goes_to_the_orchestrator(self):
+        assert nodes._route_from_plan([]) == "orchestrator"
+
+    def test_a_single_general_step_shortcuts_to_general(self):
+        assert nodes._route_from_plan([make_step(agent="general")]) == "general"
+
+    def test_a_single_oos_step_shortcuts_to_oos(self):
+        assert nodes._route_from_plan([make_step(agent="oos", oos=True)]) == "oos"
+
+    def test_a_multi_step_plan_always_goes_to_the_orchestrator(self):
+        plan = [make_step(step=1, agent="general"), make_step(step=2)]
+        assert nodes._route_from_plan(plan) == "orchestrator"
+
+
+# ================================================================
 # _is_oos
 # ================================================================
 
 class TestIsOos:
     def test_single_step_oos_true(self):
-        plan = [make_step(agent="oos", oos=True)]
-        assert nodes._is_oos(plan) is True
+        assert nodes._is_oos([make_step(agent="oos", oos=True)]) is True
 
     def test_single_step_oos_false(self):
-        plan = [make_step(oos=False)]
-        assert nodes._is_oos(plan) is False
+        assert nodes._is_oos([make_step(oos=False)]) is False
 
     def test_multi_step_plan_is_never_oos(self):
         plan = [make_step(agent="oos", oos=True), make_step(step=2)]
@@ -109,6 +151,32 @@ class TestIsOos:
 
     def test_empty_plan_is_not_oos(self):
         assert nodes._is_oos([]) is False
+
+
+# ================================================================
+# is_infra_error
+# ================================================================
+
+class TestIsInfraError:
+    @pytest.mark.parametrize("err", ["429 quota exceeded", "503 Service Unavailable"])
+    def test_provider_status_codes_are_infra(self, err):
+        assert nodes.is_infra_error(err) is True
+
+    @pytest.mark.parametrize(
+        "err",
+        [
+            "MISSING_INPUTS: need pool volume",
+            "CANNOT_COMPUTE: no formula",
+            "NO_GRAPH_COVERAGE: topic absent",
+            "TOOL_BUDGET_EXCEEDED: math exceeded its recursion_limit",
+        ],
+    )
+    def test_business_contracts_are_not_infra(self, err):
+        """Un gap de negocio no debe disparar el circuit breaker del turno."""
+        assert nodes.is_infra_error(err) is False
+
+    def test_no_error_is_not_infra(self):
+        assert nodes.is_infra_error(None) is False
 
 
 # ================================================================
@@ -120,22 +188,32 @@ class TestBuildRawContent:
         assert nodes._build_raw_content({}) == ""
 
     def test_successful_step_formats_output_section(self):
-        results = {"step_1": make_result(step=1, agent="diagnosis", output="pH is low")}
-        assert nodes._build_raw_content(results) == "[Step 1 — diagnosis]\npH is low"
+        results = {"step_1": make_result(step=1, agent="chemistry", output="pH is low")}
+        assert nodes._build_raw_content(results) == "[Step 1 — chemistry]\npH is low"
 
     def test_errored_step_formats_error_section(self):
-        results = {"step_1": make_result(step=1, agent="dosage", output="", error="boom")}
-        assert nodes._build_raw_content(results) == "[Step 1 — dosage] ERROR: boom"
+        results = {"step_1": make_result(step=1, agent="math", output="", error="boom", status="failed")}
+        assert nodes._build_raw_content(results) == "[Step 1 — math] ERROR: boom"
 
     def test_sections_ordered_by_step_not_dict_insertion_order(self):
-        second = make_result(step=2, agent="dosage", output="second")
-        first = make_result(step=1, agent="diagnosis", output="first")
-        raw = nodes._build_raw_content({"step_2": second, "step_1": first})
+        raw = nodes._build_raw_content({
+            "step_2": make_result(step=2, agent="math", output="second"),
+            "step_1": make_result(step=1, agent="chemistry", output="first"),
+        })
         assert raw.index("first") < raw.index("second")
 
     def test_step_with_no_output_and_no_error_is_omitted(self):
-        results = {"step_1": make_result(step=1, output="", error=None)}
-        assert nodes._build_raw_content(results) == ""
+        assert nodes._build_raw_content({"step_1": make_result(output="")}) == ""
+
+    def test_failed_steps_reach_the_synthesizer_too(self):
+        """Sin el error en el raw content, el turno degrada a un saludo genérico."""
+        results = {
+            "step_1": make_result(step=1, output="ok"),
+            "step_2": make_result(step=2, output="", error="504 timeout", status="failed"),
+        }
+        raw = nodes._build_raw_content(results)
+
+        assert "504 timeout" in raw
 
 
 # ================================================================
@@ -164,16 +242,34 @@ class TestEstimatedTokens:
 
 class TestBuildContextNode:
     def test_short_conversation_routes_to_planner(self):
-        state = {"messages": [HumanMessage(content="hi")]}
-        result = nodes.build_context_node(state)
+        result = nodes.build_context_node({"messages": [HumanMessage(content="hi")]})
+
         assert isinstance(result, Command)
         assert result.goto == "planner"
 
     def test_conversation_over_token_limit_routes_to_summarizer(self):
         long_text = "x" * ((nodes.TOKEN_LIMIT + 10) * 4)
-        state = {"messages": [HumanMessage(content=long_text)]}
-        result = nodes.build_context_node(state)
+        result = nodes.build_context_node({"messages": [HumanMessage(content=long_text)]})
+
         assert result.goto == "summarize_memory_node"
+
+    @pytest.mark.parametrize(
+        "channel", ["error", "planner_error", "archetype", "response"]
+    )
+    def test_clears_the_per_turn_channels(self, channel):
+        """
+        El checkpointer los persiste entre turnos y no tienen centinela propio.
+        `error` es el crítico: should_suggest corta con cualquier error, así
+        que un turno fallido dejaba el thread sin chips para siempre.
+        """
+        result = nodes.build_context_node({"messages": [HumanMessage(content="hi")]})
+
+        assert result.update[channel] is None
+
+    def test_stamps_the_turn_start_for_the_budget(self):
+        result = nodes.build_context_node({"messages": [HumanMessage(content="hi")]})
+
+        assert result.update["turn_started_at"] > 0
 
 
 # ================================================================
@@ -186,9 +282,9 @@ class TestSummarizeMemoryNode:
         monkeypatch.setattr(nodes, "_get_llm", lambda: fake_llm)
 
         messages = [HumanMessage(content=f"m{i}") for i in range(nodes.MESSAGES_TO_KEEP)]
-        state = {"messages": messages, "conversation_summary": ""}
-
-        result = nodes.summarize_memory_node(state)
+        result = nodes.summarize_memory_node(
+            {"messages": messages, "conversation_summary": ""}
+        )
 
         assert result.goto == "planner"
         assert result.update is None
@@ -203,16 +299,14 @@ class TestSummarizeMemoryNode:
             HumanMessage(content=f"m{i}", id=f"id{i}")
             for i in range(nodes.MESSAGES_TO_KEEP + 3)
         ]
-        state = {"messages": messages, "conversation_summary": ""}
+        result = nodes.summarize_memory_node(
+            {"messages": messages, "conversation_summary": ""}
+        )
 
-        result = nodes.summarize_memory_node(state)
-
-        assert result.goto == "planner"
         assert result.update["conversation_summary"] == "brand new summary"
 
         removed_ids = {m.id for m in result.update["messages"]}
-        expected_removed_ids = {m.id for m in messages[: -nodes.MESSAGES_TO_KEEP]}
-        assert removed_ids == expected_removed_ids
+        assert removed_ids == {m.id for m in messages[: -nodes.MESSAGES_TO_KEEP]}
         assert all(isinstance(m, RemoveMessage) for m in result.update["messages"])
 
         sent_prompt = fake_llm.invoke.call_args.args[0][-1].content
@@ -227,9 +321,9 @@ class TestSummarizeMemoryNode:
             HumanMessage(content=f"m{i}", id=f"id{i}")
             for i in range(nodes.MESSAGES_TO_KEEP + 2)
         ]
-        state = {"messages": messages, "conversation_summary": "old summary"}
-
-        result = nodes.summarize_memory_node(state)
+        result = nodes.summarize_memory_node(
+            {"messages": messages, "conversation_summary": "old summary"}
+        )
 
         sent_prompt = fake_llm.invoke.call_args.args[0][-1].content
         assert "old summary" in sent_prompt
@@ -255,20 +349,31 @@ class TestPlanner:
         plan = SimpleNamespace(detected_language="en", execution_plan=[make_step()])
         self._patch_chain(monkeypatch, return_value=plan)
 
-        result = nodes.planner({"messages": [HumanMessage(content="hello")]})
+        result = nodes.planner({"messages": [HumanMessage(content="hello")]}, CONFIG)
 
         assert result.goto == "orchestrator"
         assert result.update["detected_language"] == "en"
         assert result.update["execution_plan"] == plan.execution_plan
-        assert result.update["current_step"] == 0
-        assert result.update["agent_results"] == {}
+
+    def test_resets_agent_results_with_the_none_sentinel(self, monkeypatch):
+        """
+        None y no {}: `agent_results` tiene reducer, así que {} se MERGEA con
+        lo del turno anterior en vez de limpiarlo. El centinela es la única
+        forma de resetear el canal.
+        """
+        plan = SimpleNamespace(detected_language="es", execution_plan=[make_step()])
+        self._patch_chain(monkeypatch, return_value=plan)
+
+        result = nodes.planner({"messages": [HumanMessage(content="hola")]}, CONFIG)
+
+        assert result.update["agent_results"] is None
 
     def test_falls_back_to_state_language_when_plan_language_missing(self, monkeypatch):
         plan = SimpleNamespace(detected_language=None, execution_plan=[make_step()])
         self._patch_chain(monkeypatch, return_value=plan)
 
         state = {"messages": [HumanMessage(content="hola")], "detected_language": "es"}
-        result = nodes.planner(state)
+        result = nodes.planner(state, CONFIG)
 
         assert result.update["detected_language"] == "es"
 
@@ -276,39 +381,53 @@ class TestPlanner:
         plan = SimpleNamespace(detected_language=None, execution_plan=[make_step()])
         self._patch_chain(monkeypatch, return_value=plan)
 
-        result = nodes.planner({"messages": [HumanMessage(content="hola")]})
+        result = nodes.planner({"messages": [HumanMessage(content="hola")]}, CONFIG)
 
         assert result.update["detected_language"] == "es"
 
-    def test_includes_last_marlin_message_and_user_reply_in_context(self, monkeypatch):
-        captured = {}
+    def test_sends_a_plain_dict_to_the_chain_not_a_message_list(self, monkeypatch):
+        """
+        Una lista hacía que langchain la envolviera en {"input": <lista>}: el
+        PLANNER_PROMPT viajaba dos veces por turno y el mensaje del usuario
+        llegaba enterrado en un literal de Python.
+        """
+        chain = self._patch_chain(
+            monkeypatch,
+            return_value=SimpleNamespace(detected_language="es", execution_plan=[make_step()]),
+        )
 
-        def fake_invoke(messages):
-            captured["context"] = messages[-1]["content"]
-            return SimpleNamespace(detected_language="es", execution_plan=[make_step()])
+        nodes.planner({"messages": [HumanMessage(content="hola")]}, CONFIG)
 
-        self._patch_chain(monkeypatch, side_effect=fake_invoke)
+        payload = chain.invoke.call_args.args[0]
+        assert isinstance(payload, dict)
+        assert set(payload) == {"input"}
+
+    def test_includes_summary_last_marlin_message_and_user_reply(self, monkeypatch):
+        chain = self._patch_chain(
+            monkeypatch,
+            return_value=SimpleNamespace(detected_language="es", execution_plan=[make_step()]),
+        )
 
         state = {
             "messages": [
                 HumanMessage(content="first question"),
-                AIMessage(content="previous answer", name="marlin"),
+                AIMessage(content="previous answer", name="Marlin"),
                 HumanMessage(content="follow up"),
-            ]
+            ],
+            "conversation_summary": "user has a 50 m3 pool",
         }
-        nodes.planner(state)
+        nodes.planner(state, CONFIG)
 
-        assert "previous answer" in captured["context"]
-        assert "follow up" in captured["context"]
+        context = chain.invoke.call_args.args[0]["input"]
+        assert "user has a 50 m3 pool" in context
+        assert "previous answer" in context
+        assert "follow up" in context
 
     def test_ignores_ai_messages_not_authored_by_marlin(self, monkeypatch):
-        captured = {}
-
-        def fake_invoke(messages):
-            captured["context"] = messages[-1]["content"]
-            return SimpleNamespace(detected_language="es", execution_plan=[make_step()])
-
-        self._patch_chain(monkeypatch, side_effect=fake_invoke)
+        chain = self._patch_chain(
+            monkeypatch,
+            return_value=SimpleNamespace(detected_language="es", execution_plan=[make_step()]),
+        )
 
         state = {
             "messages": [
@@ -316,115 +435,19 @@ class TestPlanner:
                 HumanMessage(content="user text"),
             ]
         }
-        nodes.planner(state)
+        nodes.planner(state, CONFIG)
 
-        assert captured["context"] == "user text"
+        assert chain.invoke.call_args.args[0]["input"] == "user text"
 
+    def test_an_llm_failure_degrades_to_a_single_general_step(self, monkeypatch):
+        self._patch_chain(monkeypatch, side_effect=RuntimeError("503 unavailable"))
 
-# ================================================================
-# orchestrator
-# ================================================================
+        result = nodes.planner({"messages": [HumanMessage(content="hola")]}, CONFIG)
 
-class TestOrchestrator:
-    def test_empty_execution_plan_routes_to_synthesizer_with_error(self):
-        state = {"execution_plan": [], "agent_results": {}, "current_step": 0}
-        result = nodes.orchestrator(state)
-
-        assert result.goto == "synthesizer"
-        assert "execution_plan is empty" in result.update["error"]
-
-    def test_all_steps_already_done_routes_to_synthesizer(self):
-        plan = [make_step(step=1)]
-        state = {"execution_plan": plan, "agent_results": {}, "current_step": 1}
-        result = nodes.orchestrator(state)
-
-        assert result.goto == "synthesizer"
-        assert result.update is None
-
-    def test_runs_pending_step_and_advances_when_more_steps_remain(self, monkeypatch):
-        plan = [make_step(step=1, agent="diagnosis"), make_step(step=2, agent="dosage")]
-        state = {
-            "messages": [HumanMessage(content="my water is green")],
-            "execution_plan": plan,
-            "agent_results": {},
-            "current_step": 0,
-        }
-
-        fake_agent = MagicMock()
-        fake_agent.invoke.return_value = {"messages": [AIMessage(content="pH is low")]}
-        monkeypatch.setattr(nodes, "get_agent_by_name", lambda name: fake_agent)
-
-        result = nodes.orchestrator(state)
-
-        assert result.goto == "orchestrator"  # queda pendiente el step 2
-        assert result.update["current_step"] == 1
-
-        step1_result = result.update["agent_results"]["step_1"]
-        assert step1_result.output == "pH is low"
-        assert step1_result.agent == "diagnosis"
-
-        agent_call_input = fake_agent.invoke.call_args.args[0]
-        assert "my water is green" in agent_call_input["messages"][0].content
-
-    def test_last_step_routes_to_synthesizer(self, monkeypatch):
-        plan = [make_step(step=1, agent="diagnosis")]
-        state = {
-            "messages": [HumanMessage(content="hi")],
-            "execution_plan": plan,
-            "agent_results": {},
-            "current_step": 0,
-        }
-
-        fake_agent = MagicMock()
-        fake_agent.invoke.return_value = {"messages": [AIMessage(content="done")]}
-        monkeypatch.setattr(nodes, "get_agent_by_name", lambda name: fake_agent)
-
-        result = nodes.orchestrator(state)
-
-        assert result.goto == "synthesizer"
-        assert result.update["current_step"] == 1
-
-    def test_step_exception_is_captured_as_agent_result_error(self, monkeypatch):
-        plan = [make_step(step=1, agent="dosage")]
-        state = {
-            "messages": [HumanMessage(content="hi")],
-            "execution_plan": plan,
-            "agent_results": {},
-            "current_step": 0,
-        }
-
-        def boom(name):
-            raise RuntimeError("agent exploded")
-
-        monkeypatch.setattr(nodes, "get_agent_by_name", boom)
-
-        result = nodes.orchestrator(state)
-        step_result = result.update["agent_results"]["step_1"]
-
-        assert step_result.error == "agent exploded"
-        assert step_result.output == ""
-        assert result.goto == "synthesizer"  # el error no rompe el flujo
-
-    def test_preserves_previously_completed_results(self, monkeypatch):
-        plan = [make_step(step=1, agent="diagnosis"), make_step(step=2, agent="dosage")]
-        previous_results = {
-            "step_1": make_result(step=1, agent="diagnosis", output="already done")
-        }
-        state = {
-            "messages": [HumanMessage(content="hi")],
-            "execution_plan": plan,
-            "agent_results": previous_results,
-            "current_step": 1,
-        }
-
-        fake_agent = MagicMock()
-        fake_agent.invoke.return_value = {"messages": [AIMessage(content="dosage done")]}
-        monkeypatch.setattr(nodes, "get_agent_by_name", lambda name: fake_agent)
-
-        result = nodes.orchestrator(state)
-
-        assert result.update["agent_results"]["step_1"].output == "already done"
-        assert result.update["agent_results"]["step_2"].output == "dosage done"
+        assert result.goto == "general"
+        assert len(result.update["execution_plan"]) == 1
+        assert result.update["execution_plan"][0].assigned_agent == "general"
+        assert "503 unavailable" in result.update["planner_error"]
 
 
 # ================================================================
@@ -432,78 +455,116 @@ class TestOrchestrator:
 # ================================================================
 
 class TestSynthesizer:
-    def test_oos_plan_uses_oos_instruction(self, monkeypatch):
-        fake_llm = MagicMock()
-        fake_llm.invoke.return_value = AIMessage(content="Lo siento, eso está fuera de mi alcance.")
-        monkeypatch.setattr(nodes, "_get_llm", lambda: fake_llm)
+    def test_includes_the_raw_content_and_the_target_language(self, fake_synthesis_llm):
+        state = {
+            "execution_plan": [make_step(agent="chemistry")],
+            "agent_results": {"step_1": make_result(output="pH is low")},
+            "detected_language": "en",
+            "archetype": "assessment",
+        }
 
-        plan = [make_step(step=1, agent="oos", oos=True)]
-        state = {"execution_plan": plan, "agent_results": {}, "detected_language": "es"}
+        nodes.synthesizer(state)
+
+        system = system_content_of(fake_synthesis_llm)
+        assert "pH is low" in system
+        assert "English" in system
+
+    def test_unknown_language_code_falls_back_to_spanish(self, fake_synthesis_llm):
+        state = {
+            "execution_plan": [make_step(agent="chemistry")],
+            "agent_results": {"step_1": make_result(output="algo")},
+            "detected_language": "fr",
+            "archetype": "assessment",
+        }
+
+        nodes.synthesizer(state)
+
+        assert "Spanish (Latin American)" in system_content_of(fake_synthesis_llm)
+
+    def test_the_answer_is_published_as_a_marlin_message(self, fake_synthesis_llm):
+        state = {
+            "execution_plan": [make_step(agent="chemistry")],
+            "agent_results": {"step_1": make_result(output="algo")},
+            "detected_language": "es",
+            "archetype": "assessment",
+        }
 
         result = nodes.synthesizer(state)
 
-        system_msg = fake_llm.invoke.call_args.args[0][0]
-        assert "OUT OF SCOPE" in system_msg.content
-        assert result["messages"][0].name == "marlin"
-        assert result["messages"][0].content == "Lo siento, eso está fuera de mi alcance."
+        assert result["messages"][0].name == "Marlin"
+        assert "respuesta final" in result["messages"][0].content
+        assert result["response"].answer == "respuesta final"
 
-    def test_non_oos_plan_uses_normal_instruction_and_includes_raw_content(self, monkeypatch):
-        fake_llm = MagicMock()
-        fake_llm.invoke.return_value = AIMessage(content="final answer")
-        monkeypatch.setattr(nodes, "_get_llm", lambda: fake_llm)
+    def test_an_empty_turn_gets_a_greeting_and_never_calls_the_fallback(
+        self, fake_synthesis_llm
+    ):
+        nodes.synthesizer({"execution_plan": [], "agent_results": {}, "detected_language": "es"})
 
-        plan = [make_step(step=1, agent="diagnosis")]
-        results = {"step_1": make_result(step=1, agent="diagnosis", output="pH is low")}
-        state = {"execution_plan": plan, "agent_results": results, "detected_language": "en"}
+        assert "warm greeting" in system_content_of(fake_synthesis_llm)
 
-        nodes.synthesizer(state)
-
-        system_msg = fake_llm.invoke.call_args.args[0][0]
-        assert "Do not add disclaimers about scope" in system_msg.content
-        assert "pH is low" in system_msg.content
-        assert "English" in system_msg.content
-
-    def test_no_prior_content_uses_greeting_placeholder(self, monkeypatch):
-        fake_llm = MagicMock()
-        fake_llm.invoke.return_value = AIMessage(content="hi there")
-        monkeypatch.setattr(nodes, "_get_llm", lambda: fake_llm)
-
-        plan = [make_step(step=1, agent="maintenance")]  # no oos, sin resultado registrado
-        state = {"execution_plan": plan, "agent_results": {}, "detected_language": "es"}
-
-        nodes.synthesizer(state)
-
-        system_msg = fake_llm.invoke.call_args.args[0][0]
-        assert "generate a warm greeting" in system_msg.content
-
-    def test_unknown_language_code_falls_back_to_spanish(self, monkeypatch):
-        fake_llm = MagicMock()
-        fake_llm.invoke.return_value = AIMessage(content="respuesta")
-        monkeypatch.setattr(nodes, "_get_llm", lambda: fake_llm)
-
-        plan = [make_step(step=1, agent="maintenance")]
-        state = {"execution_plan": plan, "agent_results": {}, "detected_language": "fr"}
-
-        nodes.synthesizer(state)
-
-        system_msg = fake_llm.invoke.call_args.args[0][0]
-        assert "Spanish (Latin American)" in system_msg.content
-
-    def test_final_message_extracts_text_from_block_list_content(self, monkeypatch):
-        fake_llm = MagicMock()
-        fake_llm.invoke.return_value = AIMessage(
-            content=[{"text": "part one"}, {"text": "part two"}]
-        )
-        monkeypatch.setattr(nodes, "_get_llm", lambda: fake_llm)
-
-        plan = [make_step(step=1, agent="maintenance")]
-        state = {"execution_plan": plan, "agent_results": {}, "detected_language": "es"}
+    def test_a_plan_that_produced_nothing_is_a_failure_not_a_greeting(
+        self, fake_synthesis_llm
+    ):
+        """
+        raw_content vacío con plan no vacío es un bug de escritura de estado.
+        Saludar al usuario lo enmascara: se devuelve el fallback explícito.
+        """
+        state = {
+            "execution_plan": [make_step(agent="chemistry")],
+            "agent_results": {},
+            "detected_language": "es",
+        }
 
         result = nodes.synthesizer(state)
 
-        assert result["messages"][0].content == "part one part two"
-        assert result["messages"][0].name == "marlin"
+        assert result["validation"]["fallback"] == "empty_results"
+        fake_synthesis_llm.invoke.assert_not_called()
 
+    def test_the_oos_node_prose_is_not_re_synthesized(self, fake_synthesis_llm):
+        """Re-redactarla cuesta una llamada entera para producir el mismo texto."""
+        state = {
+            "execution_plan": [make_step(agent="oos", oos=True)],
+            "agent_results": {"step_1": make_result(agent="oos", output="Eso está fuera de mi alcance.")},
+            "detected_language": "es",
+        }
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+        result = nodes.synthesizer(state)
+
+        assert result["archetype"] == "oos"
+        assert result["response"].answer == "Eso está fuera de mi alcance."
+        fake_synthesis_llm.invoke.assert_not_called()
+
+    def test_a_general_clarification_keeps_its_own_prose(self, fake_synthesis_llm):
+        state = {
+            "execution_plan": [make_step(agent="general")],
+            "agent_results": {
+                "step_1": make_result(agent="general", output="¿Cuál es el volumen de tu piscina?")
+            },
+            "detected_language": "es",
+        }
+
+        result = nodes.synthesizer(state)
+
+        assert result["validation"]["is_clarification"] is True
+        assert result["response"].answer == "¿Cuál es el volumen de tu piscina?"
+        fake_synthesis_llm.invoke.assert_not_called()
+
+    def test_falls_back_to_a_static_payload_when_both_models_fail(
+        self, fake_synthesis_llm, monkeypatch
+    ):
+        fake_synthesis_llm.invoke.side_effect = RuntimeError("503")
+        failing_fallback = MagicMock()
+        failing_fallback.invoke.side_effect = RuntimeError("429")
+        monkeypatch.setattr(nodes, "_get_fallback_llm", lambda: failing_fallback)
+
+        state = {
+            "execution_plan": [make_step(agent="chemistry")],
+            "agent_results": {"step_1": make_result(output="algo")},
+            "detected_language": "es",
+            "archetype": "assessment",
+        }
+
+        result = nodes.synthesizer(state)
+
+        assert result["validation"]["fallback"] == "static"
+        assert result["response"].answer

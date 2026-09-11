@@ -1,201 +1,171 @@
 """
-tests/agent/test_agents.py
-==========================
+Tests de src.agent.agents.
 
-Unit tests for src.agent.agents
+El roster de la v1 (diagnosis / dosage / maintenance) ya no existe: hoy son
+los 10 especialistas de SPECIALIST_SPECS más `general`, `oos` y `math`. Los
+tests se apoyan en esas constantes en vez de repetir la lista a mano, para
+que agregar un especialista no deje el test mintiendo en verde.
 """
 
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.runnables import RunnableLambda
 
 from src.agent import agents
+from src.agent.agent_names import AGENT_NAME_SET
 
-
-# ============================================================================
-# Fixtures
-# ============================================================================
 
 @pytest.fixture(autouse=True)
 def reset_agents():
-    """Reset lazy initialization globals before every test."""
+    """La inicialización es perezosa y global: se limpia antes y después."""
+    def _reset():
+        agents._initialized = False
+        agents._routing_llm = None
+        agents._synthesizer_llm = None
+        agents._fallback_llm = None
+        agents._specialist_llm = None
+        agents._agents = {}
+        agents._supervisor_agents = []
+        agents.pool_supervisor = None
 
-    agents._initialized = False
-    agents._llm = None
-    agents._routing_llm = None
-    agents._synthesizer_llm = None
-    agents._agents = {}
-    agents.pool_supervisor = None
+    _reset()
+    yield
+    _reset()
 
 
-# ============================================================================
+@pytest.fixture
+def patched_factories():
+    """Todo lo que tocaría la red, mockeado."""
+    with patch("src.agent.agents.create_supervisor") as create_supervisor, \
+         patch("src.agent.agents.create_agent") as create_agent, \
+         patch("src.agent.agents.create_specialist_llm") as specialist_llm, \
+         patch("src.agent.agents.create_fallback_llm") as fallback_llm, \
+         patch("src.agent.agents.create_synthesizer_llm") as synthesizer_llm, \
+         patch("src.agent.agents.create_routing_llm") as routing_llm:
+        # Runnable de verdad y no MagicMock: `general` se envuelve en
+        # RunnableWithFallbacks, que valida por tipo y rechaza un mock.
+        create_agent.side_effect = lambda **kwargs: RunnableLambda(
+            lambda state: state, name=kwargs["name"]
+        )
+        yield {
+            "create_agent": create_agent,
+            "create_supervisor": create_supervisor,
+            "routing_llm": routing_llm,
+            "synthesizer_llm": synthesizer_llm,
+            "fallback_llm": fallback_llm,
+            "specialist_llm": specialist_llm,
+        }
+
+
+# ============================================================
 # pool_general_knowledge
-# ============================================================================
+# ============================================================
 
-def test_pool_general_knowledge():
-
-    result = agents.pool_general_knowledge.invoke(
-        {"topic": "saltwater pools"}
-    )
+def test_pool_general_knowledge_echoes_the_topic():
+    result = agents.pool_general_knowledge.invoke({"topic": "saltwater pools"})
 
     assert "saltwater pools" in result
     assert "General pool information" in result
 
 
-# ============================================================================
+# ============================================================
 # _initialize()
-# ============================================================================
+# ============================================================
 
-@patch("src.agent.agents.create_supervisor")
-@patch("src.agent.agents.create_agent")
-@patch("src.agent.agents.create_synthesizer_llm")
-@patch("src.agent.agents.create_routing_llm")
-@patch("src.agent.agents.create_llm")
-def test_initialize(
-    mock_create_llm,
-    mock_create_routing_llm,
-    mock_create_synthesizer_llm,
-    mock_create_agent,
-    mock_create_supervisor,
+def test_initialize_registers_every_specialist_plus_general_oos_and_math(
+    patched_factories,
 ):
-    """Verify lazy initialization creates all agents and supervisor."""
+    agents._initialize()
 
-    llm = MagicMock(name="llm")
-    routing_llm = MagicMock(name="routing_llm")
-    synthesizer_llm = MagicMock(name="synthesizer_llm")
+    expected = {"general", "oos", "math"} | {n for n, _ in agents.SPECIALIST_SPECS}
+    assert set(agents._agents) == expected
 
-    mock_create_llm.return_value = llm
-    mock_create_routing_llm.return_value = routing_llm
-    mock_create_synthesizer_llm.return_value = synthesizer_llm
 
-    general_agent = MagicMock(name="general_agent")
-    oos_agent = MagicMock(name="oos_agent")
-    diagnosis_agent = MagicMock(name="diagnosis_agent")
-    dosage_agent = MagicMock(name="dosage_agent")
-    equipment_agent = MagicMock(name="equipment_agent")
-    maintenance_agent = MagicMock(name="maintenance_agent")
+def test_every_registered_node_name_is_a_valid_agent_name(patched_factories):
+    """Un nodo que no está en AgentName es un step que el planner no puede pedir."""
+    agents._initialize()
 
-    mock_create_agent.side_effect = [
-        general_agent,
-        oos_agent,
-        diagnosis_agent,
-        dosage_agent,
-        equipment_agent,
-        maintenance_agent,
-    ]
+    assert set(agents._agents) <= AGENT_NAME_SET
 
-    compiled_supervisor = MagicMock(name="compiled_supervisor")
 
-    mock_create_supervisor.return_value.compile.return_value = (
-        compiled_supervisor
-    )
+def test_general_is_wrapped_with_a_fallback_that_keeps_its_name(patched_factories):
+    """RunnableWithFallbacks no hereda .name, y create_supervisor lo exige."""
+    agents._initialize()
+
+    general = agents._agents["general"]
+    assert general.name == "general"
+    assert len(general.fallbacks) == 1
+
+
+def test_specialists_get_the_retrieval_tools(patched_factories):
+    agents._initialize()
+
+    calls = {
+        call.kwargs["name"]: call.kwargs
+        for call in patched_factories["create_agent"].call_args_list
+    }
+
+    for node_name, _ in agents.SPECIALIST_SPECS:
+        assert calls[node_name]["tools"] == agents.RETRIEVAL_TOOLS
+
+
+def test_math_gets_the_deterministic_catalog_and_no_retrieval(patched_factories):
+    agents._initialize()
+
+    calls = {
+        call.kwargs["name"]: call.kwargs
+        for call in patched_factories["create_agent"].call_args_list
+    }
+
+    assert calls["math"]["tools"] is not agents.RETRIEVAL_TOOLS
+    assert calls["math"]["tools"]
+
+
+def test_initialize_runs_only_once(patched_factories):
+    agents._initialize()
+    call_count = patched_factories["create_agent"].call_count
 
     agents._initialize()
 
+    assert patched_factories["create_agent"].call_count == call_count
+
+
+def test_supervisor_receives_the_bare_general_agent_not_the_fallback_wrapper(
+    patched_factories,
+):
+    agents._initialize()
+
+    kwargs = patched_factories["create_supervisor"].call_args.kwargs
+    assert agents._agents["general"] not in kwargs["agents"]
+    assert kwargs["model"] is patched_factories["routing_llm"].return_value
+    assert kwargs["prompt"] == agents.SUPERVISOR_PROMPT
+
+
+def test_a_failing_supervisor_does_not_disable_the_specialists(patched_factories):
+    """El pipeline real resuelve por get_agent_by_name; el supervisor es aparte."""
+    patched_factories["create_supervisor"].side_effect = RuntimeError("boom")
+
+    agents._initialize()
+
+    assert agents.pool_supervisor is None
     assert agents._initialized is True
-
-    assert agents._llm is llm
-    assert agents._routing_llm is routing_llm
-    assert agents._synthesizer_llm is synthesizer_llm
-
-    assert agents._agents == {
-        "general": general_agent,
-        "oos": oos_agent,
-        "diagnosis": diagnosis_agent,
-        "dosage": dosage_agent,
-        "equipment": equipment_agent,
-        "maintenance": maintenance_agent,
-    }
-
-    assert agents.pool_supervisor is compiled_supervisor
-
-    assert mock_create_agent.call_count == 6
-    mock_create_supervisor.assert_called_once()
+    assert agents._agents["chemistry"] is not None
 
 
-# ============================================================================
-# _initialize() should only run once
-# ============================================================================
+# ============================================================
+# get_agent_by_name() / get_supervisor()
+# ============================================================
 
-@patch("src.agent.agents.create_llm")
-def test_initialize_only_once(mock_create_llm):
-
-    agents._initialized = True
-
-    agents._initialize()
-
-    mock_create_llm.assert_not_called()
-
-
-# ============================================================================
-# Verify create_agent wiring
-# ============================================================================
-
-@patch("src.agent.agents.create_supervisor")
-@patch("src.agent.agents.create_agent")
-@patch("src.agent.agents.create_synthesizer_llm")
-@patch("src.agent.agents.create_routing_llm")
-@patch("src.agent.agents.create_llm")
-def test_initialize_creates_expected_agents(
-    mock_create_llm,
-    mock_create_routing_llm,
-    mock_create_synthesizer_llm,
-    mock_create_agent,
-    mock_create_supervisor,
-):
-
-    mock_create_llm.return_value = MagicMock()
-    mock_create_routing_llm.return_value = MagicMock()
-    mock_create_synthesizer_llm.return_value = MagicMock()
-
-    mock_create_agent.side_effect = [
-        MagicMock(),
-        MagicMock(),
-        MagicMock(),
-        MagicMock(),
-        MagicMock(),
-        MagicMock(),
-    ]
-
-    mock_create_supervisor.return_value.compile.return_value = MagicMock()
-
-    agents._initialize()
-
-    names = [
-        call.kwargs["name"]
-        for call in mock_create_agent.call_args_list
-    ]
-
-    assert names == [
-        "general",
-        "out_of_scope",
-        "diagnosis",
-        "dosage",
-        "equipment",
-        "maintenance",
-    ]
-
-
-# ============================================================================
-# get_agent_by_name()
-# ============================================================================
-
-def test_get_agent_by_name():
-
+def test_get_agent_by_name_returns_the_registered_agent():
     fake_agent = MagicMock()
-
     agents._initialized = True
-    agents._agents = {
-        "general": fake_agent
-    }
+    agents._agents = {"general": fake_agent}
 
-    result = agents.get_agent_by_name("general")
-
-    assert result is fake_agent
+    assert agents.get_agent_by_name("general") is fake_agent
 
 
-def test_get_agent_by_name_unknown():
-
+def test_get_agent_by_name_raises_for_an_unregistered_agent():
     agents._initialized = True
     agents._agents = {}
 
@@ -205,58 +175,9 @@ def test_get_agent_by_name_unknown():
     assert "not registered" in str(exc.value)
 
 
-# ============================================================================
-# get_supervisor()
-# ============================================================================
-
-def test_get_supervisor():
-
+def test_get_supervisor_returns_the_compiled_supervisor():
     supervisor = MagicMock()
-
     agents._initialized = True
     agents.pool_supervisor = supervisor
 
-    result = agents.get_supervisor()
-
-    assert result is supervisor
-
-
-# ============================================================================
-# Supervisor creation
-# ============================================================================
-
-@patch("src.agent.agents.create_supervisor")
-@patch("src.agent.agents.create_agent")
-@patch("src.agent.agents.create_synthesizer_llm")
-@patch("src.agent.agents.create_routing_llm")
-@patch("src.agent.agents.create_llm")
-def test_supervisor_receives_all_agents(
-    mock_create_llm,
-    mock_create_routing_llm,
-    mock_create_synthesizer_llm,
-    mock_create_agent,
-    mock_create_supervisor,
-):
-
-    mock_create_llm.return_value = MagicMock()
-    mock_create_routing_llm.return_value = MagicMock()
-    mock_create_synthesizer_llm.return_value = MagicMock()
-
-    created_agents = [MagicMock() for _ in range(6)]
-    mock_create_agent.side_effect = created_agents
-
-    compiled = MagicMock()
-
-    mock_create_supervisor.return_value.compile.return_value = compiled
-
-    agents._initialize()
-
-    mock_create_supervisor.assert_called_once()
-
-    kwargs = mock_create_supervisor.call_args.kwargs
-
-    assert kwargs["agents"] == created_agents
-    assert kwargs["model"] is mock_create_routing_llm.return_value
-    assert kwargs["prompt"] == agents.SUPERVISOR_PROMPT
-
-    assert agents.pool_supervisor is compiled
+    assert agents.get_supervisor() is supervisor

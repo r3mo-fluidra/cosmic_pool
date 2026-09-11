@@ -34,9 +34,11 @@ def test_create_planner_chain(mock_prompt_template):
         ]
     )
 
+    # json_schema y no function_calling: con langchain-google-genai 4.3.1 el
+    # envoltorio de function_calling emite una clave que Gemini rechaza.
     mock_llm.with_structured_output.assert_called_once_with(
         schema=PlannerOutput,
-        method="function_calling",
+        method="json_schema",
     )
 
     mock_prompt.__or__.assert_called_once_with(mock_structured_llm)
