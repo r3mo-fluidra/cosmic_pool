@@ -22,7 +22,9 @@ import concurrent.futures
 
 
 from .state import PoolAgentState, ExecutionStep, AgentResult
-from ..prompts.prompts import PLANNER_PROMPT, SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
+# PLANNER_PROMPT ya no se importa acá: lo pone create_planner_chain como
+# system del template. Importarlo era lo que invitaba a mandarlo otra vez.
+from ..prompts.prompts import SYNTHESIZER_PROMPT, SUGGESTER_PROMPT
 from .chains import create_planner_chain
 from ..config.llm import create_llm, create_suggester_llm, create_routing_llm, create_fallback_llm, create_synthesis_llm 
 from .agents import get_agent_by_name, SPECIALIST_SPECS
@@ -57,7 +59,13 @@ logger = logging.getLogger(__name__)
 
 TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
-_SUGGESTER_DEADLINE_S = 25
+# El suggester corre en fan-out con el synthesizer (_to_synthesizer emite
+# goto=["synthesizer", "suggester"]), pero fan-out NO es "fuera del camino
+# crítico": las dos ramas van a END y el turno no cierra hasta que las dos
+# terminan. Con 25s el suggester podía dominar un turno cuya respuesta ya
+# estaba lista. 6s es el techo de lo que un chip opcional puede costar;
+# pasado eso degrada a [] como cualquier otro fallo del nodo.
+_SUGGESTER_DEADLINE_S = 6
 _MAX_MISROUTE_RETRIES = 2
 STEP_DEADLINE_S = 60.0 
 
@@ -116,12 +124,20 @@ def _direct_answer(state: PoolAgentState, system_prompt: str, deadline_s: float 
     task = plan[0].task if plan else user_message
     language = _LANGUAGE_MAP.get(state.get("detected_language", "es"), _LANGUAGE_MAP["es"])
 
+    # `general` es el nodo que más sufre la amnesia: contesta clarificaciones
+    # y preguntas de seguimiento, justo los turnos que dependen de lo dicho
+    # antes. El summary va como bloque aparte, no mezclado con la task.
+    summary = (state.get("conversation_summary") or "").strip()
+    memory_block = f"Conversation so far (background):\n{summary}\n\n" if summary else ""
+
     try:
         # Ejecutar con deadline
         def _invoke():
             return _get_llm().invoke([
                 SystemMessage(content=f"{system_prompt}\n\nRespond in: {language}"),
-                HumanMessage(content=f"Task: {task}\n\nUser context: {user_message}"),
+                HumanMessage(
+                    content=f"{memory_block}Task: {task}\n\nUser context: {user_message}"
+                ),
             ])
         
         result = _run_with_deadline(_invoke, deadline_s)
@@ -865,21 +881,34 @@ def planner(state: PoolAgentState, config: RunnableConfig):
             i.get("text", "") for i in last_agent_msg if isinstance(i, dict)
         ).strip()
 
-    context_for_planner = (
-        f"[Last agent message]: {last_agent_msg}\n"
-        f"[User reply]: {user_input}"
-        if last_agent_msg
-        else user_input
-    )
+    # El resumen rodante entra acá. summarize_memory_node lo escribía y NADIE
+    # lo leía: por encima de TOKEN_LIMIT se pagaba una llamada al LLM con el
+    # historial entero, se borraban los mensajes viejos, y el resumen no
+    # llegaba a ningún prompt. La conversación se perdía y encima costaba.
+    summary = (state.get("conversation_summary") or "").strip()
+
+    parts = []
+    if summary:
+        parts.append(f"[Conversation so far]: {summary}")
+    if last_agent_msg:
+        parts.append(f"[Last agent message]: {last_agent_msg}")
+    parts.append(f"[User reply]: {user_input}" if (summary or last_agent_msg) else str(user_input))
+
+    context_for_planner = "\n".join(parts)
 
     fallback_language = state.get("detected_language") or "es"
 
     try:
-        # ✅ Lazy — planner chain se inicializa solo aquí
-        plan = _get_planner_chain().invoke([
-            {"role": "system", "content": PLANNER_PROMPT},
-            {"role": "user",   "content": context_for_planner},
-        ])
+        # Un dict con la variable del template, NO una lista de mensajes.
+        #
+        # create_planner_chain ya pone PLANNER_PROMPT como system del
+        # ChatPromptTemplate. Al pasarle una lista, langchain-core veía un
+        # no-dict con un único input_variable y la envolvía en
+        # {"input": <la lista>}: el user message terminaba siendo la repr de
+        # Python de la lista, con PLANNER_PROMPT (~4.983 tokens) DENTRO.
+        # O sea: el prompt del planner viajaba dos veces en cada turno, y el
+        # mensaje real del usuario llegaba enterrado en un literal Python.
+        plan = _get_planner_chain().invoke({"input": context_for_planner})
     except Exception as e:
         get_client().update_current_span(
             level="WARNING",
@@ -1042,6 +1071,11 @@ def orchestrator(state: PoolAgentState) -> Command:
                         "user_message": user_message,
                         "deadline_s": step_budget,
                         "agent_results": agent_results,
+                        # Los especialistas eran amnésicos: solo veían su task
+                        # y el mensaje de ESTE turno. "¿Y para mi piscina de
+                        # 50 m³?" en el turno 2 no les llegaba nunca. El Send
+                        # es la única vía — su payload ES el state del nodo.
+                        "conversation_summary": state.get("conversation_summary", ""),
                     },
                 )
                 for s in runnable
@@ -1104,7 +1138,10 @@ def run_step_node(payload: dict, config: RunnableConfig) -> Command:
     
     # ✅ OBTENER EL ESTADO COMPLETO DEL PAYLOAD
     # Asumiendo que el Send desde orchestrator incluye el estado
-    state = {"agent_results": payload.get("agent_results") or {}}
+    state = {
+        "agent_results": payload.get("agent_results") or {},
+        "conversation_summary": payload.get("conversation_summary") or "",
+    }
  
     # ✅ GATE PARA MATH
     if step.assigned_agent == MATH and not math_inputs_present(user_message):
@@ -1192,15 +1229,27 @@ def _build_agent_context(state: dict, step: ExecutionStep, user_message: str) ->
     4. (Opcional) El resultado del paso inmediatamente anterior
     """
     agent_results = state.get("agent_results", {})
-    
+
+    # 0. Memoria de la conversación. Va PRIMERO y separada del turno actual:
+    #    es contexto de fondo, no la tarea. Sin esto el especialista no tiene
+    #    forma de saber nada que el usuario dijera en un turno anterior.
+    context_parts = []
+    summary = (state.get("conversation_summary") or "").strip()
+    if summary:
+        context_parts += [
+            "--- CONVERSATION SO FAR (background, may be stale) ---",
+            summary,
+            "",
+        ]
+
     # 1. Tarea y mensaje del usuario
-    context_parts = [
+    context_parts += [
         f"TASK: {step.task}",
         "",
         f"USER MESSAGE: {user_message}",
         "",
     ]
-    
+
     # 2. Resultados de pasos de los que depende
     if step.depends_on:
         context_parts.append("--- PREVIOUS STEP RESULTS (Dependencies) ---")

@@ -1838,7 +1838,17 @@ def status_stack(rows: list[tuple[str, bool]]) -> None:
 #     pure presentation, so it never implies the tokens are arriving live.
 #
 # No caret: the demo has none, and the demo is the visual oracle.
-STREAM_ANSWERS = True
+#
+# APAGADO. El texto ya está completo en memoria cuando type_out arranca, así
+# que el reveal no es latencia del modelo: es latencia añadida por la UI,
+# hasta _STREAM_MAX_S = 6s por turno, sobre una respuesta que el lector
+# podría estar leyendo ya. Era el mayor coste de la capa de presentación.
+#
+# La maquinaria se conserva entera a propósito: el reemplazo es streaming
+# REAL del synthesizer (stream_mode=["updates","messages"] en run_turn), no
+# volver a encender esto. Cuando eso exista, type_out se borra; mientras
+# tanto el flag lo deja en un solo st.markdown.
+STREAM_ANSWERS = False
 
 # 165 chars/s = the demo's 34ms-per-word, measured against its own answer copy.
 _STREAM_CPS = 165.0

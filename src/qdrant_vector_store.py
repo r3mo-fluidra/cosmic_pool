@@ -45,7 +45,13 @@ DEFAULT_CSV_PATH = (
 
 COLLECTION_NAME = "pool_manual_vectors"
 
-QDRANT_ENDPOINT = "QDRANT_ENDPOINT"
+# El nombre de la variable de entorno, no su valor. Era "QDRANT_ENDPOINT",
+# que no existe en ningún .env del proyecto: _secret() devolvía None siempre
+# y _make_client() caía SIEMPRE al modo embebido, el mismo que su propio
+# docstring declara incompatible con Streamlit por el lock de archivo.
+# Se aceptan las dos grafías para no romper despliegues que ya definan la vieja.
+QDRANT_ENDPOINT = "QDRANT_URL"
+QDRANT_ENDPOINT_LEGACY = "QDRANT_ENDPOINT"
 QDRANT_API_KEY = "QDRANT_API_KEY"
 
 
@@ -71,7 +77,7 @@ def _make_client() -> QdrantClient:
     fallback de desarrollo: toma un lock exclusivo de archivo y es
     incompatible con Streamlit, que reejecuta y paraleliza.
     """
-    url = _secret(QDRANT_ENDPOINT)
+    url = _secret(QDRANT_ENDPOINT) or _secret(QDRANT_ENDPOINT_LEGACY)
     if url:
         return QdrantClient(
             url=url,

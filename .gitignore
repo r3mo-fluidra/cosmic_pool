@@ -1,10 +1,18 @@
+# Secrets
 .env
+
+# Scratch / trabajo local
 utils/
 old/
 .utils/
 .sandbox/
-https://github.com/Zodiac-Engineering/fluidra_ai_pool-assistant_mvp.git
 
-git config --global user.name "Javier Hernandez"
-git config --global user.email "jhernandez@partner.fluidra.com"
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
 
+# macOS
+.DS_Store

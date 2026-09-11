@@ -19,12 +19,26 @@ def create_llm():
     )
 
 def create_routing_llm():
+    """
+    Modelo del planner (y del supervisor).
+
+    thinking_budget=0 por el mismo argumento que create_synthesis_llm(): el
+    planner no investiga ni redacta, clasifica. Su salida es un PlannerOutput
+    con schema cerrado — idioma, lista de steps, agente asignado. Con thinking
+    dinámico el modelo elige cuánto razonar en cada turno, y esa elección es
+    latencia pura en el PRIMER nodo del turno, antes de que el usuario haya
+    visto nada.
+
+    0 y no un valor bajo: medido contra la API, cualquier valor > 0 se trata
+    como objetivo blando y el modelo lo excede.
+    """
     return ChatGoogleGenerativeAI(
         model="gemini-3.1-flash-lite",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=120,
         temperature=0.0,
         max_retries=3,
+        thinking_budget=0,
     )
 
 def create_synthesizer_llm():

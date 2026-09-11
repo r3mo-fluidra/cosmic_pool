@@ -932,7 +932,12 @@ if prompt:
         lf.flush()
     else:
         try:
-            final_response, definitive, debug_lines = run_turn(
+            # Cuatro valores, igual que la rama con Langfuse de arriba.
+            # Desempaquetar tres reventaba este camino en CADA turno con
+            # `ValueError: too many values to unpack`, y como el error se
+            # captura abajo el usuario solo veía "El agente falló". Sin
+            # credenciales de Langfuse la app no arrancaba un solo turno.
+            final_response, definitive, debug_lines, suggestions = run_turn(
                 prompt, current_trace_id, turn_index,
                 status_slot=status_slot,
             )
@@ -955,11 +960,15 @@ if prompt:
         with screen_scroll.chat_message("assistant"):
             role_marker("assistant")
             assistant_label()
-            # Written out rather than pasted in, on the demo's cadence
-            # (theme.py::type_out). Presentation only: the text is already
-            # complete here, so nothing about the reveal claims the tokens are
-            # arriving live. The history loop above renders the same answer
-            # instantly on every later rerun — a turn is typed once.
+            # El reveal mecanografiado está APAGADO (theme.py::STREAM_ANSWERS):
+            # el texto ya está completo acá, así que el efecto solo añadía
+            # hasta 6s de espera a alguien que ya podía leer. type_out pinta
+            # ahora en un solo st.markdown.
+            #
+            # Se deja la llamada en vez de un st.markdown directo porque este
+            # es el punto de inserción del streaming real del synthesizer
+            # (stream_mode=["updates","messages"]): cuando exista, cambia
+            # type_out y no este call site.
             type_out(st.empty(), final_response)
             render_debug(debug_lines)
 
