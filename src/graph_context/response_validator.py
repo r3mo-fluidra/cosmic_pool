@@ -70,6 +70,9 @@ class ValidationReport:
     #: Cantidades del tier visible que no aparecen en el material de origen.
     #: El peor modo de fallo según el propio prompt del synthesizer.
     unsupported_numbers: list[str] = field(default_factory=list)
+    #: `safety` repite una acción en lugar de aportar algo nuevo. Se mide, no
+    #: se corrige: borrar una línea de seguridad es peor que repetirla.
+    safety_duplicates_action: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -150,6 +153,60 @@ def unsupported_numbers(payload, raw_content: str) -> list[str]:
         sospechosos.append(n)
 
     return sospechosos
+
+
+#: Palabras vacías mínimas, es/en. Sin dependencias externas: solo hace falta
+#: que "the/de/la/to" no inflen el parecido entre dos frases cortas.
+_VACIAS = frozenset({
+    "el", "la", "los", "las", "un", "una", "de", "del", "a", "al", "en", "y",
+    "o", "que", "no", "se", "su", "hasta", "para", "con", "por",
+    "the", "a", "an", "of", "to", "in", "and", "or", "not", "your", "until",
+    "is", "are", "be", "all",
+})
+_PALABRA_RE = re.compile(r"[a-záéíóúñü]+", re.IGNORECASE)
+_DUPLICADO_UMBRAL = 0.55
+#: Truncado a raíz, no lematización. "cerrada"/"cerrar" y "closed"/"close"
+#: describen la misma acción y sin esto no se parecen en nada: la comparación
+#: literal daba 0.5 y 0.4 sobre un caso que es una repetición evidente.
+#: Cinco caracteres es lo bastante corto para absorber la flexión de los dos
+#: idiomas y lo bastante largo para no confundir palabras distintas.
+_RAIZ = 5
+
+
+def _contenido(texto: str) -> set[str]:
+    return {w.lower()[:_RAIZ] for w in _PALABRA_RE.findall(texto or "")
+            if w.lower() not in _VACIAS and len(w) > 2}
+
+
+def safety_repeats_an_action(payload) -> bool:
+    """
+    ¿`safety` no dice más que una acción que ya está en la lista?
+
+    Medido: bajo una acción "cierra la pileta a los bañistas", el campo de
+    seguridad decía "mantén la pileta cerrada hasta restaurar el cloro". La
+    línea que más se lee del tier visible gastada en repetir la primera
+    acción, y la que sí llevaba información única — la prohibición del
+    producto que causó el problema — desaparecida.
+
+    Se mide y no se corrige. Suprimir una línea de seguridad por parecerse a
+    otra cosa es un fallo mucho peor que dejarla repetida, y no hay forma de
+    distinguir por solapamiento léxico una repetición de un refuerzo
+    deliberado. El prompt pide la línea con más alcance; esto dice cuántas
+    veces no la da.
+    """
+    safety = getattr(payload, "safety", None)
+    acciones = getattr(payload, "actions", None) or []
+    if not safety or not acciones:
+        return False
+
+    tokens = _contenido(safety)
+    if not tokens:
+        return False
+
+    return any(
+        len(tokens & _contenido(a)) / len(tokens) >= _DUPLICADO_UMBRAL
+        for a in acciones
+    )
 
 
 def _visible_text(payload) -> str:
@@ -557,7 +614,13 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     # 4. Podar secciones vacías.
     payload.details = [d for d in payload.details if d.body and d.body.strip()]
 
-    # 5. Cantidades sin respaldo. Al final, sobre el texto definitivo, para
+    # 5. Telemetría de calidad del tier visible. No corrige nada: mide cuántas
+    #    veces el prompt no consigue lo que pide.
+    report.safety_duplicates_action = safety_repeats_an_action(payload)
+    if report.safety_duplicates_action:
+        report.notes.append("safety repite una acción en vez de aportar algo nuevo")
+
+    # 6. Cantidades sin respaldo. Al final, sobre el texto definitivo, para
     #    que no se le escape lo que el propio validador haya añadido.
     if raw_content:
         report.unsupported_numbers = unsupported_numbers(payload, raw_content)

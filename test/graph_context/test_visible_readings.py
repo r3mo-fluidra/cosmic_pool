@@ -318,3 +318,85 @@ class TestElReporteSigueSiendoSerializable:
         assert callable(getattr(rep, "to_dict", None))
         d = rep.to_dict()
         assert "readings_missing" in d and "unsupported_numbers" in d
+
+
+class TestSafetyConInformacionUnica:
+    """
+    Bajo una acción "cierra la pileta a los bañistas", el campo de seguridad
+    decía "mantén la pileta cerrada hasta restaurar el cloro". La línea que
+    más se lee del tier visible, gastada en repetir la primera acción — y la
+    que sí llevaba información única, la prohibición del producto que causó
+    el problema, desaparecida del tier visible.
+
+    Se mide, no se corrige: suprimir una línea de seguridad por parecerse a
+    otra cosa es peor fallo que dejarla repetida.
+    """
+
+    def test_detecta_la_repeticion_del_trace(self):
+        from src.graph_context.response_validator import safety_repeats_an_action
+        p = _payload("Cierra la pileta.", ["Cerrar la pileta a los bañistas"])
+        p.safety = "Mantén la pileta cerrada a los bañistas hasta restaurarlo."
+        assert safety_repeats_an_action(p) is True
+
+    def test_una_linea_con_informacion_propia_pasa(self):
+        from src.graph_context.response_validator import safety_repeats_an_action
+        p = _payload("Cierra la pileta.", ["Cerrar la pileta a los bañistas"])
+        p.safety = "No uses tricloro ni dicloro: suben el estabilizador."
+        assert safety_repeats_an_action(p) is False
+
+    def test_sin_safety_no_hay_duplicado(self):
+        from src.graph_context.response_validator import safety_repeats_an_action
+        assert safety_repeats_an_action(_payload("x", ["Cerrar la pileta"])) is False
+
+    def test_sin_acciones_tampoco(self):
+        from src.graph_context.response_validator import safety_repeats_an_action
+        p = _payload("x")
+        p.safety = "No mezcles ácido con hipoclorito."
+        assert safety_repeats_an_action(p) is False
+
+    def test_funciona_en_ingles(self):
+        from src.graph_context.response_validator import safety_repeats_an_action
+        p = _payload("Close it.", ["Close the pool to bathers immediately"])
+        p.safety = "Keep the pool closed to all bathers until restored."
+        assert safety_repeats_an_action(p) is True
+
+    def test_enforce_contract_lo_registra(self):
+        p = _payload("Cierra.", ["Cerrar la pileta a los bañistas"])
+        p.safety = "Mantén la pileta cerrada a los bañistas."
+        _, rep = enforce_contract(p, get_contract("assessment"), ["chemistry"],
+                                  detail_cls=DetailSection)
+        assert rep.safety_duplicates_action is True
+
+    def test_no_borra_la_linea(self):
+        """El campo sigue ahí: se mide, no se suprime."""
+        p = _payload("Cierra.", ["Cerrar la pileta a los bañistas"])
+        p.safety = "Mantén la pileta cerrada a los bañistas."
+        p, _ = enforce_contract(p, get_contract("assessment"), ["chemistry"],
+                                detail_cls=DetailSection)
+        assert p.safety
+
+
+class TestVozEnSegundaPersona:
+    @pytest.fixture
+    def P(self):
+        from src.prompts.prompts import SYNTHESIZER_PROMPT
+        return SYNTHESIZER_PROMPT
+
+    def test_prohibe_el_nosotros_corporativo(self, P):
+        # "We cannot calculate your doses yet" — voz de empresa detrás de un
+        # formulario, no del técnico al lado de la pileta.
+        assert 'Never "we", "us"' in P
+        assert "we cannot calculate your doses yet" in P
+
+    def test_da_la_alternativa(self, P):
+        assert "I need your" in P
+
+    def test_el_safety_debe_aportar_algo_nuevo(self, P):
+        assert "information that is NOT already in `actions`" in P
+
+    def test_prefiere_la_linea_de_mayor_alcance(self, P):
+        assert "the one with\n  the longest reach" in P or "the one with the longest reach" in P
+
+    def test_vacio_es_mejor_que_duplicado(self, P):
+        assert "An empty\n  field is better than a duplicate one" in P or \
+               "An empty field is better than a duplicate one" in P
