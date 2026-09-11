@@ -131,6 +131,50 @@ _CON_OBJETIVO = {
     "es": "reportado; objetivo operativo {target}",
 }
 
+#: El objetivo operativo, cuando SÍ hay veredicto. El límite dice dónde empieza
+#: la infracción; el objetivo, dónde hay que dejar el vaso. Un panel que solo
+#: trae el límite deja al operador corrigiendo hasta el borde de la infracción.
+#:
+#: Va como sufijo y con su propia palabra ("target"/"objetivo") justamente para
+#: que no se confunda con el número normativo: el último fallo observado fue un
+#: operating_target presentado como techo de código.
+_OBJETIVO = {
+    "en": "; target {target}",
+    "es": "; objetivo {target}",
+}
+
+#: Unidad por parámetro. El especialista emite `measured` como número pelado
+#: —0.8, 7.9, 90.0— así que la unidad se pierde entre su payload y la pantalla:
+#: en el trace 148acb15 los siete valores llegaron sin ppm. Una cifra sin
+#: unidad no es una lectura, es un número, y 0.8 sin ppm no le dice a nadie
+#: que la pileta está en infracción.
+#:
+#: La temperatura NO está en la tabla, a propósito. El especialista devuelve 82
+#: sin escala, y elegirla acá es inventar: 82 °F y 82 °C describen dos piletas
+#: que no tienen nada que ver. Sin unidad es peor que con la correcta, pero
+#: mucho mejor que con la equivocada.
+_UNIDAD = {
+    "free chlorine":     "ppm",
+    "combined chlorine": "ppm",
+    "total chlorine":    "ppm",
+    "cyanuric acid":     "ppm",
+    "total alkalinity":  "ppm",
+    "calcium hardness":  "ppm",
+    "salt":              "ppm",
+    "tds":               "ppm",
+    "orp":               "mV",
+    "ph":                "",
+    # Siglas: el especialista alterna entre el nombre largo y la sigla.
+    "fc": "ppm", "cc": "ppm", "tc": "ppm",
+    "cya": "ppm", "ta": "ppm", "ch": "ppm",
+}
+
+
+def unit_for(parameter: str) -> str:
+    """La unidad de un parámetro, o "" si no la conocemos o no la lleva (pH)."""
+    clave = re.sub(r"[^a-z0-9]+", " ", (parameter or "").lower()).strip()
+    return _UNIDAD.get(clave, "")
+
 
 #: Números que no hace falta respaldar: son lenguaje, no cantidades.
 #: Rangos horarios, ordinales y unidades sueltas aparecen en prosa normal.
@@ -348,6 +392,17 @@ def _format_number(valor) -> str:
     return f"{valor}"
 
 
+def _con_unidad(valor, unidad: str) -> str:
+    """El número con su unidad, sin duplicarla si el especialista ya la puso."""
+    texto = _format_number(valor)
+    if not unidad or not texto:
+        return texto
+    if any(c.isalpha() for c in texto):
+        # "0.8 ppm" ya viene completo: añadir la unidad daría "0.8 ppm ppm".
+        return texto
+    return f"{texto} {unidad}"
+
+
 #: Parámetros cuya grafía no sobrevive a un .title(). "ph" -> "Ph" es un
 #: nombre que ningún operador escribe.
 _GRAFIA = {
@@ -368,7 +423,7 @@ def _format_parameter(nombre: str) -> str:
     return " ".join(_GRAFIA.get(w, w.capitalize()) for w in limpio.split())
 
 
-def reading_note(reading: dict, language: str) -> str:
+def reading_note(reading: dict, language: str, unit: str | None = None) -> str:
     """
     La nota de una lectura, armada por plantilla desde sus propios campos.
 
@@ -377,16 +432,26 @@ def reading_note(reading: dict, language: str) -> str:
     los dos fue el último fallo observado — "above the 120 ppm operating
     ceiling" presenta un objetivo de industria como si fuera un techo de
     código.
+
+    El objetivo sí aparece, pero detrás y con su propia etiqueta: es el número
+    sobre el que el operador actúa, y sin él la nota dice dónde empieza la
+    infracción sin decir dónde hay que dejar el vaso.
     """
+    # `unit=None` significa "deducila", no "sin unidad": un caller que se
+    # olvide del argumento produce una línea a medias —el valor con ppm y el
+    # límite sin— y ese es justo el defecto que este paso viene a cerrar.
+    if unit is None:
+        unit = unit_for(str(reading.get("parameter", "")))
+
     idioma = _STATUS_PHRASING.get(language, _STATUS_PHRASING["es"])
     status = coherent_status(reading)
     limite = reading.get("regulatory_limit")
+    objetivo = reading.get("operating_target")
 
     if status is None or status not in idioma:
-        objetivo = reading.get("operating_target")
         if objetivo is not None:
             return _CON_OBJETIVO.get(language, _CON_OBJETIVO["es"]).format(
-                target=_format_number(objetivo))
+                target=_con_unidad(objetivo, unit))
         return _SIN_VEREDICTO.get(language, _SIN_VEREDICTO["es"])
 
     plantilla = idioma[status]
@@ -396,8 +461,16 @@ def reading_note(reading: dict, language: str) -> str:
             # pero una plantilla con un hueco sin rellenar es peor que una
             # frase sin cifra.
             return _SIN_VEREDICTO.get(language, _SIN_VEREDICTO["es"])
-        return plantilla.format(limit=_format_number(limite))
-    return plantilla
+        nota = plantilla.format(limit=_con_unidad(limite, unit))
+    else:
+        nota = plantilla
+
+    # En `in_range` no se da: no hay nada que corregir, y un objetivo colgado
+    # de una lectura sana se lee como una tarea pendiente que no existe.
+    if objetivo is not None and status != "in_range":
+        nota += _OBJETIVO.get(language, _OBJETIVO["es"]).format(
+            target=_con_unidad(objetivo, unit))
+    return nota
 
 
 def build_readings(test_interpretation: list[dict], language: str, linea_cls):
@@ -422,10 +495,14 @@ def build_readings(test_interpretation: list[dict], language: str, linea_cls):
         medido = r.get("measured")
         if not nombre or medido is None:
             continue
+        # La unidad se resuelve del nombre CRUDO ("free_chlorine"), no del ya
+        # formateado, y se aplica a las tres cifras de la línea: el valor, el
+        # límite y el objetivo. Media línea con unidades es peor que ninguna.
+        unidad = unit_for(str(r.get("parameter", "")))
         lineas.append(linea_cls(
             parameter=nombre,
-            measured=_format_number(medido),
-            note=reading_note(r, language),
+            measured=_con_unidad(medido, unidad),
+            note=reading_note(r, language, unidad),
         ))
     return lineas
 

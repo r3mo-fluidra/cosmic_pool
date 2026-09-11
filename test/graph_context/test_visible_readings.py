@@ -91,15 +91,15 @@ class TestFraseoDeterminista:
 
     def test_below_minimum_cita_el_limite(self):
         assert self._nota(_lectura("FC", 0.8, "below_minimum", 3.0, 2.0)) == \
-            "in violation, below the 2 minimum"
+            "in violation, below the 2 ppm minimum; target 3 ppm"
 
     def test_above_maximum_cita_el_limite(self):
         assert self._nota(_lectura("pH", 7.9, "above_maximum", 7.5, 7.8)) == \
-            "in violation, above the 7.8 cap"
+            "in violation, above the 7.8 cap; target 7.5"
 
     def test_at_ceiling_es_cumplimiento(self):
         nota = self._nota(_lectura("CYA", 90, "at_ceiling", 40.0, 90.0))
-        assert nota == "compliant, no margin at the ceiling"
+        assert nota == "compliant, no margin at the ceiling; target 40 ppm"
         assert "violation" not in nota
 
     def test_at_floor_es_cumplimiento(self):
@@ -113,9 +113,30 @@ class TestFraseoDeterminista:
         El último fallo: "above the 120 ppm operating ceiling" presentaba un
         objetivo de industria como techo de código. La plantilla solo se
         rellena con regulatory_limit.
+
+        El objetivo sí aparece, pero detrás y etiquetado: el hueco del
+        veredicto es del límite y de nadie más.
         """
         nota = self._nota(_lectura("TA", 130, "above_maximum", 100.0, 180.0))
-        assert "180" in nota and "100" not in nota
+        assert nota.startswith("in violation, above the 180 ppm cap")
+        assert "100" not in nota.split(";")[0]
+
+    def test_el_objetivo_operativo_acompana_al_veredicto(self):
+        """
+        Cuatro lecturas del trace 148acb15 salieron sin su objetivo: el panel
+        decía dónde empieza la infracción y no dónde hay que dejar el vaso.
+        """
+        nota = self._nota(_lectura("FC", 0.8, "below_minimum", 4.0, 2.0))
+        assert nota.endswith("; target 4 ppm")
+
+    def test_una_lectura_en_rango_no_arrastra_un_objetivo(self):
+        # No hay nada que corregir: el sufijo se leería como tarea pendiente.
+        assert self._nota(_lectura("CH", 380, "in_range", 300.0, 1000.0)) == "in range"
+
+    def test_un_objetivo_en_cero_se_reporta(self):
+        # El objetivo de cloro combinado es 0.0, y 0.0 es un dato, no un hueco.
+        nota = self._nota(_lectura("CC", 0.4, "above_maximum", 0.0, 0.2))
+        assert nota == "in violation, above the 0.2 ppm cap; target 0 ppm"
 
     def test_un_status_sin_limite_no_afirma_infraccion(self):
         # coherent_status lo degrada; la nota informa sin veredicto.
@@ -128,11 +149,11 @@ class TestFraseoDeterminista:
         assert nota == "reported; no code bound available"
 
     def test_los_enteros_no_arrastran_ceros(self):
-        assert "2 minimum" in self._nota(_lectura("FC", 0.8, "below_minimum", 3.0, 2.0))
+        assert "2 ppm minimum" in self._nota(_lectura("FC", 0.8, "below_minimum", 3.0, 2.0))
 
     def test_en_espanol(self):
         nota = self._nota(_lectura("pH", 7.9, "above_maximum", 7.5, 7.8), "es")
-        assert nota == "en infracción, por encima del máximo de 7.8"
+        assert nota == "en infracción, por encima del máximo de 7.8; objetivo 7.5"
 
 
 class TestElPanelSeConstruyeEntero:
@@ -158,7 +179,7 @@ class TestElPanelSeConstruyeEntero:
         enforce_visible_readings(p, PANEL, "en", rep)
         notas = {r.note for r in p.readings}
         assert "extremely high, way over the limit" not in notas
-        assert "in violation, above the 7.8 cap" in notas
+        assert "in violation, above the 7.8 cap; target 7.5" in notas
 
     def test_ignora_entradas_sin_valor(self):
         assert self._construir([{"parameter": "pH", "status": "in_range"}]) == []
@@ -439,11 +460,35 @@ class TestGrafiaYUnidades:
             _lectura("Combined Chlorine", 0.4, "in_range")).parameter == "Combined Chlorine"
 
     def test_conserva_la_unidad_si_el_especialista_la_dio(self):
-        # "0.8 ppm" vale más que el número pelado.
+        # "0.8 ppm" vale más que el número pelado, y no se duplica en
+        # "0.8 ppm ppm".
         assert self._linea(_lectura("fc", "0.8 ppm", "in_range")).measured == "0.8 ppm"
 
     def test_los_enteros_no_arrastran_el_cero(self):
-        assert self._linea(_lectura("cya", 90.0, "in_range")).measured == "90"
+        assert self._linea(_lectura("cya", 90.0, "in_range")).measured == "90 ppm"
+
+    def test_el_valor_medido_llega_con_su_unidad(self):
+        """
+        El especialista emite `measured` como número pelado, así que los siete
+        valores del trace 148acb15 llegaron a pantalla sin ppm. 0.8 sin unidad
+        no le dice a nadie que la pileta está en infracción.
+        """
+        assert self._linea(
+            _lectura("free_chlorine", 0.8, "below_minimum", 4.0, 2.0)).measured == "0.8 ppm"
+
+    def test_el_ph_no_lleva_unidad(self):
+        assert self._linea(_lectura("ph", 7.9, "in_range")).measured == "7.9"
+
+    def test_la_temperatura_no_inventa_escala(self):
+        """
+        82 °F y 82 °C son dos piletas distintas y el especialista no dice
+        cuál. Sin unidad es peor que con la correcta y mucho mejor que con la
+        equivocada.
+        """
+        assert self._linea(_lectura("temperature", 82.0, "in_range")).measured == "82"
+
+    def test_un_parametro_desconocido_no_inventa_unidad(self):
+        assert self._linea(_lectura("turbidity", 0.3, "in_range")).measured == "0.3"
 
 
 class TestReintentoPorContrato:
