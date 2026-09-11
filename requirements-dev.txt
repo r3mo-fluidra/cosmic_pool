@@ -1,0 +1,13 @@
+# Dependencias de desarrollo. NO las instala el despliegue.
+#
+# Aparte de requirements.txt a propósito: Streamlit Cloud y el Dev Container
+# instalan ese fichero, y no tienen por qué cargar con el runner de tests.
+#
+# Uso:
+#   python3.11 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+#   .venv/bin/python -m pytest
+
+-r requirements.txt
+
+pytest>=8.0.0
