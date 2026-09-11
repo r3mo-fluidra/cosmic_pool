@@ -52,14 +52,14 @@ _TURN_THREAD_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "retrieval_turn_thread_id", default=""
 )
 
-# Cuántas veces puede llamarse cada tool dentro de UN step.
-# expand_subgraph = 2 porque el camino normativo documentado en RETRIEVAL_CORE
-# admite un intento por slug + un segundo sobre los seeds reales tras el miss.
-_TOOL_BUDGETS = {
-    "vector_search": 1,
-    "search_seed_nodes": 1,
-    "expand_subgraph": 2,
-}
+# Cuántas veces puede llamarse cada tool dentro de UN step: lo dice
+# tool_budgets.py, importado arriba como _TOOL_BUDGETS.
+#
+# Acá había una copia literal de esos valores que PISABA el import. Los dos
+# coincidían, así que no cambiaba el comportamiento — hasta que se tocó el
+# módulo canónico y el cambio no surtió efecto. El propósito declarado de
+# tool_budgets.py ("fuente única de verdad") era falso mientras esto existió,
+# y middleware.py importa _TOOL_BUDGETS DESDE ACÁ, así que consumía la copia.
 
 
 def begin_tool_scope(thread_id: str = "") -> None:

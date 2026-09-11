@@ -15,6 +15,7 @@ from langfuse import observe, get_client
 from typing import List, Literal
 
 import contextvars
+import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
@@ -47,7 +48,11 @@ from ..graph_context.response_contracts import (
     SynthesizerOutput, get_contract, resolve_archetype,
     usable_results, DetailSection, agents_from_results
 )
-from ..graph_context.response_validator import enforce_contract, fallback_payload
+from ..graph_context.response_validator import (
+    enforce_contract,
+    fallback_payload,
+    required_readings,
+)
 from ..prompts.prompt_archetype import build_synthesizer_archetype_section
 from ..graph_context.suggestions import (
     SUPERNODES,
@@ -578,6 +583,42 @@ def _attach_sources(payload: SynthesizerOutput, results: list) -> None:
         payload.details.append(
             DetailSection(label="Fuentes", body="\n".join(f"- {s}" for s in srcs))
         )
+
+_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _readings_from_results(agent_results: dict) -> list[dict]:
+    """
+    Las entradas de `test_interpretation` que los especialistas produjeron.
+
+    Alimenta el chequeo duro del validador: toda lectura fuera de rango tiene
+    que aparecer donde el usuario lee. Se parsea acá, en el borde, porque el
+    output de un sub-agente es texto — JSON del contrato, a veces envuelto en
+    un fence — y el validador no debe saber nada de ese formato.
+
+    Tolerante a propósito: si el JSON no se deja parsear, se devuelve una lista
+    vacía y el enforcement simplemente no se aplica. Un parseo fallido no puede
+    tumbar un turno que por lo demás está bien.
+    """
+    lecturas: list[dict] = []
+
+    for result in (agent_results or {}).values():
+        salida = _field(result, "output") or ""
+        if "test_interpretation" not in salida:
+            continue
+        m = _JSON_OBJ_RE.search(_strip_code_fences(salida))
+        if not m:
+            continue
+        try:
+            datos = json.loads(m.group(0))
+        except (ValueError, TypeError):
+            continue
+        entradas = datos.get("test_interpretation")
+        if isinstance(entradas, list):
+            lecturas.extend(e for e in entradas if isinstance(e, dict))
+
+    return lecturas
+
 
 def _extract_text(content) -> str:
     """Normalise LLM content to plain text regardless of its shape."""
@@ -1605,7 +1646,12 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     try:
         payload, report = enforce_contract(
-            payload, contract, agents, detail_cls=DetailSection
+            payload, contract, agents, detail_cls=DetailSection,
+            # Las lecturas fuera de rango no son negociables con el modelo:
+            # el validador comprueba que estén en el tier visible y, si no,
+            # las añade. Ver enforce_visible_readings.
+            readings=required_readings(_readings_from_results(agent_results)),
+            language=language_code,
         )
         validation = {**validation, **report.to_dict()}
     except Exception as exc:

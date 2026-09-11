@@ -352,3 +352,40 @@ class TestConflictoDeRestriccion:
         import re
         for patron in [r"\b7\.5\s*%", r"\b6\.75", r"\b1\s*to\s*4\s*ppm"]:
             assert not re.search(patron, chem), f"valor de dominio hardcodeado: {patron}"
+
+
+class TestLimiteVsObjetivo:
+    """
+    El agente etiquetó regulatory_limit=400 para dureza de calcio. El corpus
+    dice "typical educational targets run from about 150 to 400 ppm ... some
+    codes permitting higher maxima": es un objetivo de industria, y el propio
+    texto avisa de que hay códigos más laxos.
+
+    Inventar un límite MÁS ESTRICTO que el código es el mismo error que
+    llamar violación a un techo, con el signo cambiado: hace que una
+    instalación en regla parezca estarlo incumpliendo.
+    """
+
+    @pytest.fixture
+    def oc(self):
+        from src.prompts.prompts_sub_agents import AGENT_REGISTRY, CHEMISTRY
+        return AGENT_REGISTRY[CHEMISTRY].output_contract
+
+    def test_limite_solo_si_la_fuente_lo_presenta_como_codigo(self, oc):
+        assert "ONLY a value the source presents as a code" in oc
+
+    def test_reconoce_el_lenguaje_de_los_objetivos_educativos(self, oc):
+        assert "typical target" in oc and "educational range" in oc
+
+    def test_sin_evidencia_de_codigo_el_limite_es_null(self, oc):
+        assert "regulatory_limit is null" in oc
+
+    def test_nombra_el_riesgo_de_inventar_un_limite_estricto(self, oc):
+        assert "stricter than the code makes a compliant" in oc
+
+    def test_el_target_no_puede_ser_eco_del_medido(self, oc):
+        # Temperatura devolvió operating_target=82.0 con 82°F medidos.
+        assert "never echo the measured value back into it" in oc
+
+    def test_el_status_se_juzga_contra_el_limite(self, oc):
+        assert "never against a target" in oc

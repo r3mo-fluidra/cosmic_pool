@@ -225,7 +225,16 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "test_interpretation — ONE ENTRY PER PARAMETER RECEIVED, none omitted: "
         "parameter, measured, regulatory_limit, operating_target, "
         "status (below_minimum | at_floor | in_range | at_ceiling | above_maximum), "
-        "source_id for each bound",
+        "source_id for each bound. "
+        "regulatory_limit carries ONLY a value the source presents as a code "
+        "requirement. Wording such as 'typical target', 'commonly cited' or "
+        "'educational range' marks an operating figure, not a limit — put it in "
+        "operating_target. If the evidence states no code bound, regulatory_limit "
+        "is null: inventing one that is stricter than the code makes a compliant "
+        "facility look in breach, the same error as calling a ceiling a violation. "
+        "operating_target is null when the parameter has no target to dial to; "
+        "never echo the measured value back into it. status is judged against "
+        "regulatory_limit when one exists, never against a target",
         "interactions (list: which readings modify each other, and how — a "
         "sanitizer whose effective target moves with a stabilizer, a value that "
         "is only compliant because another is deficient, a measured total that "

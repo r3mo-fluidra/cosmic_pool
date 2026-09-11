@@ -62,12 +62,116 @@ class ValidationReport:
     safety_promoted: bool = False
     safety_missing: bool = False       # -> gatilla retry
     answer_exceeds_budget: bool = False  # -> gatilla retry
+    #: Lecturas fuera de rango que el tier visible omitió. El modelo lleva
+    #: tres iteraciones incumpliendo esto con el presupuesto casi vacío, así
+    #: que deja de ser una instrucción y pasa a ser una comprobación.
+    readings_missing: list[str] = field(default_factory=list)
+    readings_appended: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
     def needs_retry(self) -> bool:
         """Un solo retry. Si vuelve a fallar, se acepta la degradación."""
         return self.safety_missing or self.answer_exceeds_budget
+
+
+# --------------------------------------------------------------------------
+# Lecturas obligatorias en el tier visible
+# --------------------------------------------------------------------------
+
+#: Cómo se nombra cada estado cuando hay que añadirlo a mano. Texto mínimo y
+#: factual: sale de los datos del especialista, no interpreta nada.
+_STATUS_PHRASE = {
+    "es": {
+        "below_minimum": "por debajo del mínimo",
+        "above_maximum": "por encima del máximo",
+        "at_ceiling": "en el límite máximo, sin margen",
+        "at_floor": "en el mínimo, sin margen",
+    },
+    "en": {
+        "below_minimum": "below the minimum",
+        "above_maximum": "above the maximum",
+        "at_ceiling": "at its ceiling, no headroom",
+        "at_floor": "at its floor, no headroom",
+    },
+}
+
+
+def _visible_text(payload) -> str:
+    partes = [getattr(payload, "answer", "") or "", getattr(payload, "safety", "") or ""]
+    partes += list(getattr(payload, "actions", None) or [])
+    return " ".join(partes).lower()
+
+
+def _reading_is_visible(reading: dict, visible: str) -> bool:
+    """
+    ¿Está esta lectura REPORTADA en el tier visible, no solo nombrada?
+
+    Nombrar el parámetro dentro de una acción ("baja el pH") no cuenta: el
+    operador no se entera de cuánto marcó ni de que incumple. Se exige el
+    nombre Y el valor medido, que es lo que convierte una tarea en un dato.
+    """
+    nombre = str(reading.get("parameter", "")).replace("_", " ").strip().lower()
+    if not nombre or nombre not in visible:
+        return False
+
+    medido = reading.get("measured")
+    if medido is None:
+        return True
+
+    texto = f"{medido}".rstrip("0").rstrip(".")
+    return texto in visible or f"{medido}" in visible
+
+
+def required_readings(test_interpretation) -> list[dict]:
+    """Las lecturas que el tier visible NO puede omitir."""
+    if not isinstance(test_interpretation, list):
+        return []
+    return [
+        r for r in test_interpretation
+        if isinstance(r, dict) and r.get("status") not in (None, "in_range")
+    ]
+
+
+def enforce_visible_readings(payload, readings: list[dict], language: str,
+                             report: ValidationReport) -> None:
+    """
+    Garantiza que toda lectura fuera de rango aparezca donde el usuario lee.
+
+    El contrato de `assessment` ya lo exige en palabras — "una lectura que el
+    usuario reportó y la respuesta no menciona se lee como una lectura que te
+    pareció aceptable" — y aun así, medido sobre tres turnos, el modelo dejó
+    fuera del tier visible un pH en above_maximum (violación de código) usando
+    80 palabras de un presupuesto de 900. No fue falta de sitio: relocalizó
+    teniendo 820 palabras libres.
+
+    Por eso esto no pide nada: comprueba, y si falta, lo añade. El texto
+    añadido es deliberadamente escueto y factual — parámetro, valor y estado —
+    porque no puede inventar lo que el especialista no dijo.
+    """
+    faltantes = [r for r in readings if not _reading_is_visible(r, _visible_text(payload))]
+    if not faltantes:
+        return
+
+    report.readings_missing = [str(r.get("parameter", "?")) for r in faltantes]
+
+    frases = _STATUS_PHRASE.get(language, _STATUS_PHRASE["es"])
+    trozos = []
+    for r in faltantes:
+        nombre = str(r.get("parameter", "")).replace("_", " ").strip()
+        medido = r.get("measured")
+        estado = frases.get(str(r.get("status")))
+        if not nombre or medido is None:
+            continue
+        trozos.append(f"{nombre} {medido}" + (f" ({estado})" if estado else ""))
+
+    if not trozos:
+        return
+
+    encabezado = "Además:" if language == "es" else "Also:"
+    payload.answer = f"{(payload.answer or '').rstrip()} {encabezado} {'; '.join(trozos)}.".strip()
+    report.readings_appended = True
+    report.notes.append(f"lecturas añadidas al tier visible: {report.readings_missing}")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -280,7 +384,8 @@ def promote_safety_from_details(payload, report: ValidationReport) -> None:
 # --------------------------------------------------------------------------
 
 def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
-                     detail_cls=None) -> tuple[Any, ValidationReport]:
+                     detail_cls=None, readings: list[dict] | None = None,
+                     language: str = "es") -> tuple[Any, ValidationReport]:
     """
     Aplica el contrato al payload del synthesizer.
 
@@ -318,7 +423,13 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
         report.notes.append(f"safety exigida por: {trigger}")
         promote_safety_from_details(payload, report)
 
-    # 3. Presupuesto.
+    # 3. Lecturas obligatorias ANTES del presupuesto: si algo hay que añadir,
+    #    tiene que competir por el espacio como el resto del tier visible, no
+    #    colarse por encima del cap.
+    if readings:
+        enforce_visible_readings(payload, readings, language, report)
+
+    # 4. Presupuesto.
     overflow_to_details(payload, report.budget, detail_cls, report)
 
     # 4. Podar secciones vacías.

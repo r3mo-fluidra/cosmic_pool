@@ -87,20 +87,24 @@ class TestRetiradaDelSchema:
         modelo volvió a pedir las dos y el gate las rechazó en 0.001s. Fueron
         dos round trips completos (1.78s y 1.38s) por tools que no deberían
         haber estado en el schema.
+
+        search_seed_nodes pasó a 2 después (un panel de siete parámetros no
+        cabe en una búsqueda), así que acá se agota explícitamente.
         """
         historial = [
             HumanMessage(content="why does chlorine lose effectiveness as pH rises"),
             *_llamada("vector_search", 1),
             *_llamada("search_seed_nodes", 2),
-            *_llamada("expand_subgraph", 3),
+            *_llamada("search_seed_nodes", 3),
+            *_llamada("expand_subgraph", 4),
         ]
         assert _ofrecidas(historial) == ["expand_subgraph"]
 
     def test_sin_tools_disponibles_el_modelo_se_queda_sin_salida(self):
         """Agotarlo todo debe forzar una respuesta, no otro intento."""
         historial = [HumanMessage(content="q"), *_llamada("vector_search", 1),
-                     *_llamada("search_seed_nodes", 2), *_llamada("expand_subgraph", 3),
-                     *_llamada("expand_subgraph", 4)]
+                     *_llamada("search_seed_nodes", 2), *_llamada("search_seed_nodes", 3),
+                     *_llamada("expand_subgraph", 4), *_llamada("expand_subgraph", 5)]
         assert _ofrecidas(historial) == []
 
 
@@ -111,7 +115,17 @@ class TestPresupuestos:
         assert "search_seed_nodes" in _ofrecidas(historial)
 
     @pytest.mark.parametrize("tool,esperado", [
-        ("vector_search", 1), ("search_seed_nodes", 1), ("expand_subgraph", 2),
+        ("vector_search", 1), ("search_seed_nodes", 2), ("expand_subgraph", 2),
     ])
     def test_valores_declarados(self, tool, esperado):
         assert _TOOL_BUDGETS[tool] == esperado
+
+    def test_la_fuente_de_verdad_es_tool_budgets(self):
+        """
+        tools.py tenía una copia literal que PISABA el import del módulo
+        canónico. Coincidían, así que no se notaba — hasta que se tocó
+        tool_budgets.py y el cambio no llegó. middleware.py importa
+        _TOOL_BUDGETS desde tools.py, o sea que consumía la copia.
+        """
+        from src.tool_budgets import RETRIEVAL_TOOL_BUDGETS
+        assert _TOOL_BUDGETS is RETRIEVAL_TOOL_BUDGETS
