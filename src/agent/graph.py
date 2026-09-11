@@ -82,21 +82,28 @@ Routing notes
   oos may also route BACK to orchestrator on a MISROUTE.
 - synthesizer returns a plain dict → edge to suggester → END.
 
-Suggester: sequential, not parallel
-───────────────────────────────────
-It was designed as a fan-out branch off the orchestrator, running beside the
-synthesizer so it could never delay the answer. It isn't wired that way, and
-the sequential edge is the correct choice for now: suggester reads
-state["response"], which only exists after the synthesizer writes it. Two of
-its gates (answer_ends_with_question, and the redundancy filter in
-_unconsumed_entities) have no input at all under true fan-out.
+Suggester: parallel, and its gates now know it
+──────────────────────────────────────────────
+It IS a fan-out branch: _to_synthesizer emits goto=["synthesizer",
+"suggester"], both run in the same superstep. This docstring used to claim
+the opposite ("sequential edge... reads state['response']"), and the code
+believed the docstring: the node read state["response"], which is None at
+that point because the synthesizer has not written yet. Its two content
+gates were fed the literal string "(sin respuesta disponible)" and therefore
+filtered nothing. Chips were generated blind.
 
-The cost is that the suggester sits on the user's critical path. That is why
-_SUGGESTER_DEADLINE_S is short and why every failure inside the node degrades
-to [] rather than propagating.
+Fixed by _suggester_material() in nodes.py — the function this file's own
+comment already assumed existed. It prefers `response` when present and
+falls back to the usable outputs in agent_results, which is the same raw
+material the synthesizer is turning into prose right now.
 
-Going back to real fan-out means rewriting both gates against agent_results
-instead of response — a deliberate trade, not a cleanup.
+The third gate (answer_ends_with_question) genuinely cannot run here: the
+synthesizer's text does not exist yet in this superstep. It lives in app.py,
+where the final answer is in hand.
+
+Fan-out is not free. Both branches lead to END, so the turn does not close
+until both finish. That is why _SUGGESTER_DEADLINE_S is short and why every
+failure inside the node degrades to [] rather than propagating.
 """
 
 from langgraph.graph import StateGraph, START, END

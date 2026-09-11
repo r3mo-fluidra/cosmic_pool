@@ -36,9 +36,9 @@ from src.ui.theme import (
     scroll_to_question,
     status_stack,
     theme_slider,
-    type_out,
 )
-from src.ui.turns import TurnProgress, followup_suggestions, is_definitive_answer
+from src.ui.streaming import chunk_text, partial_answer
+from src.ui.turns import TurnProgress, is_definitive_answer
 
 # ==========================================
 # CONFIGURATION & LANGFUSE SETUP
@@ -231,6 +231,52 @@ def check_and_handle_neo4j() -> tuple[bool, str]:
                 "Please log into the [Neo4j Aura Console](https://console.neo4j.io/) to resume your instance."
             )
         return False, f"Neo4j Connection Error: {e}"
+
+
+# ==========================================
+# PRE-WARM
+# ==========================================
+@st.cache_resource
+def prewarm_retrieval() -> bool:
+    """
+    Carga los modelos de embeddings y abre el driver de Neo4j en segundo
+    plano, al arrancar el proceso.
+
+    El motivo: `get_vector_store()` instancia FastEmbedEmbeddings
+    (BAAI/bge-small-en-v1.5) y FastEmbedSparse (Qdrant/bm25) de forma
+    perezosa, en la PRIMERA llamada a vector_search — que ocurre dentro del
+    primer turno de un usuario real, bajo `_store_lock` y contra el deadline
+    de su step. La primera vez descarga ~130 MB de ONNX; después, cargar la
+    sesión cuesta 1-3s. Y como es bajo lock, los steps del fan-out que
+    llegasen a la vez se serializaban esperándolo.
+
+    Un thread daemon y no una llamada directa: esto NO debe retrasar el
+    primer render. El usuario ve la interfaz mientras los modelos cargan, y
+    si escribe muy rápido el peor caso es exactamente el comportamiento
+    anterior (esperar la carga en el primer turno), nunca peor.
+
+    Los errores se tragan a propósito: si Qdrant o Neo4j están caídos, el
+    fallo tiene que salir en el turno, con su manejo de errores y su traza,
+    no como una excepción suelta en un thread de arranque sin contexto.
+    """
+    import threading
+
+    def _warm():
+        from src.agent.tools import get_vector_store, get_neo4j_driver
+        try:
+            get_vector_store()
+        except Exception:
+            pass
+        try:
+            get_neo4j_driver().verify_connectivity()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, name="prewarm", daemon=True).start()
+    return True
+
+
+prewarm_retrieval()
 
 
 # ==========================================
@@ -728,13 +774,20 @@ def run_turn(
     trace_id: str,
     turn_index: int,
     status_slot=None,
-) -> tuple[str, bool, list[tuple[str, str]]]:
+    answer_slot=None,
+) -> tuple[str, bool, list[tuple[str, str]], list[str]]:
     """
     Executes the graph and reports progress into `status_slot`.
     Separated from the trace plumbing so the span wrapper stays readable.
 
-    Returns the final response, whether it is a definitive answer, and the
-    pipeline-debug lines (see `render_debug`).
+    Returns the final response, whether it is a definitive answer, the
+    pipeline-debug lines (see `render_debug`) and the suggestion chips.
+
+    Esta función es dueña de pintar el turno vivo. `answer_slot` es el hueco
+    donde va la burbuja del assistant: en cuanto el synthesizer emite su
+    primer token, este bucle cierra el status stack, abre la burbuja y la va
+    llenando. El llamador ya no repinta la respuesta — solo la guarda en el
+    historial, que es quien la vuelve a renderizar en los reruns siguientes.
 
     The status stack is `TurnProgress` (src/ui/turns.py); this function's job is
     to translate graph events into calls on it, collect the debug lines, and
@@ -776,11 +829,53 @@ def run_turn(
     # start with nothing at all, which was the whole complaint.
     progress.begin()
 
-    for event in graph.stream(
+    # ── Streaming del synthesizer ────────────────────────────────────────
+    # El buffer acumula los chunks crudos del nodo; `partial_answer` saca de
+    # ahí el campo `answer` mientras el JSON todavía se escribe.
+    #
+    # `_answer_box` se crea perezosamente, en el primer token que produzca
+    # texto legible. Ese momento es el que cierra el status stack y abre la
+    # burbuja: hasta entonces no hay nada que poner dentro, y abrirla antes
+    # prometía contenido inexistente — el mismo criterio por el que
+    # `status_slot` vive fuera de `chat_message`.
+    synth_buffer = ""
+    answer_box = None
+
+    def _paint_partial(text: str) -> None:
+        nonlocal answer_box
+        if answer_slot is None:
+            return
+        if answer_box is None:
+            if status_slot is not None:
+                status_slot.empty()
+            with answer_slot.container():
+                with st.chat_message("assistant"):
+                    role_marker("assistant")
+                    assistant_label()
+                    answer_box = st.empty()
+        answer_box.markdown(text)
+
+    # stream_mode como LISTA cambia la forma de los eventos: en vez de un
+    # dict {nodo: update} llega (modo, payload). Con "updates" solo, el
+    # usuario no veía un carácter hasta que el synthesizer terminaba entero.
+    for mode, payload in graph.stream(
         {"messages": [HumanMessage(content=prompt)]},
         config=config,
-        stream_mode="updates",
+        stream_mode=["updates", "messages"],
     ):
+        if mode == "messages":
+            chunk, meta = payload
+            # Solo el synthesizer. Los sub-agentes también emiten tokens y
+            # son JSON del contrato interno: material crudo, no respuesta.
+            if meta.get("langgraph_node") == "synthesizer":
+                synth_buffer += chunk_text(chunk)
+                partial = partial_answer(synth_buffer)
+                if partial:
+                    _paint_partial(partial)
+            continue
+
+        event = payload
+
         if "planner" in event:
             plan = event["planner"].get("execution_plan", [])
             plan_steps = list(plan)
@@ -835,6 +930,17 @@ def run_turn(
         # nunca de run_turn — los que se veían eran el deck estático.
         if "suggester" in event:
             suggestions = _chip_texts(event["suggester"].get("suggestions"))
+
+    # El texto definitivo. Reemplaza lo que el streaming dejó pintado: el
+    # parcial es solo `answer`, mientras que `final_response` es el tier 1
+    # completo (answer + actions + safety) y ya pasó por enforce_contract.
+    #
+    # Si no hubo streaming — el modelo no emitió chunks, o el turno salió por
+    # `general`/`oos`, que no pasan por el synthesizer — esta es la primera y
+    # única pintada, y el turno se ve igual que antes.
+    if final_response:
+        _paint_partial(final_response)
+
     return (
         final_response,
         is_definitive_answer(plan_steps, agent_runs, final_response),
@@ -873,6 +979,11 @@ if prompt:
     # its "Your assistant" label only appear once there is something to put in
     # them. Opening the card first promised content that did not exist yet.
     status_slot = screen_scroll.empty()
+    # Hueco para la burbuja del assistant. Se declara acá, ANTES del turno,
+    # para que quede por debajo del status en el orden del scroll; run_turn lo
+    # llena en cuanto el synthesizer emite su primer token. Vacío no ocupa
+    # nada, así que en los turnos que fallan no deja rastro.
+    answer_slot = screen_scroll.empty()
 
     final_response = ""
     definitive = False
@@ -904,6 +1015,7 @@ if prompt:
                     current_trace_id,
                     turn_index,
                     status_slot=status_slot,
+                    answer_slot=answer_slot,
                 )
 
                 span.update(
@@ -940,6 +1052,7 @@ if prompt:
             final_response, definitive, debug_lines, suggestions = run_turn(
                 prompt, current_trace_id, turn_index,
                 status_slot=status_slot,
+                answer_slot=answer_slot,
             )
         except Exception as e:
             turn_error = e
@@ -956,27 +1069,36 @@ if prompt:
         st.stop()
 
     if final_response:
-        # Now the card: label and answer together, as one object arriving.
-        with screen_scroll.chat_message("assistant"):
-            role_marker("assistant")
-            assistant_label()
-            # El reveal mecanografiado está APAGADO (theme.py::STREAM_ANSWERS):
-            # el texto ya está completo acá, así que el efecto solo añadía
-            # hasta 6s de espera a alguien que ya podía leer. type_out pinta
-            # ahora en un solo st.markdown.
-            #
-            # Se deja la llamada en vez de un st.markdown directo porque este
-            # es el punto de inserción del streaming real del synthesizer
-            # (stream_mode=["updates","messages"]): cuando exista, cambia
-            # type_out y no este call site.
-            type_out(st.empty(), final_response)
-            render_debug(debug_lines)
+        # La burbuja ya está en pantalla: la pintó run_turn, token a token
+        # mientras el synthesizer generaba, y la cerró con el texto
+        # definitivo. Repintarla acá la duplicaría.
+        #
+        # Solo queda el panel de debug, que va debajo y fuera de la burbuja
+        # (con SHOW_PIPELINE_DEBUG en False no renderiza nada).
+        if SHOW_PIPELINE_DEBUG:
+            with screen_scroll.container():
+                render_debug(debug_lines)
 
         # trace_id + turn_index travel with the message so any past turn
         # stays scorable and its score keeps its conversation coordinates.
         # `can_rate` is decided once, here: a turn cannot become rateable
         # later, and re-deriving it on every rerun would be guesswork from
         # the text alone. Field-by-field documentation is on `ChatMessage`.
+        # Gate final de chips: no se ofrece un chip encima de una pregunta.
+        # Si el synthesizer acaba preguntando, el siguiente turno le toca al
+        # usuario y un chip solo compite con esa pregunta.
+        #
+        # Va ACÁ, antes de construir `answer`. Estaba después del append, así
+        # que reasignaba el nombre local `suggestions` sobre un dict que ya
+        # tenía la lista guardada: la regla no se aplicaba nunca.
+        #
+        # Este gate vive en la UI y no en el nodo suggester porque en fan-out
+        # el nodo no puede saberlo — el texto del synthesizer no existe
+        # todavía cuando el suggester corre.
+        if suggestions and final_response.rstrip().endswith(("?", "？")):
+            suggestions = []
+
+        # trace_id + turn_index travel with the message so any past turn
         answer: ChatMessage = {
             "role": "assistant",
             "content": final_response,
@@ -1000,6 +1122,4 @@ if prompt:
         st.session_state.messages.append(answer)
         # Rerun so the feedback widget renders from the history loop, where
         # it survives the reruns that its own buttons trigger.
-        if suggestions and final_response.rstrip().endswith(("?", "？")):
-            suggestions = []
         st.rerun()

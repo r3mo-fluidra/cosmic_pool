@@ -31,6 +31,21 @@ AgentName = Literal[
     "oos"
 ]
 
+# Slugs que el código compara contra `step.assigned_agent`.
+#
+# Existen porque la confusión contraria costó un gate entero: `MATH` en
+# prompts_sub_agents.py vale "Pool Math Agent" — un nombre de DISPLAY, correcto
+# cuando se interpola en el texto de un prompt ("owned by the Pool Math Agent"),
+# inservible como identificador. nodes.py comparaba `step.assigned_agent == MATH`
+# ("math" == "Pool Math Agent"), que es False siempre, y gates.py construía
+# AgentResult(agent=MATH), que ni siquiera es un AgentName válido. Dos bugs que
+# se anulaban: el gate nunca disparaba, así que nunca llegó a explotar.
+#
+# Regla: display name -> prompts_sub_agents. Identificador -> acá.
+MATH_SLUG: AgentName = "math"
+GENERAL_SLUG: AgentName = "general"
+OOS_SLUG: AgentName = "oos"
+
 # Diccionario de nombres legibles para humanos
 # Esto es lo que probablemente falta y causa el KeyError
 AGENT_NAMES: Dict[AgentName, str] = {

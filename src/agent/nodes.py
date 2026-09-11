@@ -33,6 +33,7 @@ from .gates import (
     missing_inputs_result
 )
 from ..prompts.prompts_sub_agents import MATH, AGENT_REGISTRY
+from .agent_names import MATH_SLUG
 from ..prompts.prompts import GENERAL_PROMPT , OOS_PROMPT
 # Graph context
 from ..graph_context.response_contracts import (
@@ -67,7 +68,28 @@ MESSAGES_TO_KEEP = 6
 # pasado eso degrada a [] como cualquier otro fallo del nodo.
 _SUGGESTER_DEADLINE_S = 6
 _MAX_MISROUTE_RETRIES = 2
-STEP_DEADLINE_S = 60.0 
+
+# ── Techos de wall-clock ─────────────────────────────────────────────────
+# Una sola declaración. Había DOS: 60.0 acá arriba y 120.0 doscientas líneas
+# más abajo, que la pisaba en silencio. Leyendo el fichero por orden parecía
+# que el techo por paso era 60s; el efectivo era 120.
+#
+# Van acá, en el bloque de configuración, y no abajo, porque `_direct_answer`
+# las usa como valor por defecto de un parámetro — y eso se evalúa al importar
+# el módulo, no al llamar la función. Declararlas después de esa firma es un
+# NameError en el import.
+#
+# STEP < TURN a propósito: cuando eran iguales, el presupuesto por paso salía
+# de min(STEP, remaining) == remaining, así que un solo sub-agente lento podía
+# consumir el turno entero y dejar al synthesizer sin tiempo para redactar. El
+# usuario esperaba dos minutos para recibir el payload estático de "servicio
+# no disponible".
+#
+# Con 75/110: un step agota 75s y quedan 35s para el resto del plan y la
+# síntesis. Números a calibrar contra la distribución real de Langfuse.
+STEP_DEADLINE_S = 75.0    # techo por sub-agente
+TURN_DEADLINE_S = 110.0   # techo por turno completo
+MIN_STEP_BUDGET_S = 8.0   # si queda menos que esto, no arranques otro paso
 
 # ================================================================
 # ROUTING: planner → general | oos | orchestrator
@@ -223,10 +245,9 @@ def _get_planner_chain():
 # Clasificación de errores
 # ---------------------------------------------------------------------------
  
-STEP_DEADLINE_S = 120.0    # techo por sub-agente
-TURN_DEADLINE_S = 120.0    # techo por turno completo
-MIN_STEP_BUDGET_S = 8.0   # si queda menos que esto, no arranques otro paso
- 
+# (STEP_DEADLINE_S, TURN_DEADLINE_S y MIN_STEP_BUDGET_S se declaran arriba,
+#  en el bloque de configuración.)
+
 # Pool dedicado: no compartir con el executor por defecto de LangGraph.
 _STEP_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="run_step")
 _SUGGESTER_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="suggester")
@@ -683,31 +704,61 @@ def should_suggest(state: PoolAgentState) -> bool:
     """Lógica pura, cero llamadas al LLM. Corre antes de cualquier gasto de cuota."""
     return _suggest_block_reason(state) is None
 
-def _build_answered_summary(state: PoolAgentState) -> str:
-    """Solo el tier 1: es lo que el usuario efectivamente leyó."""
+def _suggester_material(state: PoolAgentState) -> str:
+    """
+    El texto contra el que se mide "esto ya está respondido".
+
+    Esta función es la que el docstring de `_to_synthesizer` daba por hecha
+    ("su materia prima es agent_results, igual que la del synthesizer — ver
+    _suggester_material"). No existía: la refactorización a fan-out se hizo a
+    medias. El suggester seguía leyendo `state["response"]`, que en fan-out
+    todavía es None porque el synthesizer corre en SU MISMO superstep y aún
+    no ha escrito nada.
+
+    La versión anterior devolvía "(sin respuesta disponible)" en ese caso, y
+    como ese string no contiene ninguna entidad ni token de dominio, los dos
+    gates que justifican el nodo quedaban inertes:
+      - gate_no_redundancy no descartaba nada
+      - el filtro por nombre de _unconsumed_entities no descartaba nada
+    Los chips salían a ciegas, sin saber qué acababa de contestarse.
+
+    Orden de preferencia:
+      1. `response` si existe — es lo que el usuario leerá, la señal exacta.
+         Cubre el camino secuencial por si el grafo se recablea.
+      2. Los outputs usables de `agent_results` — la MISMA materia prima que
+         el synthesizer está redactando ahora mismo. No es el texto final,
+         pero contiene las entidades que ese texto va a cubrir, que es
+         justamente lo que los gates necesitan medir.
+
+    Solo los usables: los steps con error traen mensajes de infraestructura
+    que no responden nada, y meterlos aquí haría que el gate de redundancia
+    descartara chips por culpa de un traceback.
+    """
     response = state.get("response")
-    if response is None:
-        return "(sin respuesta disponible)"
-    return response.tier1_markdown()
- 
- 
+    if response is not None:
+        return response.tier1_markdown()
+
+    results = _normalize_agent_results(state.get("agent_results") or {})
+    return "\n\n".join(r.output for r in usable_results(results) if r.output)
+
+
 def _unconsumed_entities(state: PoolAgentState, thread_id: str) -> List:
     """
     Nodos que el retrieval tocó este turno pero que la respuesta no cubrió.
- 
+
     Doble filtro:
       1. Anti-hub: los supernodos nunca son buen material de chip.
       2. Redundancia: si el nombre ya aparece en la respuesta, está cubierto.
- 
+
     Es deliberadamente conservador — preferimos perder un candidato válido
     a alimentar el prompt con algo ya respondido.
     """
     touched = get_touched(thread_id)
     if not touched:
         return []
- 
-    answer = _build_answered_summary(state).lower()
- 
+
+    answer = _suggester_material(state).lower()
+
     return [
         n for n in touched
         if n.id.lower() not in SUPERNODES
@@ -1143,8 +1194,12 @@ def run_step_node(payload: dict, config: RunnableConfig) -> Command:
         "conversation_summary": payload.get("conversation_summary") or "",
     }
  
-    # ✅ GATE PARA MATH
-    if step.assigned_agent == MATH and not math_inputs_present(user_message):
+    # Gate de MATH. `_normalize_agent` y MATH_SLUG, no `== MATH`: la constante
+    # MATH vale "Pool Math Agent" y assigned_agent vale "math", así que la
+    # comparación era False SIEMPRE y este gate no se ejecutó nunca. Una
+    # consulta de dosificación sin números se comía un ReAct loop completo
+    # para concluir lo que este `if` resuelve en microsegundos.
+    if _normalize_agent(step.assigned_agent) == MATH_SLUG and not math_inputs_present(user_message):
         return Command(
             update={"agent_results": {step_key: missing_inputs_result(step, user_message)}},
             goto="orchestrator",
@@ -1554,11 +1609,16 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
     """
     Produce los chips de seguimiento del turno.
 
-    Corre DESPUÉS del synthesizer (edge secuencial synthesizer → suggester),
-    no en paralelo: necesita `state["response"]` para saber qué quedó sin
-    cubrir y para no ofrecer un chip encima de una pregunta del synthesizer.
-    Eso lo pone en el camino crítico del usuario, y por eso el deadline es
-    corto y todo error degrada a [] en vez de propagarse.
+    Corre EN PARALELO con el synthesizer: `_to_synthesizer` emite
+    goto=["synthesizer", "suggester"], así que los dos arrancan en el mismo
+    superstep. Este docstring decía lo contrario ("corre DESPUÉS... edge
+    secuencial") y esa creencia era el bug: `state["response"]` no existe
+    todavía cuando este nodo lee. La materia prima real es `agent_results`,
+    vía `_suggester_material`.
+
+    Fan-out no significa gratis: las dos ramas van a END y el turno no cierra
+    hasta que ambas terminen. De ahí `_SUGGESTER_DEADLINE_S` y que todo error
+    degrade a [] en vez de propagarse.
 
     Devuelve SIEMPRE la clave "suggestions" — nunca la omite, para que el
     frontend pueda distinguir "no hubo chips" de "el nodo no corrió".
@@ -1588,7 +1648,7 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
 
     language_code = state.get("detected_language")
     language = "español" if language_code == "es" else "English"
-    answer_text = _build_answered_summary(state)
+    answer_text = _suggester_material(state)
 
     system_content = SUGGESTER_PROMPT.format(
         language=language,

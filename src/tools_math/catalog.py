@@ -32,44 +32,13 @@ _catalog: Optional[dict] = None
 _index: Optional[dict] = None
 _lock = threading.Lock()
 
-_HAS_DIGIT = re.compile(r"\d")
+# math_inputs_present / missing_inputs_result vivían acá duplicadas, copia a
+# copia, de agent/gates.py — y esta copia ni siquiera importaba `AgentResult`
+# ni `MATH`: era un NameError garantizado el día que alguien la llamara.
+# Nadie lo hacía (nodes.py importa de gates.py), así que el bug esperaba.
+# Este módulo es el motor determinista del catálogo: no tiene por qué saber
+# qué es un AgentResult.
 
-def math_inputs_present(user_message: str) -> bool:
-    """
-    Check whether the current turn has any numeric quantity to compute with.
-
-    Args:
-        user_message: The user's raw message for this turn.
-
-    Returns:
-        True if a calculation is plausible (a digit appears in the message).
-        False only when the message has no digits at all -- i.e. the request
-        cannot possibly be computed yet, since every formula in the catalog
-        needs at least one numeric input.
-    """
-    return bool(_HAS_DIGIT.search(user_message or ""))
-
-
-def missing_inputs_result(step, user_message: str) -> "AgentResult":
-    """
-    Build the AgentResult returned when the MATH gate short-circuits.
-
-    The output is a machine-readable marker, not prose: the synthesizer
-    still owns phrasing, language, and archetype selection. Passing it
-    already-written prose here would make the synthesizer paraphrase work
-    that was already done, wasting a generation pass.
-    """
-    return AgentResult(
-        agent=MATH,
-        step=step.step,
-        output=(
-            "STATUS: MISSING_INPUTS\n"
-            "The requested calculation needs numeric inputs that were not "
-            "provided in this turn. Ask the user for: pool volume (gallons), "
-            "current value of the parameter, and target value."
-        ),
-        sources=[],
-    )
 
 class CatalogError(RuntimeError):
     """Raised when the catalog is missing, malformed, or an entry is absent."""

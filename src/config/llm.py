@@ -1,21 +1,64 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 import os
-from streamlit import secrets
 
 load_dotenv()
 
+
 def _get_secret(key: str, default: str = None):
-    return os.getenv(key) or secrets.get(key) or default
+    """
+    Env var primero, Streamlit secrets después.
+
+    El import de `streamlit.secrets` va adentro y envuelto: acceder a
+    `st.secrets` sin un .streamlit/secrets.toml lanza
+    StreamlitSecretNotFoundError. Estaba a nivel de módulo y sin guarda, así
+    que un despliegue con la API key solo en el entorno y sin fichero de
+    secrets moría acá dentro del grafo y le llegaba al usuario como
+    "El agente falló: ...". Los otros dos módulos que leen secrets
+    (agent/tools.py, qdrant_vector_store.py) ya lo envolvían; este era el
+    único que no.
+
+    De paso desacopla el módulo de LLMs de Streamlit, que es lo que obligaba
+    a tener streamlit instalado para importar cualquier test de config.
+    """
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        from streamlit import secrets
+        return secrets.get(key) or default
+    except Exception:
+        return default
+
+
+# ---------------------------------------------------------------------------
+# Presupuestos de tiempo
+# ---------------------------------------------------------------------------
+# El peor caso de una llamada es timeout * max_retries. Estaba en 120 * 3 =
+# 360s, contra un TURN_DEADLINE_S de 120: el techo del cliente no acotaba
+# nada. Peor, `_run_with_deadline` corta la ESPERA con future.cancel(), que
+# no mata el thread — así que una llamada colgada seguía ocupando un slot del
+# _STEP_POOL (8 workers) durante esos 360s, invisible, degradando el fan-out
+# de todos los turnos siguientes.
+#
+# Regla: peor caso de una llamada < STEP_DEADLINE_S, para que quien corte sea
+# siempre el deadline del grafo y no el del cliente.
+#
+# Los valores son conservadores y están para calibrarse con la distribución
+# real de latencias de Langfuse, no para quedarse fijos.
+_FAST_TIMEOUT = 15      # flash-lite: clasificar y sugerir. Peor caso 30s.
+_STANDARD_TIMEOUT = 30  # flash: redactar y razonar.        Peor caso 60s.
+_MAX_RETRIES = 1        # un reintento. Un 429 no se arregla insistiendo 3
+                        # veces contra el mismo modelo con la misma key.
 
 
 def create_llm():
     return ChatGoogleGenerativeAI(
         model="gemini-3.5-flash",
         google_api_key=_get_secret("GEMINI_API_KEY"),
-        timeout=120,
+        timeout=_STANDARD_TIMEOUT,
         temperature=0.2,
-        max_retries=3,  # evita que el cliente subdivida el deadline < 10s
+        max_retries=_MAX_RETRIES,
     )
 
 def create_routing_llm():
@@ -35,9 +78,9 @@ def create_routing_llm():
     return ChatGoogleGenerativeAI(
         model="gemini-3.1-flash-lite",
         google_api_key=_get_secret("GEMINI_API_KEY"),
-        timeout=120,
+        timeout=_FAST_TIMEOUT,
         temperature=0.0,
-        max_retries=3,
+        max_retries=_MAX_RETRIES,
         thinking_budget=0,
     )
 
@@ -45,9 +88,9 @@ def create_synthesizer_llm():
     return ChatGoogleGenerativeAI(
         model="gemini-3.5-flash",
         google_api_key=_get_secret("GEMINI_API_KEY"),
-        timeout=120,
+        timeout=_STANDARD_TIMEOUT,
         temperature=0.4,
-        max_retries=3,
+        max_retries=_MAX_RETRIES,
     )
 
 
@@ -57,8 +100,8 @@ def create_suggester_llm():
         model="gemini-3.1-flash-lite",       # ⚠️ decidir: distinto de flash-lite
         google_api_key=_get_secret("GEMINI_API_KEY"),
         temperature=0.3,
-        timeout=120,        # se corta solo, no hace falta wrapper externo
-        max_retries=3      # sin retry en 429 — degradamos a [] nosotros
+        timeout=_FAST_TIMEOUT,        # se corta solo, no hace falta wrapper externo
+        max_retries=_MAX_RETRIES      # sin retry en 429 — degradamos a [] nosotros
     )
 
 def create_fallback_llm():
@@ -66,8 +109,8 @@ def create_fallback_llm():
         model="gemini-2.5-flash",       
         google_api_key=_get_secret("GEMINI_API_KEY"),
         temperature=0.3,
-        timeout=120,        # se corta solo, no hace falta wrapper externo
-        max_retries=3      # sin retry en 429 — degradamos a [] nosotros
+        timeout=_STANDARD_TIMEOUT,        # se corta solo, no hace falta wrapper externo
+        max_retries=_MAX_RETRIES      # sin retry en 429 — degradamos a [] nosotros
     )
 
 def create_synthesis_llm():
@@ -92,9 +135,9 @@ def create_synthesis_llm():
     return ChatGoogleGenerativeAI(
         model="gemini-3.5-flash",
         google_api_key=_get_secret("GEMINI_API_KEY"),
-        timeout=120,
+        timeout=_STANDARD_TIMEOUT,
         temperature=0.2,
-        max_retries=3,
+        max_retries=_MAX_RETRIES,
         thinking_budget=0,
         max_tokens=1200,
     )
@@ -115,8 +158,8 @@ def create_specialist_llm():
     return ChatGoogleGenerativeAI(
         model="gemini-3.5-flash",
         google_api_key=_get_secret("GEMINI_API_KEY"),
-        timeout=120,
+        timeout=_STANDARD_TIMEOUT,
         temperature=0.4,
-        max_retries=3,
+        max_retries=_MAX_RETRIES,
         thinking_budget=1024,
     )
