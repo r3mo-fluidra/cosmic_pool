@@ -168,3 +168,107 @@ class TestDisciplinaDeLecturaDeQuimica:
         import re
         for patron in [r"\b7\.5\s*%", r"\bpKa\s*7\.5", r"\b90\s*ppm", r"\b7\.5\s*ppm"]:
             assert not re.search(patron, prompt), f"valor de dominio hardcodeado: {patron}"
+
+
+# =====================================================================
+# Interpretación de panel: el synthesizer recibía los datos y los tiraba
+# =====================================================================
+# Origen: trace 75ba3706, tercera evaluación de B1 (siete lecturas de agua).
+#
+# `chemistry` produjo un test_interpretation completo: status por parámetro,
+# operating_target, source_id, interactions y un likely_cause que nombraba el
+# tricloro. El synthesizer emitió 285 caracteres mencionando DOS parámetros,
+# sin target y sin causa.
+#
+# No fue el presupuesto — son 900 palabras y se usaron ~40. Fue la forma:
+# "One-sentence verdict: what is out of range". Con siete lecturas, un
+# veredicto de una frase obliga a descartar cinco.
+#
+# Y un fallo cruzado: chemistry escribió "extremely high" sobre un valor que
+# su propio status clasificaba como at_ceiling — cumplimiento sin margen. La
+# prosa contradecía al dato estructurado, y el synthesizer creyó a la prosa.
+
+
+class TestInterpretacionDePanel:
+    @pytest.fixture
+    def shape(self):
+        return get_contract("assessment")["shape"]
+
+    def test_el_veredicto_es_la_apertura_no_la_respuesta_entera(self, shape):
+        assert "not the whole answer" in shape
+
+    def test_exige_nombrar_que_lectura_dispara_el_cierre(self, shape):
+        # Atribuir un cierre a un parámetro que cumple es informar de una
+        # infracción inexistente.
+        assert "WHICH single reading triggers it" in shape
+
+    def test_exige_cubrir_toda_lectura_fuera_de_rango(self, shape):
+        assert "reads as a reading you found acceptable" in shape
+
+    def test_exige_el_objetivo_operativo_y_la_causa(self, shape):
+        assert "operating target" in shape
+        assert "likely cause" in shape
+
+    def test_hay_un_details_para_el_desglose_completo(self):
+        assert "Full reading breakdown" in get_contract("assessment")["details"]
+
+    def test_la_seccion_renderizada_llega_con_todo(self):
+        s = build_synthesizer_archetype_section("assessment", ["chemistry"])
+        assert "WHICH single reading triggers it" in s
+        assert "Full reading breakdown" in s
+
+
+class TestElSynthesizerHonraLosStatus:
+    @pytest.fixture
+    def P(self):
+        from src.prompts.prompts import SYNTHESIZER_PROMPT
+        return SYNTHESIZER_PROMPT
+
+    def test_declara_los_cinco_estados(self, P):
+        for e in ["below_minimum", "at_floor", "in_range", "at_ceiling", "above_maximum"]:
+            assert e in P
+
+    def test_at_ceiling_y_at_floor_son_cumplimiento(self, P):
+        assert "`at_floor` and `at_ceiling` are PASSES" in P
+
+    def test_prohibe_intensificar_por_encima_del_status(self, P):
+        # El caso literal del trace: "high" -> "extremely high".
+        assert "Never intensify past the status" in P
+        assert 'you do not\nwrite "extremely high"' in P
+
+    def test_exige_atribuir_el_cierre_a_su_causa(self, P):
+        assert "Attribute a closure to the reading that causes it" in P
+
+    def test_arrastra_target_causa_y_orden(self, P):
+        for campo in ["`operating_target`", "`likely_cause`", "`order_rationale`"]:
+            assert campo in P
+
+    def test_el_input_que_falta_no_bloquea_el_target(self, P):
+        # El error de razonamiento del trace: el volumen hace falta para la
+        # DOSIS, no para la concentración objetivo.
+        assert "does not block stating the target concentration" in P
+
+    def test_prohibe_dictaminar_inspecciones(self, P):
+        assert "fails inspection" in P
+        assert "only an\nauthority can" in P
+
+
+class TestChemistryNoSeContradice:
+    @pytest.fixture
+    def prompt(self):
+        from src.prompts.prompt_archetype import build_agent_prompt
+        from src.prompts.prompts_sub_agents import AGENT_REGISTRY, CHEMISTRY
+        return build_agent_prompt(AGENT_REGISTRY[CHEMISTRY], "chemistry")
+
+    def test_la_prosa_debe_coincidir_con_los_status(self, prompt):
+        assert "Keep your prose consistent with your own statuses" in prompt
+
+    def test_exige_aplicar_las_reglas_dependientes_recuperadas(self, prompt):
+        # Recuperó higher_fc_minimum_with_cyanurates y aun así dio el rango
+        # genérico: el retrieval acertó y el uso no.
+        assert "APPLY it and show the result" in prompt
+
+    def test_exige_ordenar_por_efecto_fisico(self, prompt):
+        # Clorar y luego diluir el 50% tira la mitad del cloro recién añadido.
+        assert "removes\n  whatever was added before it" in prompt or \
+               "removes whatever was added before it" in prompt

@@ -188,13 +188,27 @@ ARCHETYPE_CONTRACTS = {
         "safety_required": "conditional",   # only if the calculation involves chemical handling
     },
     "assessment": {
-        "shape": "One-sentence verdict: what is out of range or what fails in the design. Then the first verification.",
+        "shape": (
+            "Lead with the verdict in one sentence: what is wrong and, when a "
+            "closure or a stop is called for, WHICH single reading triggers it. "
+            "That sentence is the opening, not the whole answer.\n"
+            "Then, still in the visible tier: every reading that is not "
+            "comfortably in range, each with its measured value and what it "
+            "means. A reading the user reported and the answer never mentions "
+            "reads as a reading you found acceptable. When the raw content "
+            "carries an operating target, give it — the target is the number "
+            "the operator acts on. When it carries a likely cause, name it: "
+            "correcting the values without naming what produced them means the "
+            "same state returns.\n"
+            "Then the first verification."
+        ),
         "budget": 900,
         "details": [
+            "Full reading breakdown",
             "Other possible causes",
-            "How to confirm"
+            "How to confirm",
         ],
-        "safety_required": False,
+        "safety_required": "conditional",
     },
 
     # Para preguntas que piden entender algo, no arreglarlo: mecanismos,

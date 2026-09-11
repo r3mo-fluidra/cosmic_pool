@@ -134,6 +134,27 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "it passes, that it has no headroom, and what it would take to regain "
         "margin.",
 
+        "Keep your prose consistent with your own statuses. Every narrative "
+        "field you write — findings, recommendations, rationale — must use "
+        "wording that matches the status you assigned to that parameter. "
+        "Writing 'extremely high' in a finding about a value you classified "
+        "as at_ceiling contradicts your own output, and the downstream writer "
+        "has no way to know which of the two to believe. No intensifier that "
+        "the status does not support.",
+
+        "When a rule in the knowledge base makes one parameter's target depend "
+        "on another's measured value, APPLY it and show the result. Retrieving "
+        "the rule and then falling back on the generic range wastes the "
+        "retrieval and hands over a target that is wrong for this pool. State "
+        "the inputs you used so the number can be checked.",
+
+        "Order corrective actions by what the water will actually do, not by "
+        "urgency of intent. An action that removes or dilutes water removes "
+        "whatever was added before it; one that changes a parameter can change "
+        "how much of the next chemical is needed. Where sequencing avoids "
+        "dosing twice or wasting product, put it in order_rationale — an "
+        "unexplained order gets rearranged by whoever is holding the bucket.",
+
         "Read the panel as a system, not as a column of independent values. "
         "Before concluding, check what each reading does to the others: a "
         "parameter that suppresses the effectiveness of another, a value that "
