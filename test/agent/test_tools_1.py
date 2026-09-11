@@ -162,3 +162,52 @@ class TestNeo4jDriver:
 
         with pytest.raises(ValueError):
             tools.get_neo4j_driver()
+
+
+# =====================================================================
+# Visibilidad de etiquetas en el scoring de seeds
+# =====================================================================
+# Un label que existe en el grafo pero no en INTENT_LABELS es invisible para
+# el scoring: sus nodos se entregan marcados "[off-intent: contexto, no
+# respuesta]" por bien que respondan, y con intent="any" además ponen el turno
+# en STATUS: WEAK, cuyo aviso le dice al agente que pare.
+#
+# Cómo se detectó: una evaluación experta concluyó que al KB le faltaban cinco
+# reglas de química. Las cinco estaban en el grafo, en nodos :Concept y
+# :Formula — dos labels ausentes de INTENT_LABELS. No faltaba conocimiento:
+# no se entregaba.
+
+class TestVisibilidadDeEtiquetas:
+    def _visibles(self):
+        from src.agent.tools import INTENT_LABELS, TOP_PRIORITY_LABELS
+        vis = set(TOP_PRIORITY_LABELS)
+        for v in INTENT_LABELS.values():
+            vis |= set(v)
+        return vis
+
+    def test_los_portadores_de_reglas_son_visibles(self):
+        """
+        Donde vive lo que distingue una respuesta experta de una recitada: la
+        regla que fija un objetivo, el estado que describe un desequilibrio,
+        la fórmula que lo cuantifica.
+        """
+        for label in ["DecisionRule", "Condition", "Formula", "Concept", "Requirement"]:
+            assert label in self._visibles(), f"{label} invisible para el scoring"
+
+    def test_intent_any_incluye_los_portadores_de_reglas(self):
+        # "any" no significa "solo lo prioritario": significa que no hay una
+        # intención concreta contra la que medir pertinencia.
+        from src.agent.tools import INTENT_LABELS
+        for label in ["DecisionRule", "Condition", "Formula"]:
+            assert label in INTENT_LABELS["any"]
+
+    def test_intent_any_no_degrada_a_weak_por_falta_de_etiqueta(self):
+        """
+        Regresión del segundo bug: `adj` eximía a intent="any" del castigo de
+        score, pero el chequeo de estado seguía exigiendo una etiqueta
+        prioritaria. Un seed perfecto salía WEAK.
+        """
+        import inspect
+        from src.agent import tools
+        src = inspect.getsource(tools)
+        assert 'sin_etiqueta_util = intent != "any"' in src

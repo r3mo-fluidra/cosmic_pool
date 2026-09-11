@@ -171,12 +171,28 @@ DEFAULT_PREFERRED_RELS = [
     "PREVENTS", "INDICATES", "MEASURED_BY", "PROCEDURE_FOR",
 ]
 
+# Etiquetas que pueden RESPONDER una pregunta de cada tipo. Se contrastan
+# contra los labels reales de la base: un label que existe en el grafo pero no
+# figura acá es invisible para el scoring, por muy bien que responda.
+#
+# `DecisionRule` (24 nodos), `Condition` (16) y `Formula` (55) faltaban, y son
+# justamente donde vive lo que separa una respuesta experta de una recitada:
+# la regla que fija un objetivo operativo, el estado que describe un
+# desequilibrio, la fórmula que lo cuantifica.
 INTENT_LABELS: dict[str, tuple[str, ...]] = {
-    "normative":   ("Requirement", "WaterParameter", "Threshold", "Standard", "Code"),
-    "procedural":  ("Procedure", "Operation", "Task", "Role"),
-    "diagnostic":  ("Hazard", "Symptom", "Cause", "Risk", "Chemical"),
-    "descriptive": ("Concept", "Chemical", "Equipment", "Venue"),
-    "any":         tuple(TOP_PRIORITY_LABELS),
+    "normative":   ("Requirement", "WaterParameter", "Threshold", "Standard",
+                    "Code", "Regulation", "DecisionRule"),
+    "procedural":  ("Procedure", "Operation", "Task", "Role", "Action", "Check"),
+    "diagnostic":  ("Hazard", "Symptom", "Cause", "Risk", "Chemical", "Problem",
+                    "Condition", "Mistake", "CommonMistake", "DecisionRule"),
+    "descriptive": ("Concept", "Chemical", "Equipment", "Venue", "Definition",
+                    "Formula", "WaterParameter"),
+    # "any" no significa "solo lo prioritario": significa que no hay una
+    # intención concreta contra la que medir. Incluye lo anterior más los
+    # portadores de reglas y fórmulas.
+    "any":         tuple(TOP_PRIORITY_LABELS) + (
+                    "DecisionRule", "Condition", "Formula", "Requirement",
+                    "Concept", "Cause"),
 }
 
 # Un seed cuya etiqueta no puede responder la pregunta se degrada, no se elimina:
@@ -886,8 +902,21 @@ def search_seed_nodes(
     top_adj = scored[0][0]
     kept = [s for s in scored if s[0] >= RELATIVE_GATE * top_adj][:limit]
 
+    # `intent == "any"` queda exento del chequeo de etiqueta, igual que ya lo
+    # estaba del castigo de score dos bloques más arriba. Sin esa exención, un
+    # seed perfecto salía marcado WEAK por no llevar una de las seis
+    # TOP_PRIORITY_LABELS, y el aviso de abajo le decía al modelo que el grafo
+    # "probablemente no modela esto" y que parase.
+    #
+    # Observado: a "high pH reduces chlorine effectiveness", el nodo
+    # `Elevated pH` (:Condition) puntuó 0.730 y su descripción respondía la
+    # pregunta entera — y se entregó como "[off-intent: contexto, no
+    # respuesta]". Con intent="any" no hay una pregunta concreta contra la que
+    # medir pertinencia de etiqueta, así que exigirla era pedir una señal que
+    # no existe.
     status = "OK"
-    if top_adj < ABSOLUTE_FLOOR or not any(s[3] for s in kept):
+    sin_etiqueta_util = intent != "any" and not any(s[3] for s in kept)
+    if top_adj < ABSOLUTE_FLOOR or sin_etiqueta_util:
         status = "WEAK"
 
     parts: list[str] = [
