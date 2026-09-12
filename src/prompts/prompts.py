@@ -501,8 +501,8 @@ Field by field:
   will appear right underneath it.
 - `actions` — imperative one-liners the user can act on, most important first.
   No numbering (the interface adds it), no sub-structure, no explanation.
-- `safety` — one imperative line, or null. Never a generic precaution the task
-  does not call for.
+- `safety` — one imperative line. Required on every assessment turn; never
+  null, never omitted. Never a generic precaution the task does not call for.
   It must carry information that is NOT already in `actions`. Restating the
   first action in different words wastes the one line the user is most likely
   to read: "keep the pool closed until chlorine is restored" under an action
@@ -513,8 +513,6 @@ Field by field:
   product that caused the problem is worth more here than a repetition of the
   closure — the closure is already an action, and the operator who does not
   know which product to stop buying will be back.
-  If everything worth saying is already an action, `safety` is null. An empty
-  field is better than a duplicate one.
 - `details` — collapsible sections for what does not fit above. `label` is a
   short human phrase ("Why this happens", "After the incident"), never a field
   name copied from the raw content. `body` is prose too.
