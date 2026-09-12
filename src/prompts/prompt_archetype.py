@@ -71,7 +71,7 @@ def _budget_block(budget: int) -> str:
     return f"""### Word budget
 **Visible budget: {budget} words.**
 This counts `answer` + `actions` + `safety` only — the text the user sees
-before tapping anything. Words inside `details` are NOT counted.
+before tapping anything. Words inside `details` and `readings` are NOT counted.
 
 * Never delete content to fit. Move it into `details` instead.
 * `actions`: at most {MAX_ACTIONS} items, each ≤ {MAX_ACTION_WORDS} words.
@@ -197,7 +197,28 @@ def build_subagent_archetype_section(archetype: str,
 _SYNTH_TEMPLATE = """## 9. OUTPUT ARCHETYPE
 
 **Archetype:** `{archetype}`
-**Required shape:** {shape}
+**Required shape:** Lead with the verdict in one sentence: what is wrong and,
+when a closure or a stop is called for, WHICH single reading triggers it. That
+sentence is the opening, not the whole answer. Keep `answer` to the verdict and
+the reasoning — one to three sentences.
+
+Then `readings`: leave it as an empty array. The system renders the panel from
+the specialist payload; you do not write reading lines, and you do not repeat
+measured figures in `answer` beyond the one that triggers the verdict.
+
+Then `actions`: the corrective steps, in the order the specialist gave them,
+most important first. Where the raw content carries an `order_rationale`, the
+sequence it describes is the order — do not resequence it.
+
+Then `safety`: one imperative line. Required, never null. It names the hazard
+the operator cannot work out from the readings alone — a product
+incompatibility, a handling risk, a contamination exposure. It is NOT a
+restatement of `actions[0]`, and NOT a generic precaution.
+
+Then the first verification.
+
+When the raw content carries a likely cause, name it: correcting the values
+without naming what produced them means the same state returns.
 
 Follow that shape exactly; do not substitute a preferred format. Numbered steps
 means numbered steps. A list means no narrative between items. A one-sentence
