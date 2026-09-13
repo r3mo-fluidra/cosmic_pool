@@ -75,6 +75,12 @@ class TargetBand:
     #: Cifras adicionales que el corpus publica y que no son extremos de la
     #: banda (mínimos condicionales, niveles de acción, techos citados).
     extra_figures: tuple[float, ...] = ()
+    #: El piso cuando hay estabilizador en el vaso. Solo cloro libre lo tiene:
+    #: el corpus da "a higher minimum often 2 ppm where chlorinated
+    #: isocyanurates are in use". Se elige por el CYA MEDIDO del propio panel,
+    #: no por lo que diga el especialista — si dependiera de él volvería la
+    #: oscilación que este módulo viene a cortar.
+    low_stabilized: float | None = None
     #: False cuando rellenar `operating_target` desde esta banda sería unsafe.
     fill_target: bool = True
     fill_target_reason: str = ""
@@ -112,7 +118,8 @@ def _num(v: float) -> str:
 WATER_TARGETS: dict[str, TargetBand] = {
     "free chlorine": TargetBand(
         parameter="free chlorine", unit="ppm",
-        low=1.0, high=4.0, extra_figures=(2.0, 3.0, 5.0, 10.0),
+        low=1.0, high=10.0, extra_figures=(2.0, 3.0, 4.0, 5.0),
+        low_stabilized=2.0,
         # El objetivo de cloro libre NO se rellena desde la banda. Con
         # estabilizador presente el número que sirve escala con el CYA
         # (fc_cya_proportional_target: ~7.5% del cianúrico medido), y el propio
@@ -157,7 +164,11 @@ WATER_TARGETS: dict[str, TargetBand] = {
     ),
     "cyanuric acid": TargetBand(
         parameter="cyanuric acid", unit="ppm",
-        low=20.0, high=50.0, extra_figures=(0.0, 90.0),
+        # El techo es 90 y la banda a la que se apunta es 20–50. Tenerlas al
+        # revés hacía que un cianúrico de 90 —el valor que el corpus cita
+        # explícitamente como máximo— saliera "por encima del techo de 50".
+        low=None, high=90.0, preferred_low=20.0, preferred_high=50.0,
+        extra_figures=(0.0,),
         node_id="cyanuric_acid",
         source='CH19-19.1";CH13-13.2-what-cyanuric-acid-is-and-what-it-does;CH31-31.4',
         verbatim=(
@@ -282,6 +293,123 @@ def is_published_figure(parameter: str, value) -> bool:
     except (TypeError, ValueError):
         return False
     return any(abs(v - f) < _EPS for f in banda.figures)
+
+
+# ---------------------------------------------------------------------------
+# Status determinístico
+# ---------------------------------------------------------------------------
+
+#: Los cinco estados del contrato, derivados acá y no leídos del especialista.
+#: Ver resolve_status.
+_ORDER = ("below_minimum", "at_floor", "in_range", "at_ceiling", "above_maximum")
+
+
+def _cya_presente(panel) -> bool:
+    """¿Hay estabilizador medido en el vaso?
+
+    Decide qué piso de cloro libre aplica. Sale del CYA MEDIDO, que es un dato
+    del panel, y no de que el especialista se acuerde de subir el mínimo.
+    """
+    for r in panel or []:
+        if not isinstance(r, dict):
+            continue
+        if _canon(str(r.get("parameter", ""))) != "cyanuric acid":
+            continue
+        try:
+            return float(r.get("measured")) > 0
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def resolve_status(parameter: str, measured, stabilized: bool = False):
+    """
+    Deriva (status, bound) de la banda publicada. Ignora lo que dijo el agente.
+
+    Es el arreglo de la oscilación. El paso anterior sustituyó el LÍMITE pero
+    dejó el `status` en manos del modelo, y con eso una alcalinidad de 130
+    etiquetada `above_maximum` se renderizaba "por encima del techo de 180"
+    con 130 < 180: el mismo panel daba veredictos distintos en corridas
+    distintas sobre los mismos números.
+
+    `bound` es la cifra contra la que se reporta, y es SIEMPRE una banda
+    educativa publicada — nunca un límite de código, que el corpus no trae.
+    El fraseo que la acompaña lo elige _BANDA_PHRASING y lo dice.
+
+    Devuelve (None, None) cuando no hay con qué juzgar: parámetro fuera de la
+    tabla, o valor no numérico. None NO es "in_range". Declarar en rango un
+    parámetro cuya banda no conocemos es dar un alta que nadie emitió, y es la
+    dirección en la que un fallo manda gente al agua.
+    """
+    banda = target_band(parameter)
+    if banda is None:
+        return None, None
+    try:
+        v = float(measured)
+    except (TypeError, ValueError):
+        return None, None
+
+    lo = banda.low
+    if stabilized and banda.low_stabilized is not None:
+        lo = banda.low_stabilized
+    hi = banda.high
+
+    if lo is not None:
+        if v < lo - _EPS:
+            return "below_minimum", lo
+        if abs(v - lo) < _EPS:
+            return "at_floor", lo
+    if hi is not None:
+        if v > hi + _EPS:
+            return "above_maximum", hi
+        if abs(v - hi) < _EPS:
+            return "at_ceiling", hi
+    if lo is None and hi is None:
+        # Fila presente pero sin banda a propósito (TDS). No hay veredicto.
+        return None, None
+    return "in_range", None
+
+
+def resolve_panel(panel):
+    """
+    (status, bound) para cada lectura, resueltos con el contexto del panel.
+
+    El contexto importa en un solo sitio hoy y es el que más pesa: el piso de
+    cloro libre sube cuando hay estabilizador, y eso solo se sabe mirando otra
+    lectura del mismo panel.
+    """
+    estabilizado = _cya_presente(panel)
+    return [
+        resolve_status(str(r.get("parameter", "")), r.get("measured"), estabilizado)
+        if isinstance(r, dict) else (None, None)
+        for r in panel or []
+    ]
+
+
+#: Parámetros cuyo déficit es una condición de cierre, no una corrección.
+#: Solo el desinfectante: es la barrera sanitaria, y el corpus lo trata como
+#: la única lectura que por sí sola saca bañistas del agua ("Is the
+#: DISINFECTANT RESIDUAL outside the permitted range? -> If yes: CLOSURE
+#: decision, then correct", ch11-19-2-1-1).
+CLOSURE_PARAMETERS = ("free chlorine",)
+
+
+def closure_required(panel) -> bool:
+    """
+    ¿El panel obliga a cerrar, por debajo del mínimo publicado de desinfectante?
+
+    Se resuelve por código sobre el valor medido. Que la acción de cierre
+    dependiera del `status` que emitiera el modelo es lo que falló la ronda
+    pasada: el turno que más necesita el cierre es justo aquel en el que el
+    especialista se equivoca de etiqueta.
+    """
+    for r, (status, _) in zip(panel or [], resolve_panel(panel)):
+        if not isinstance(r, dict):
+            continue
+        if status == "below_minimum" and \
+           _canon(str(r.get("parameter", ""))) in CLOSURE_PARAMETERS:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

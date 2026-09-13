@@ -28,7 +28,8 @@ from src.graph_context.response_validator import (
     reconcile_with_published_bands,
 )
 from src.graph_context.water_targets import (
-    WATER_TARGETS, is_published_figure, target_band)
+    WATER_TARGETS, closure_required, is_published_figure, resolve_status,
+    target_band)
 
 
 def _lectura(parametro, medido, status, limite=None, target=None):
@@ -113,13 +114,22 @@ class TestDegradacion:
         assert "not a code limit" in nota
         assert "violation" not in nota
 
-    def test_la_eleccion_del_especialista_se_conserva_si_es_del_corpus(self):
+    def test_la_cota_sale_de_la_banda_no_de_la_eleccion_del_especialista(self):
         """
-        2 ppm es el mínimo del escalón por isocianuratos, no el general de 1.
-        Esa elección lleva información y no se sustituye por el extremo bajo.
+        Conservar la cifra del especialista cuando era del corpus dejaba el
+        veredicto atado a cuál de las dos publicadas eligiera esa corrida. El
+        piso del cloro se decide ahora por el CYA MEDIDO, que es un dato.
         """
         rec = reconcile_with_published_bands(
             [_lectura("free_chlorine", 0.8, "below_minimum", 2.0)])
+        assert rec[0]["educational_bound"] == 1.0   # sin estabilizador medido
+
+    def test_con_estabilizador_el_piso_sube_solo(self):
+        rec = reconcile_with_published_bands([
+            _lectura("free_chlorine", 1.5, "in_range", 2.0),
+            _lectura("cyanuric_acid", 90, "at_ceiling", 90.0),
+        ])
+        assert rec[0]["status"] == "below_minimum"
         assert rec[0]["educational_bound"] == 2.0
 
     def test_un_limite_inventado_no_se_conserva(self):
@@ -127,19 +137,16 @@ class TestDegradacion:
         rec = reconcile_with_published_bands(
             [_lectura("calcium_hardness", 380, "above_maximum", 350.0)])
         assert rec[0]["regulatory_limit"] is None
-        assert "educational_bound" not in rec[0]
+        assert 350.0 not in (rec[0].get("educational_bound"),)
 
     def test_y_no_se_sustituye_por_otra_infraccion_falsa(self):
         """
-        380 está DENTRO de la banda 150–400. Reportarlo contra el 400 sería
-        cambiar una infracción falsa por otra. Sale sin veredicto, con su
-        objetivo, que es lo único que el dato sostiene.
+        380 está DENTRO de la banda 150–400, así que el `above_maximum` del
+        especialista era falso de entrada. El status se deriva y sale "in
+        range": ni la infracción inventada ni otra en su lugar.
         """
         nota = _nota(_lectura("calcium_hardness", 380, "above_maximum", 350.0))
-        assert "violation" not in nota
-        assert "ceiling" not in nota and "350" not in nota
-        # El 400 sí aparece — como extremo del objetivo, no como cota excedida.
-        assert nota == "reported; operating target 150–400 ppm"
+        assert nota == "in range"
 
     def test_pero_si_el_valor_sale_de_la_banda_se_reporta_contra_ella(self):
         nota = _nota(_lectura("calcium_hardness", 450, "above_maximum", 350.0))
@@ -197,14 +204,19 @@ class TestFraseoEnLosDosIdiomas:
     def test_la_linea_dice_que_no_es_codigo(self, lang, marca):
         assert marca in _nota(_lectura("ph", 7.9, "above_maximum", 7.8), lang)
 
-    def test_un_techo_degradado_no_afirma_cumplimiento(self):
+    def test_un_techo_no_afirma_cumplimiento(self):
         """
         "compliant, no margin at the ceiling" es una afirmación de código
         tanto como "in violation". Sin límite que la respalde, tampoco.
+
+        90 es el techo que el corpus cita para el cianúrico, así que la
+        lectura resuelve `at_ceiling` — no `above_maximum` contra el 50, que
+        es el extremo de la banda a la que se APUNTA, no el máximo.
         """
         nota = _nota(_lectura("cyanuric_acid", 90, "at_ceiling", 90.0))
         assert "compliant" not in nota
         assert "at the top of the typical range" in nota
+        assert "; target 20–50 ppm" in nota
 
 
 class TestCableadoEnElContrato:
@@ -226,3 +238,118 @@ class TestCableadoEnElContrato:
             readings=[_lectura("turbidity", 1.2, "above_maximum", 1.0)], language="en",
         )
         assert rep.limits_demoted == [] and rep.targets_filled == []
+
+
+class TestStatusDeterministico:
+    """
+    La oscilación. El paso 7 sustituía el LÍMITE y dejaba el `status` al
+    modelo, así que una alcalinidad de 130 etiquetada `above_maximum` salía
+    "por encima del techo de 180" — con 130 < 180. El mismo panel daba
+    veredictos distintos en corridas distintas sobre los mismos números.
+    """
+
+    def test_el_caso_que_lo_motivo(self):
+        assert _nota(_lectura("total_alkalinity", 130, "above_maximum", 180.0)) == "in range"
+
+    @pytest.mark.parametrize("mentira", [
+        "below_minimum", "at_floor", "in_range", "at_ceiling", "above_maximum",
+    ])
+    def test_el_status_del_especialista_no_cambia_el_panel(self, mentira):
+        """Determinismo: los mismos números, la misma línea, diga lo que diga."""
+        assert _nota(_lectura("ph", 7.9, mentira, 7.8)) == (
+            "above the typical 7.8 ceiling — educational range, not a code limit"
+            "; target 7.4–7.6"
+        )
+
+    @pytest.mark.parametrize("param,medido,esperado", [
+        ("ph", 7.9, "above_maximum"),
+        ("ph", 7.5, "in_range"),
+        ("ph", 7.2, "at_floor"),
+        ("ph", 7.0, "below_minimum"),
+        ("total_alkalinity", 130, "in_range"),
+        ("calcium_hardness", 380, "in_range"),
+        ("combined_chlorine", 0.4, "at_ceiling"),
+        ("cyanuric_acid", 90, "at_ceiling"),
+        ("cyanuric_acid", 120, "above_maximum"),
+    ])
+    def test_la_tabla_decide(self, param, medido, esperado):
+        assert resolve_status(param, medido)[0] == esperado
+
+    def test_un_parametro_fuera_de_la_tabla_no_recibe_alta(self):
+        """
+        None NO es "in_range". Declarar en rango un parámetro cuya banda no
+        conocemos es un alta que nadie emitió, y es la dirección en la que un
+        fallo manda gente al agua.
+        """
+        assert resolve_status("turbidity", 5.0) == (None, None)
+        assert resolve_status("tds", 3200) == (None, None)
+
+    def test_una_lectura_no_numerica_tampoco(self):
+        assert resolve_status("ph", None) == (None, None)
+        assert resolve_status("ph", "no medido") == (None, None)
+
+    def test_la_correccion_queda_registrada(self):
+        rep = ValidationReport()
+        reconcile_with_published_bands(
+            [_lectura("total_alkalinity", 130, "above_maximum", 180.0)], rep)
+        assert rep.status_corrected == ["Total Alkalinity: above_maximum→in_range"]
+
+
+class TestCierrePorCodigo:
+    """
+    La acción de cierre venía de `recommendations`, así que dependía de que el
+    especialista la escribiera — y el turno que más la necesita es aquel en el
+    que se equivoca de etiqueta.
+    """
+
+    def _panel(self, fc, cya=None):
+        p = [_lectura("free_chlorine", fc, "in_range", 2.0)]
+        if cya is not None:
+            p.append(_lectura("cyanuric_acid", cya, "in_range", 90.0))
+        return p
+
+    def test_el_desinfectante_bajo_minimo_obliga(self):
+        assert closure_required(self._panel(0.8)) is True
+
+    def test_en_rango_no(self):
+        assert closure_required(self._panel(3.0)) is False
+
+    def test_el_estabilizador_mueve_el_umbral(self):
+        """1.5 ppm cumple sin estabilizador y no cumple con 90 de cianúrico."""
+        assert closure_required(self._panel(1.5)) is False
+        assert closure_required(self._panel(1.5, cya=90)) is True
+
+    def test_otro_parametro_fuera_de_rango_no_cierra(self):
+        """Un pH alto se corrige; no saca bañistas del agua por sí solo."""
+        assert closure_required([_lectura("ph", 8.4, "above_maximum", 7.8)]) is False
+
+    def _aplicar(self, panel, actions, language="en"):
+        p = SynthesizerOutput(answer="x", actions=actions, safety=None, details=[])
+        return enforce_contract(
+            p, get_contract("assessment"), ["chemistry"],
+            detail_cls=DetailSection, readings=panel, language=language,
+        )
+
+    def test_se_inserta_primero(self):
+        p, rep = self._aplicar(self._panel(0.8), ["Lower the pH to 7.4"])
+        assert p.actions[0] == "Close the pool to bathers immediately"
+        assert rep.closure_inserted is True
+
+    def test_no_se_duplica_si_el_especialista_ya_la_puso(self):
+        """
+        Dos bullets diciendo lo mismo gastan la plaza de la corrección que
+        viene después. Se reordena al frente, no se repite.
+        """
+        p, _ = self._aplicar(
+            self._panel(0.8), ["Lower the pH", "Close the pool to bathers now"])
+        assert p.actions[0] == "Close the pool to bathers immediately"
+        assert sum("lose the pool" in a for a in p.actions) == 1
+
+    def test_en_español_sale_en_español(self):
+        p, _ = self._aplicar(self._panel(0.8), [], language="es")
+        assert p.actions[0] == "Cerrá la pileta a los bañistas de inmediato"
+
+    def test_sin_cierre_las_acciones_no_se_tocan(self):
+        p, rep = self._aplicar(self._panel(3.0), ["Lower the pH to 7.4"])
+        assert p.actions == ["Lower the pH to 7.4"]
+        assert rep.closure_inserted is False

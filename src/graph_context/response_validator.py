@@ -18,7 +18,9 @@ import re
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional, Union
 
-from .water_targets import is_published_figure, target_band
+from .water_targets import (
+    closure_required, is_published_figure, resolve_panel, target_band,
+)
 
 # --------------------------------------------------------------------------
 # Configuración
@@ -81,6 +83,13 @@ class ValidationReport:
     limits_demoted: list[str] = field(default_factory=list)
     #: Parámetros a los que se les rellenó `operating_target` desde la tabla.
     targets_filled: list[str] = field(default_factory=list)
+    #: Lecturas cuyo `status` no coincidía con el que sale de la banda, en
+    #: formato "pH: above_maximum→in_range". Es la medida directa de la
+    #: oscilación: el especialista juzgando los mismos números de dos maneras
+    #: en dos corridas. El panel ya no la refleja, pero el turno la produjo.
+    status_corrected: list[str] = field(default_factory=list)
+    #: El panel obliga a cerrar y la acción se insertó por código.
+    closure_inserted: bool = False
     #: Lecturas fuera de rango que el tier visible omitió. El modelo lleva
     #: tres iteraciones incumpliendo esto con el presupuesto casi vacío, así
     #: que deja de ser una instrucción y pasa a ser una comprobación.
@@ -419,101 +428,75 @@ def coherent_status(reading: dict) -> str | None:
 
 def reconcile_with_published_bands(test_interpretation, report=None) -> list[dict]:
     """
-    Degrada todo `regulatory_limit` que sea en realidad una banda publicada.
+    Reemplaza `status` y `regulatory_limit` por lo que la tabla sostiene.
 
-    Es el paso que convierte `regulatory_limit` de tirada en dato. No lo hace
-    aportando límites —el corpus no tiene ninguno, ver water_targets— sino
-    quitando los que no lo son: si la cifra coincide con un extremo de la banda
-    educativa del parámetro, es esa banda reetiquetada y se mueve a
-    `educational_bound`, donde el panel la sigue reportando sin llamarla código.
+    DOS COSAS, Y LA SEGUNDA ES LA QUE CORTA LA OSCILACIÓN.
 
-    En el trace 6660e14f las tres cifras del panel (pH 7.8, cianúrico 90, cloro
-    2) son extremos publicados. Ninguna era una cita.
+    1. El límite. El corpus no publica ninguno —cero nodos con cotas, ver
+       water_targets— así que todo `regulatory_limit` sobre un parámetro
+       cubierto es una banda educativa reetiquetada y se retira. En el trace
+       6660e14f las tres cifras (pH 7.8, cianúrico 90, cloro 2) son extremos
+       publicados; ninguna era una cita.
+
+    2. El estado. Se DERIVA del valor medido contra la banda, y lo que dijera
+       el especialista se descarta. La versión anterior de este paso sustituía
+       el límite y dejaba el status al modelo, con lo que una alcalinidad de
+       130 etiquetada `above_maximum` se renderizaba "por encima del techo de
+       180" — con 130 < 180. El mismo panel daba veredictos distintos en
+       corridas distintas sobre los mismos números, y esa es la oscilación.
 
     ASIMETRÍA DELIBERADA: una jurisdicción real puede poner su máximo de pH
-    justo en 7.8, y en ese caso esto degrada un límite verdadero. Se acepta.
-    El sistema no puede distinguir una coincidencia de un reetiquetado, y las
-    dos equivocaciones no cuestan lo mismo: no afirmar un código que existe
-    deja al operador con el número y sin la etiqueta; afirmar uno que no existe
-    le hace reportar una infracción inventada ante un inspector.
+    justo en 7.8, y en ese caso esto retira un límite verdadero. Se acepta. El
+    sistema no puede distinguir una coincidencia de un reetiquetado, y las dos
+    equivocaciones no cuestan lo mismo: no afirmar un código que existe deja al
+    operador con el número y sin la etiqueta; afirmar uno que no existe le hace
+    reportar una infracción inventada ante un inspector.
+
+    Un parámetro que la tabla NO cubre se deja intacto: no hay base para
+    retirarle el límite ni para juzgarlo, y declararlo en rango por
+    desconocimiento sería un alta que nadie emitió.
 
     También rellena `operating_target` cuando el especialista no lo dio y la
-    banda se puede usar de objetivo. Cloro libre queda fuera a propósito: su
-    objetivo escala con el cianúrico y dar la banda suelta es unsafe.
+    banda sirve de objetivo. Cloro libre queda fuera a propósito: su objetivo
+    escala con el cianúrico y dar la banda suelta es unsafe.
 
     Devuelve una lista nueva; no muta los dicts del caller.
     """
     if not isinstance(test_interpretation, list):
         return []
 
+    resueltos = resolve_panel(test_interpretation)
     salida = []
-    for r in test_interpretation:
+    for r, (status, cota) in zip(test_interpretation, resueltos):
         if not isinstance(r, dict):
             continue
         r = dict(r)
         nombre = str(r.get("parameter", ""))
         banda = target_band(nombre)
 
-        # Un parámetro que la tabla no cubre se deja intacto: no hay base para
-        # degradarlo ni para sostenerlo, y degradar por desconocimiento
-        # borraría un límite que quizá sí venía citado.
-        limite = r.get("regulatory_limit")
-        if banda is not None and limite is not None:
-            r["regulatory_limit"] = None
-            cota = _cota_educativa(r, banda, limite)
-            if cota is not None:
-                r["educational_bound"] = cota
-            if report is not None:
+        if banda is not None:
+            if r.get("regulatory_limit") is not None and report is not None:
                 report.limits_demoted.append(_format_parameter(nombre))
+            r["regulatory_limit"] = None
 
-        if banda is not None and r.get("operating_target") is None:
-            objetivo = banda.target_text()
-            if objetivo:
-                r["operating_target"] = objetivo
-                if report is not None:
-                    report.targets_filled.append(_format_parameter(nombre))
+            if status is not None:
+                if report is not None and status != r.get("status"):
+                    report.status_corrected.append(
+                        f"{_format_parameter(nombre)}: {r.get('status')}→{status}"
+                    )
+                r["status"] = status
+                r["band_derived"] = True
+                r["educational_bound"] = cota
+
+            if r.get("operating_target") is None:
+                objetivo = banda.target_text()
+                if objetivo:
+                    r["operating_target"] = objetivo
+                    if report is not None:
+                        report.targets_filled.append(_format_parameter(nombre))
 
         salida.append(r)
     return salida
-
-
-def _cota_educativa(reading: dict, banda, limite):
-    """
-    Contra qué cifra se reporta una lectura cuyo límite se acaba de degradar.
-
-    Dos casos, y la diferencia importa:
-
-    1. El especialista eligió una cifra QUE EL CORPUS PUBLICA (7.8 para pH, 90
-       para cianúrico, 2 para cloro con isocianuratos). Esa elección lleva
-       información —el mínimo de 2 ppm es el del escalón por estabilizador, no
-       el general— y se conserva. Lo único que estaba mal era la etiqueta.
-
-    2. La cifra no aparece en el corpus: es inventada. En el trace 6660e14f
-       fue un techo de dureza de calcio que ninguna fuente respalda. No se
-       conserva, y la banda solo la sustituye si la aritmética lo permite: se
-       reporta contra el extremo publicado ÚNICAMENTE si el valor medido cae
-       de verdad fuera de él. Un 380 con un tope inventado de 350 está dentro
-       de la banda 150–400, así que no hay nada que reportar como excedido y
-       la lectura sale sin veredicto, con su objetivo.
-
-       Sustituir un número inventado por otro que tampoco se cumple sería
-       cambiar una infracción falsa por otra.
-    """
-    nombre = str(reading.get("parameter", ""))
-    if is_published_figure(nombre, limite):
-        return limite
-
-    status = reading.get("status")
-    try:
-        medido = float(reading.get("measured"))
-    except (TypeError, ValueError):
-        return None
-
-    if status == "below_minimum" and banda.low is not None and medido < banda.low:
-        return banda.low
-    if status == "above_maximum" and banda.high is not None and medido > banda.high:
-        return banda.high
-    return None
 
 
 def required_readings(test_interpretation) -> list[dict]:
@@ -607,11 +590,12 @@ def reading_note(reading: dict, language: str, unit: str | None = None) -> str:
     # lee del original: sin `regulatory_limit`, coherent_status lo habría
     # anulado y la lectura saldría sin veredicto teniendo con qué darlo.
     cota = reading.get("educational_bound")
-    if limite is None and cota is not None:
+    if reading.get("band_derived"):
         banda = _BANDA_PHRASING.get(language, _BANDA_PHRASING["es"])
         crudo = reading.get("status")
         if crudo in banda:
-            nota = banda[crudo].format(bound=_con_unidad(cota, unit))
+            nota = banda[crudo].format(
+                bound=_con_unidad(cota, unit) if cota is not None else "")
             if objetivo is not None and crudo != "in_range":
                 nota += _OBJETIVO.get(language, _OBJETIVO["es"]).format(
                     target=_con_unidad(objetivo, unit))
@@ -878,6 +862,43 @@ def render_safety(specialist: dict, language: str = "es") -> str | None:
         return frases["acid"]
 
     return None
+
+
+#: La acción de cierre, por plantilla. No la redacta el modelo y no depende de
+#: que el especialista se acuerde de ponerla.
+_CIERRE = {
+    "en": "Close the pool to bathers immediately",
+    "es": "Cerrá la pileta a los bañistas de inmediato",
+}
+
+
+def enforce_closure_action(payload, readings, language: str,
+                           report: ValidationReport) -> None:
+    """
+    Si el panel obliga a cerrar, el cierre es `actions[0]`. Puesto por código.
+
+    La ronda pasada faltó justamente esto: la acción de cierre venía de
+    `recommendations`, así que dependía de que el especialista la escribiera —
+    y el turno que más la necesita es aquel en el que se equivoca. El
+    disparador es el valor medido de desinfectante contra el mínimo publicado,
+    vía `closure_required`, no un `status` de nadie.
+
+    Si el especialista YA la escribió, no se duplica: se reordena al frente.
+    Dos bullets diciendo lo mismo gastan la plaza que necesita la corrección
+    que viene después.
+    """
+    if not closure_required(readings):
+        return
+
+    linea = _CIERRE.get(language, _CIERRE["es"])
+    tokens = _contenido(linea)
+    resto = [
+        a for a in (payload.actions or [])
+        if not (tokens and len(tokens & _contenido(a)) / len(tokens) >= _DUPLICADO_UMBRAL)
+    ]
+    payload.actions = [linea] + resto
+    report.closure_inserted = True
+    report.notes.append("cierre insertado por código: desinfectante bajo mínimo")
 
 
 def enforce_visible_tier(payload, specialist: dict, language: str,
@@ -1158,6 +1179,13 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     #    presupuesto se apliquen al texto definitivo, no al que se descarta.
     if specialist:
         enforce_visible_tier(payload, specialist, language, report)
+
+    # 0b. El cierre, si el desinfectante lo obliga. Va sobre las lecturas
+    #     CRUDAS —`closure_required` deriva del valor medido, no de ningún
+    #     status— y antes de normalizar, para que ocupe plaza de bullet como
+    #     cualquier otra acción en vez de colarse por encima del cap.
+    if readings:
+        enforce_closure_action(payload, readings, language, report)
 
     # 1. Normalizar bullets antes de medir presupuesto.
     normalize_actions(payload, detail_cls, report)
