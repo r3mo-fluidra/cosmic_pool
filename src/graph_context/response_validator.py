@@ -892,6 +892,58 @@ def _as_list(value) -> list[str]:
         return [p.strip() for p in parts if p.strip()]
     return []
 
+#: Cláusula temporal de contexto: "After dilution,", "Once refilled,".
+#: Se recorta ANTES de clasificar, porque nombra un paso que NO es el de este
+#: ítem. Sin esto, "After dilution, retest all parameters" contiene "dilution"
+#: y `_CORRECTIVO_RE` lo daba por correctivo — el filtro no habría hecho nada.
+_PREFIJO_TEMPORAL_RE = re.compile(
+    r"^\s*(?:after|before|once|following|when|"
+    r"luego\s+de|después\s+de|despues\s+de|antes\s+de|una\s+vez)\b"
+    r"[^,]{0,40},\s*",
+    re.IGNORECASE,
+)
+
+#: Lo mismo por detrás: "Retest pH 4 hours after adding acid" — el "adding"
+#: pertenece al paso anterior, no a este.
+_SUFIJO_TEMPORAL_RE = re.compile(
+    r"[,\s]+(?:after|before|once|following|"
+    r"luego\s+de|después\s+de|despues\s+de|antes\s+de)\s+.*$",
+    re.IGNORECASE,
+)
+
+#: Verbo principal de verificación.
+_RETEST_RE = re.compile(
+    r"^\s*(?:re-?test|verify|confirm|check|monitor|recheck|"
+    r"retesteá|retestear|verificá|verificar|confirmá|confirmar|comprobá)\b",
+    re.IGNORECASE,
+)
+
+#: Verbo correctivo. Si aparece en el núcleo del ítem, no es solo verificación.
+_CORRECTIVO_RE = re.compile(
+    r"\b(?:add|dose|dilut|drain|refill|lower|raise|chlorinat|shock|close|shut|"
+    r"backwash|brush|vacuum|clean|replace|adjust|balance|"
+    r"agreg|dosif|diluí|diluir|drená|drenar|bajá|bajar|subí|subir|"
+    r"clorá|clorar|cerrá|cerrar|reemplaz|ajust)\w*\b",
+    re.IGNORECASE,
+)
+
+
+def _es_solo_retest(item: str) -> bool:
+    """
+    ¿Este ítem es únicamente una instrucción de verificación?
+
+    Se evalúa sobre el NÚCLEO —el ítem sin sus cláusulas temporales— porque
+    esas cláusulas nombran pasos ajenos y contaminan la detección del verbo.
+
+    Falla hacia conservar: un ítem ambiguo se queda en la lista. Perder una
+    corrección real por un falso positivo es mucho peor que gastar un cupo en
+    un retesteo de más.
+    """
+    nucleo = _PREFIJO_TEMPORAL_RE.sub("", item)
+    nucleo = _SUFIJO_TEMPORAL_RE.sub("", nucleo)
+    return bool(_RETEST_RE.match(nucleo)) and not _CORRECTIVO_RE.search(nucleo)
+
+
 
 def render_actions(specialist: dict) -> list[str]:
     """
@@ -900,16 +952,26 @@ def render_actions(specialist: dict) -> list[str]:
     Prioriza `recommendations` (ya vienen en imperativo); cae a la lista
     `chemical_actions`, que trae la acción dentro de un objeto.
 
-    DEVUELVE TODO, SIN FILTRAR POR LARGO. La versión anterior descartaba acá
+    DEVUELVE TODO, SIN FILTRAR POR LARGO. Una versión anterior descartaba acá
     lo que excedía MAX_ACTION_WORDS, con lo que esos bullets no llegaban nunca
     a `payload.actions` y por tanto `normalize_actions` no podía reubicarlos:
     se perdían en silencio, rompiendo el principio rector del módulo en la
-    primera función que corre. En el último trace se evaporaron así la
-    dilución y la cloración breakpoint — las dos correcciones centrales del
-    turno — mientras la prosa seguía diciendo que había que diluir.
+    primera función que corre. Así se evaporaron la dilución y la cloración
+    breakpoint — las dos correcciones centrales del turno — mientras la prosa
+    seguía diciendo que había que diluir. El recorte y la reubicación son
+    responsabilidad de `normalize_actions`.
 
-    El recorte y la reubicación son responsabilidad de `normalize_actions`,
-    que sí manda lo excedente a `details`.
+    LO ÚNICO QUE SÍ SE DESCARTA ACÁ son los ítems de pura verificación, y no
+    por su forma sino porque son contenido DUPLICADO: `retest_guidance` es un
+    campo propio del payload y tiene su propia sección en `details`, así que un
+    "retest all parameters" dentro de `recommendations` es la tercera copia del
+    mismo texto. La diferencia con el filtro por longitud es que aquel perdía
+    información y este no: el dato sigue estando, dos veces, en su sitio.
+
+    Importa porque los cupos son cuatro y el especialista no los prioriza. En
+    el trace 2ad488c6, "After dilution, retest all parameters" ocupó el tercer
+    puesto y empujó a "Chlorinate to restore the disinfectant barrier" fuera
+    del tier visible — en una pileta cerrada justamente por cloro bajo mínimo.
     """
     items = _as_list(specialist.get("recommendations"))
     if not items:
@@ -918,8 +980,12 @@ def render_actions(specialist: dict) -> list[str]:
             for a in specialist.get("chemical_actions") or []
             if isinstance(a, dict) and str(a.get("action", "")).strip()
         ]
-    return items
 
+    correctivas = [i for i in items if not _es_solo_retest(i)]
+    # Si TODO era verificación, se devuelve la lista intacta: el turno puede
+    # ser legítimamente de seguimiento —"ya dosifiqué, ¿qué controlo?"— y
+    # dejarlo sin acciones sería peor que repetir el retesteo.
+    return correctivas or items
 
 def _cya_at_ceiling(specialist: dict) -> bool:
     """¿Hay una lectura de estabilizante que respalde la palabra 'techo'?"""
