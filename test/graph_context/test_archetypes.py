@@ -369,6 +369,11 @@ class TestLimiteVsObjetivo:
     Inventar un límite MÁS ESTRICTO que el código es el mismo error que
     llamar violación a un techo, con el signo cambiado: hace que una
     instalación en regla parezca estarlo incumpliendo.
+
+    El paso 7 endureció esta instrucción con lo que se midió contra el grafo:
+    no hay UN solo nodo con una cota normativa, así que "solo si la fuente lo
+    presenta como código" describía un juicio que en la práctica se resuelve
+    siempre igual. Ahora el prompt lo dice: esperá dejarlo en null.
     """
 
     @pytest.fixture
@@ -376,17 +381,28 @@ class TestLimiteVsObjetivo:
         from src.prompts.prompts_sub_agents import AGENT_REGISTRY, CHEMISTRY
         return AGENT_REGISTRY[CHEMISTRY].output_contract
 
-    def test_limite_solo_si_la_fuente_lo_presenta_como_codigo(self, oc):
-        assert "ONLY a value the source presents as a code" in oc
+    def test_limite_solo_si_la_fuente_lo_atribuye_a_un_codigo(self, oc):
+        assert "attributes to a named code or jurisdiction" in oc
+
+    def test_el_null_es_la_expectativa_no_la_excepcion(self, oc):
+        assert "Expect to leave it null" in oc
 
     def test_reconoce_el_lenguaje_de_los_objetivos_educativos(self, oc):
-        assert "typical target" in oc and "educational range" in oc
+        assert "typical educational" in oc and "commonly cited" in oc
+
+    def test_dice_que_el_corpus_es_educativo(self, oc):
+        """
+        Es el hecho que convierte el juicio en regla: el manual se declara
+        educativo en cada página que trae una cifra.
+        """
+        assert "your local code controls" in oc
 
     def test_sin_evidencia_de_codigo_el_limite_es_null(self, oc):
-        assert "regulatory_limit is null" in oc
+        assert "Null is the correct, complete answer" in oc
 
     def test_nombra_el_riesgo_de_inventar_un_limite_estricto(self, oc):
-        assert "stricter than the code makes a compliant" in oc
+        assert "stricter than the\n        code, makes a compliant" in oc or \
+               "stricter than the code, makes a compliant" in " ".join(oc.split())
 
     def test_el_target_no_puede_ser_eco_del_medido(self, oc):
         # Temperatura devolvió operating_target=82.0 con 82°F medidos.

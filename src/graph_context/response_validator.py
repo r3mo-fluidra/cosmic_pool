@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional, Union
 
+from .water_targets import is_published_figure, target_band
+
 # --------------------------------------------------------------------------
 # Configuración
 # --------------------------------------------------------------------------
@@ -71,6 +73,14 @@ class ValidationReport:
     #: especialista en vez de aceptadas tal como las escribió el modelo.
     actions_rendered: bool = False
     safety_rendered: bool = False
+    #: Parámetros cuyo `regulatory_limit` resultó ser una banda educativa
+    #: reetiquetada. Es LA métrica del paso 7: mientras venga llena, el
+    #: especialista sigue presentando targets como código, y lo único que
+    #: cambia es que ahora se detecta. Si alguna vez se vacía sin que caiga
+    #: `targets_filled`, es que el retrieval empezó a traer citas de verdad.
+    limits_demoted: list[str] = field(default_factory=list)
+    #: Parámetros a los que se les rellenó `operating_target` desde la tabla.
+    targets_filled: list[str] = field(default_factory=list)
     #: Lecturas fuera de rango que el tier visible omitió. El modelo lleva
     #: tres iteraciones incumpliendo esto con el presupuesto casi vacío, así
     #: que deja de ser una instrucción y pasa a ser una comprobación.
@@ -135,6 +145,32 @@ _STATUS_PHRASING = {
         "in_range":      "en rango",
         "at_ceiling":    "cumple, sin margen bajo el máximo",
         "above_maximum": "en infracción, por encima del máximo de {limit}",
+    },
+}
+
+#: El mismo veredicto cuando la cifra que lo respalda es una banda EDUCATIVA,
+#: no un límite de código. Ver water_targets: el corpus no publica cotas
+#: normativas, así que un `regulatory_limit` que coincide con un extremo de la
+#: banda publicada es esa banda reetiquetada, y se degrada a esto.
+#:
+#: La degradación no borra el hallazgo — el valor sigue estando fuera del rango
+#: publicado y eso es accionable — le quita la autoridad que no tiene. La
+#: diferencia entre "infracción" y "fuera del rango habitual" es la diferencia
+#: entre lo que el sistema sabe y lo que se estaba atribuyendo.
+_BANDA_PHRASING = {
+    "en": {
+        "below_minimum": "below the typical {bound} floor — educational range, not a code limit",
+        "at_floor":      "at the floor of the typical range",
+        "in_range":      "in range",
+        "at_ceiling":    "at the top of the typical range",
+        "above_maximum": "above the typical {bound} ceiling — educational range, not a code limit",
+    },
+    "es": {
+        "below_minimum": "por debajo del piso habitual de {bound} — rango educativo, no límite de código",
+        "at_floor":      "en el piso del rango habitual",
+        "in_range":      "en rango",
+        "at_ceiling":    "en el techo del rango habitual",
+        "above_maximum": "por encima del techo habitual de {bound} — rango educativo, no límite de código",
     },
 }
 
@@ -381,6 +417,105 @@ def coherent_status(reading: dict) -> str | None:
     return status
 
 
+def reconcile_with_published_bands(test_interpretation, report=None) -> list[dict]:
+    """
+    Degrada todo `regulatory_limit` que sea en realidad una banda publicada.
+
+    Es el paso que convierte `regulatory_limit` de tirada en dato. No lo hace
+    aportando límites —el corpus no tiene ninguno, ver water_targets— sino
+    quitando los que no lo son: si la cifra coincide con un extremo de la banda
+    educativa del parámetro, es esa banda reetiquetada y se mueve a
+    `educational_bound`, donde el panel la sigue reportando sin llamarla código.
+
+    En el trace 6660e14f las tres cifras del panel (pH 7.8, cianúrico 90, cloro
+    2) son extremos publicados. Ninguna era una cita.
+
+    ASIMETRÍA DELIBERADA: una jurisdicción real puede poner su máximo de pH
+    justo en 7.8, y en ese caso esto degrada un límite verdadero. Se acepta.
+    El sistema no puede distinguir una coincidencia de un reetiquetado, y las
+    dos equivocaciones no cuestan lo mismo: no afirmar un código que existe
+    deja al operador con el número y sin la etiqueta; afirmar uno que no existe
+    le hace reportar una infracción inventada ante un inspector.
+
+    También rellena `operating_target` cuando el especialista no lo dio y la
+    banda se puede usar de objetivo. Cloro libre queda fuera a propósito: su
+    objetivo escala con el cianúrico y dar la banda suelta es unsafe.
+
+    Devuelve una lista nueva; no muta los dicts del caller.
+    """
+    if not isinstance(test_interpretation, list):
+        return []
+
+    salida = []
+    for r in test_interpretation:
+        if not isinstance(r, dict):
+            continue
+        r = dict(r)
+        nombre = str(r.get("parameter", ""))
+        banda = target_band(nombre)
+
+        # Un parámetro que la tabla no cubre se deja intacto: no hay base para
+        # degradarlo ni para sostenerlo, y degradar por desconocimiento
+        # borraría un límite que quizá sí venía citado.
+        limite = r.get("regulatory_limit")
+        if banda is not None and limite is not None:
+            r["regulatory_limit"] = None
+            cota = _cota_educativa(r, banda, limite)
+            if cota is not None:
+                r["educational_bound"] = cota
+            if report is not None:
+                report.limits_demoted.append(_format_parameter(nombre))
+
+        if banda is not None and r.get("operating_target") is None:
+            objetivo = banda.target_text()
+            if objetivo:
+                r["operating_target"] = objetivo
+                if report is not None:
+                    report.targets_filled.append(_format_parameter(nombre))
+
+        salida.append(r)
+    return salida
+
+
+def _cota_educativa(reading: dict, banda, limite):
+    """
+    Contra qué cifra se reporta una lectura cuyo límite se acaba de degradar.
+
+    Dos casos, y la diferencia importa:
+
+    1. El especialista eligió una cifra QUE EL CORPUS PUBLICA (7.8 para pH, 90
+       para cianúrico, 2 para cloro con isocianuratos). Esa elección lleva
+       información —el mínimo de 2 ppm es el del escalón por estabilizador, no
+       el general— y se conserva. Lo único que estaba mal era la etiqueta.
+
+    2. La cifra no aparece en el corpus: es inventada. En el trace 6660e14f
+       fue un techo de dureza de calcio que ninguna fuente respalda. No se
+       conserva, y la banda solo la sustituye si la aritmética lo permite: se
+       reporta contra el extremo publicado ÚNICAMENTE si el valor medido cae
+       de verdad fuera de él. Un 380 con un tope inventado de 350 está dentro
+       de la banda 150–400, así que no hay nada que reportar como excedido y
+       la lectura sale sin veredicto, con su objetivo.
+
+       Sustituir un número inventado por otro que tampoco se cumple sería
+       cambiar una infracción falsa por otra.
+    """
+    nombre = str(reading.get("parameter", ""))
+    if is_published_figure(nombre, limite):
+        return limite
+
+    status = reading.get("status")
+    try:
+        medido = float(reading.get("measured"))
+    except (TypeError, ValueError):
+        return None
+
+    if status == "below_minimum" and banda.low is not None and medido < banda.low:
+        return banda.low
+    if status == "above_maximum" and banda.high is not None and medido > banda.high:
+        return banda.high
+    return None
+
+
 def required_readings(test_interpretation) -> list[dict]:
     """
     Las lecturas que el tier visible NO puede omitir.
@@ -465,6 +600,22 @@ def reading_note(reading: dict, language: str, unit: str | None = None) -> str:
     status = coherent_status(reading)
     limite = reading.get("regulatory_limit")
     objetivo = reading.get("operating_target")
+
+    # Un límite degradado por `reconcile_with_published_bands` deja aquí su
+    # cifra. El veredicto se emite igual —el valor está fuera del rango
+    # publicado— pero con el fraseo que no le atribuye código, y `status` se
+    # lee del original: sin `regulatory_limit`, coherent_status lo habría
+    # anulado y la lectura saldría sin veredicto teniendo con qué darlo.
+    cota = reading.get("educational_bound")
+    if limite is None and cota is not None:
+        banda = _BANDA_PHRASING.get(language, _BANDA_PHRASING["es"])
+        crudo = reading.get("status")
+        if crudo in banda:
+            nota = banda[crudo].format(bound=_con_unidad(cota, unit))
+            if objetivo is not None and crudo != "in_range":
+                nota += _OBJETIVO.get(language, _OBJETIVO["es"]).format(
+                    target=_con_unidad(objetivo, unit))
+            return nota
 
     if status is None or status not in idioma:
         if objetivo is not None:
@@ -597,15 +748,20 @@ _ACIDS = ("muriatic", "hydrochloric", "sodium bisulfate", "dry acid",
 #: La línea de seguridad, por plantilla y por idioma. Igual que
 #: `_STATUS_PHRASING`: no la redacta el modelo.
 #:
-#: La variante `stabilized_at_ceiling` afirma que el CYA está en su techo, y
-#: solo se elige cuando una lectura lo respalda. Afirmar un límite que el dato
-#: no sostiene es exactamente el fallo que `coherent_status` existe para
-#: evitar, y no deja de serlo por aparecer en una advertencia.
+#: La variante `stabilized_at_ceiling` solo se elige cuando una lectura la
+#: respalda. Afirmar un límite que el dato no sostiene es exactamente el fallo
+#: que `coherent_status` existe para evitar, y no deja de serlo por aparecer en
+#: una advertencia.
+#:
+#: Y dice "el rango publicado", no "su techo": el techo sería una cota de
+#: código, y el corpus no publica ninguna (ver water_targets). Una línea de
+#: seguridad que reintroduce la afirmación que el panel acaba de quitar deja al
+#: turno diciendo las dos cosas.
 _SAFETY_PHRASING = {
     "en": {
         "stabilized_at_ceiling": (
             "Do not use trichlor or dichlor — they add cyanuric acid, "
-            "which is already at its ceiling."
+            "already at the top of the published range."
         ),
         "stabilized": (
             "Do not use trichlor or dichlor — they add the cyanuric acid "
@@ -619,7 +775,7 @@ _SAFETY_PHRASING = {
     "es": {
         "stabilized_at_ceiling": (
             "No uses tricloro ni dicloro: aportan ácido cianúrico, que ya "
-            "está en su techo."
+            "está en el techo del rango publicado."
         ),
         "stabilized": (
             "No uses tricloro ni dicloro: aportan el ácido cianúrico que "
@@ -1015,7 +1171,13 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     # 3. Lecturas obligatorias ANTES del presupuesto: si algo hay que añadir,
     #    tiene que competir por el espacio como el resto del tier visible, no
     #    colarse por encima del cap.
+    #
+    #    La reconciliación con las bandas publicadas va primero: el panel se
+    #    arma sobre las lecturas ya degradadas, nunca sobre el crudo. Si se
+    #    hiciera al revés, la línea saldría afirmando un código inexistente y
+    #    la degradación llegaría tarde.
     if readings:
+        readings = reconcile_with_published_bands(readings, report)
         enforce_visible_readings(payload, readings, language, report)
 
     # 4. Presupuesto.

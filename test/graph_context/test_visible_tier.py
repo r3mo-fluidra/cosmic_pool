@@ -116,11 +116,21 @@ class TestRenderSafety:
         `coherent_status` existe para evitar, y no deja de serlo por aparecer
         en una advertencia.
         """
-        assert "already at its ceiling" in render_safety(PAYLOAD, "en")
+        assert "already at the top of the published range" in render_safety(PAYLOAD, "en")
 
         sin_lectura = {**PAYLOAD, "test_interpretation": []}
         linea = render_safety(sin_lectura, "en")
-        assert "ceiling" not in linea and "cyanuric acid" in linea
+        assert "top of the published range" not in linea and "cyanuric acid" in linea
+
+    def test_no_dice_techo_a_secas(self):
+        """
+        "at its ceiling" es una cota de código, y el corpus no publica
+        ninguna. Una safety que reintroduce la afirmación que el panel acaba
+        de quitar deja al turno diciendo las dos cosas.
+        """
+        for lang in ("en", "es"):
+            linea = render_safety(PAYLOAD, lang)
+            assert "published range" in linea or "rango publicado" in linea
 
     def test_la_causa_gana_sobre_el_manejo(self):
         """
