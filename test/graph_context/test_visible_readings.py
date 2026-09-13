@@ -497,18 +497,24 @@ class TestReintentoPorContrato:
     docstring de enforce_contract prometía que "el caller puede reintentar UNA
     vez con instrucción correctiva" y el synthesizer nunca lo miraba.
 
-    El caso real es `safety`: el contrato la exige cuando hay un agente de
-    riesgo, el modelo la omitió, y el validador no puede inventarla — una
-    línea genérica es ruido y una específica sería contenido que los
-    especialistas no dieron.
+    `safety` fue el caso que lo justificó y ya no lo es: la línea se deriva del
+    payload del especialista (`render_safety`), así que el turno que antes
+    gastaba una llamada entera en pedirla ahora la trae armada. Se sigue
+    midiendo la ausencia; lo que se quitó es el coste de reaccionar a ella.
     """
 
-    def test_safety_ausente_pide_reintento(self):
+    def test_safety_ausente_se_mide_pero_no_cuesta_una_llamada(self):
+        """
+        El gatillo que más disparaba —siete rondas seguidas— a 2–3.5 s por
+        turno, para pedir una línea que el payload ya sostiene o que no existe.
+        Cuando no existe, repreguntar produce una advertencia genérica: ruido
+        en la línea más leída del tier visible.
+        """
         p = _payload("Cierra la pileta.", ["Cerrar a los bañistas"])
         _, rep = enforce_contract(p, get_contract("assessment"), ["chemistry"],
                                   detail_cls=DetailSection)
-        assert rep.safety_missing is True
-        assert rep.needs_retry is True
+        assert rep.safety_missing is True      # se sigue midiendo
+        assert rep.needs_retry is False        # ya no se paga
 
     def test_con_safety_no_hay_reintento(self):
         p = _payload("Cierra la pileta.", ["Cerrar a los bañistas"])

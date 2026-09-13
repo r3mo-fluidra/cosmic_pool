@@ -60,8 +60,17 @@ class ValidationReport:
     overflowed: bool = False
     actions_relocated: int = 0
     safety_promoted: bool = False
-    safety_missing: bool = False       # -> gatilla retry
+    #: El contrato exigía `safety` y no hubo nada que poner. YA NO gatilla
+    #: retry: desde que la línea se deriva del payload del especialista
+    #: (`render_safety`), el caso real que lo disparaba —modelo que la omite
+    #: teniendo el dato— se resuelve sin volver a llamar al modelo. Se sigue
+    #: midiendo: si esto viene lleno, es que el payload tampoco la sostenía.
+    safety_missing: bool = False
     answer_exceeds_budget: bool = False  # -> gatilla retry
+    #: `actions` / `safety` construidas por código desde el payload del
+    #: especialista en vez de aceptadas tal como las escribió el modelo.
+    actions_rendered: bool = False
+    safety_rendered: bool = False
     #: Lecturas fuera de rango que el tier visible omitió. El modelo lleva
     #: tres iteraciones incumpliendo esto con el presupuesto casi vacío, así
     #: que deja de ser una instrucción y pasa a ser una comprobación.
@@ -77,8 +86,17 @@ class ValidationReport:
 
     @property
     def needs_retry(self) -> bool:
-        """Un solo retry. Si vuelve a fallar, se acepta la degradación."""
-        return self.safety_missing or self.answer_exceeds_budget
+        """
+        Un solo retry. Si vuelve a fallar, se acepta la degradación.
+
+        `safety_missing` salió de acá. Era el gatillo que más disparaba —siete
+        rondas seguidas— y cada disparo cuesta una llamada completa al modelo,
+        2–3.5 s de latencia pura por turno, para pedir una línea que ahora se
+        arma por plantilla desde el payload. Cuando `render_safety` devuelve
+        None es porque el payload no sostiene ninguna advertencia específica, y
+        volver a preguntar no cambia el dato: produce una genérica.
+        """
+        return self.answer_exceeds_budget
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -553,6 +571,192 @@ def _infer_reading_cls(payload):
 
 
 # --------------------------------------------------------------------------
+# Acciones y seguridad desde el payload del especialista
+# --------------------------------------------------------------------------
+#
+# Mismo principio que `readings`: el modelo escribe la prosa —el veredicto, el
+# razonamiento, la causa— y el código arma los campos estructurados. La
+# diferencia con el panel de lecturas es que estas dos NO se pueden armar por
+# plantilla: `actions` es texto del especialista, y ese texto viene en inglés
+# (ver _reading_is_visible). Por eso solo se sustituyen cuando el turno se
+# responde en inglés; en español la traducción sigue siendo del modelo.
+
+#: Productos que, si CAUSARON el problema, no pueden formar parte de la
+#: corrección. Se busca en `likely_cause`, no en las dosis: dosificar
+#: hipoclorito es normal, haber llegado acá con tricloro es el hallazgo.
+_STABILIZED = ("trichlor", "dichlor", "stabilized chlorine",
+               "chlorinated isocyanurate", "isocyanurate",
+               "tricloro", "dicloro", "cloro estabilizado")
+
+#: Ácidos de manejo habitual. Aparecen en `chemical_actions`, no en la causa:
+#: lo que importa es que el operador va a manipular uno.
+_ACIDS = ("muriatic", "hydrochloric", "sodium bisulfate", "dry acid",
+          "muriático", "muriatico", "clorhídrico", "clorhidrico",
+          "bisulfato", "ácido seco", "acido seco")
+
+#: La línea de seguridad, por plantilla y por idioma. Igual que
+#: `_STATUS_PHRASING`: no la redacta el modelo.
+#:
+#: La variante `stabilized_at_ceiling` afirma que el CYA está en su techo, y
+#: solo se elige cuando una lectura lo respalda. Afirmar un límite que el dato
+#: no sostiene es exactamente el fallo que `coherent_status` existe para
+#: evitar, y no deja de serlo por aparecer en una advertencia.
+_SAFETY_PHRASING = {
+    "en": {
+        "stabilized_at_ceiling": (
+            "Do not use trichlor or dichlor — they add cyanuric acid, "
+            "which is already at its ceiling."
+        ),
+        "stabilized": (
+            "Do not use trichlor or dichlor — they add the cyanuric acid "
+            "that produced this state."
+        ),
+        "acid": (
+            "Never mix acid and chlorine products — add each separately "
+            "with the pump running."
+        ),
+    },
+    "es": {
+        "stabilized_at_ceiling": (
+            "No uses tricloro ni dicloro: aportan ácido cianúrico, que ya "
+            "está en su techo."
+        ),
+        "stabilized": (
+            "No uses tricloro ni dicloro: aportan el ácido cianúrico que "
+            "produjo este estado."
+        ),
+        "acid": (
+            "Nunca mezcles ácido con productos clorados: agregá cada uno "
+            "por separado y con la bomba en marcha."
+        ),
+    },
+}
+
+#: Nombres con los que el especialista reporta el estabilizante.
+_CYA_NAMES = ("cyanuric", "cianúrico", "cianurico", "stabilizer", "cya")
+
+
+def _as_list(value) -> list[str]:
+    """
+    `recommendations` llega como lista o como string numerado. Normaliza.
+
+    El split exige punto MÁS espacio (`\\d+\\.\\s+`), así que "7.4" o "3.4 ppm"
+    no parten la frase por la mitad: el separador es "1. ", no cualquier dígito
+    seguido de punto.
+    """
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str) and value.strip():
+        parts = re.split(r"(?:^|\s)\d+\.\s+", value.strip())
+        return [p.strip() for p in parts if p.strip()]
+    return []
+
+
+def render_actions(specialist: dict, max_items: int = MAX_ACTIONS) -> list[str]:
+    """
+    Acciones correctivas desde el payload del especialista.
+
+    Prioriza `recommendations` (ya vienen en imperativo); cae a la lista
+    `chemical_actions`, que trae la acción dentro de un objeto.
+
+    Se descarta lo que no entra en MAX_ACTION_WORDS en vez de recortarlo. Un
+    bullet largo no se pierde —sigue en el material de origen y el modelo lo
+    tiene para la prosa— y truncar una frase a mitad es peor que no ponerla,
+    que es la misma regla que aplica `overflow_to_details`. Si NADA entra, se
+    devuelve vacío y el caller conserva lo que escribió el modelo: el
+    especialista fue prolijo en párrafos y el modelo ya los condensó.
+    """
+    items = _as_list(specialist.get("recommendations"))
+    if not items:
+        items = [
+            str(a.get("action", "")).strip()
+            for a in specialist.get("chemical_actions") or []
+            if isinstance(a, dict) and str(a.get("action", "")).strip()
+        ]
+    return [i for i in items if _words(i) <= MAX_ACTION_WORDS][:max_items]
+
+
+def _cya_at_ceiling(specialist: dict) -> bool:
+    """¿Hay una lectura de estabilizante que respalde la palabra 'techo'?"""
+    for r in specialist.get("test_interpretation") or []:
+        if not isinstance(r, dict):
+            continue
+        nombre = str(r.get("parameter", "")).lower()
+        tokens = set(re.split(r"[^a-záéíóúñü]+", nombre))
+        if any(n in nombre for n in _CYA_NAMES[:-1]) or "cya" in tokens:
+            if coherent_status(r) in ("at_ceiling", "above_maximum"):
+                return True
+    return False
+
+
+def render_safety(specialist: dict, language: str = "es") -> str | None:
+    """
+    Una línea imperativa, derivada del payload. Nunca duplica una acción.
+
+    Prioridad: el producto que causó el problema por encima de la
+    incompatibilidad de manejo. Si el operador llegó acá con tricloro, repetir
+    tricloro es lo que lo devuelve al mismo sitio; lo otro es higiene de
+    manipulación, cierta siempre y por eso menos informativa.
+
+    Ninguna de las dos puede salir de una acción de la lista: una prohíbe un
+    producto que no se va a usar y la otra habla del orden de mezcla. Por
+    construcción, no por comprobación.
+
+    Devuelve None cuando el payload no sostiene ninguna de las dos. El caller
+    conserva entonces lo que haya escrito el modelo: acá no se inventa una
+    advertencia genérica, que es ruido en la línea más leída del tier visible.
+    """
+    frases = _SAFETY_PHRASING.get(language, _SAFETY_PHRASING["es"])
+
+    cause = str(specialist.get("likely_cause") or "").lower()
+    if any(k in cause for k in _STABILIZED):
+        clave = "stabilized_at_ceiling" if _cya_at_ceiling(specialist) else "stabilized"
+        return frases[clave]
+
+    chems = " ".join(
+        f"{a.get('chemical', '')} {a.get('action', '')}"
+        for a in specialist.get("chemical_actions") or []
+        if isinstance(a, dict)
+    ).lower()
+    if any(k in chems for k in _ACIDS):
+        return frases["acid"]
+
+    return None
+
+
+def enforce_visible_tier(payload, specialist: dict, language: str,
+                         report: ValidationReport) -> None:
+    """
+    Sustituye `actions` y `safety` por lo que se puede derivar del payload.
+
+    Cada una se sustituye solo si hay con qué. Lo que el modelo escribió no se
+    reubica a `details`: sería el mismo contenido dos veces, una arriba y otra
+    plegada, y el material de origen ya lo conserva íntegro.
+
+    `actions` queda fuera cuando el turno no se responde en inglés. El
+    especialista escribe en inglés y sus bullets entrarían sin traducir en una
+    respuesta en español — cambiar una acción bien redactada por la misma
+    acción en otro idioma es una regresión, no un enforcement. `safety` sí se
+    aplica siempre: sale de plantilla y la plantilla está en los dos idiomas.
+    """
+    if language == "en":
+        acciones = render_actions(specialist)
+        if acciones:
+            report.actions_rendered = True
+            descartadas = [a for a in (payload.actions or []) if a not in acciones]
+            if descartadas:
+                report.notes.append(
+                    f"{len(descartadas)} acción(es) del modelo sustituidas por las del especialista"
+                )
+            payload.actions = acciones
+
+    linea = render_safety(specialist, language)
+    if linea:
+        report.safety_rendered = True
+        payload.safety = linea
+
+
+# --------------------------------------------------------------------------
 # Utilidades
 # --------------------------------------------------------------------------
 def _has_hazard_agent(agents: Optional[list[str]]) -> bool:
@@ -761,7 +965,8 @@ def promote_safety_from_details(payload, report: ValidationReport) -> None:
 def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
                      detail_cls=None, readings: list[dict] | None = None,
                      language: str = "es",
-                     raw_content: str = "") -> tuple[Any, ValidationReport]:
+                     raw_content: str = "",
+                     specialist: dict | None = None) -> tuple[Any, ValidationReport]:
     """
     Aplica el contrato al payload del synthesizer.
 
@@ -771,6 +976,8 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
         agents:     state["assigned_agents"], para resolver safety condicional.
         detail_cls: clase del item de details. Si es None se infiere del payload
                     o se cae a un dict-like compatible.
+        specialist: payload JSON de los sub-agentes, ya fusionado. De ahí salen
+                    `actions` y `safety` cuando el dato los sostiene.
 
     Returns:
         (payload, report). Si `report.needs_retry` es True, el caller puede
@@ -789,6 +996,12 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     payload.details = payload.details or []
 
     report.visible_words_before = _visible_words(payload)
+
+    # 0. Tier visible determinístico: `actions` y `safety` desde el payload del
+    #    especialista. Va ANTES de normalizar para que los caps y el
+    #    presupuesto se apliquen al texto definitivo, no al que se descarta.
+    if specialist:
+        enforce_visible_tier(payload, specialist, language, report)
 
     # 1. Normalizar bullets antes de medir presupuesto.
     normalize_actions(payload, detail_cls, report)

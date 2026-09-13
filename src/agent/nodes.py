@@ -616,25 +616,21 @@ def _attach_sources(payload: SynthesizerOutput, results: list) -> None:
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def _readings_from_results(agent_results: dict) -> list[dict]:
+def _specialist_payloads(agent_results: dict) -> list[dict]:
     """
-    Las entradas de `test_interpretation` que los especialistas produjeron.
+    Los payloads JSON de los sub-agentes, parseados.
 
-    Alimenta el chequeo duro del validador: toda lectura fuera de rango tiene
-    que aparecer donde el usuario lee. Se parsea acá, en el borde, porque el
-    output de un sub-agente es texto — JSON del contrato, a veces envuelto en
-    un fence — y el validador no debe saber nada de ese formato.
+    Se parsea acá, en el borde, porque el output de un sub-agente es texto
+    —JSON del contrato, a veces envuelto en un fence— y el validador no debe
+    saber nada de ese formato.
 
-    Tolerante a propósito: si el JSON no se deja parsear, se devuelve una lista
-    vacía y el enforcement simplemente no se aplica. Un parseo fallido no puede
-    tumbar un turno que por lo demás está bien.
+    Tolerante a propósito: lo que no se deja parsear se omite. Un parseo
+    fallido no puede tumbar un turno que por lo demás está bien.
     """
-    lecturas: list[dict] = []
+    payloads: list[dict] = []
 
     for result in (agent_results or {}).values():
         salida = _field(result, "output") or ""
-        if "test_interpretation" not in salida:
-            continue
         m = _JSON_OBJ_RE.search(_strip_code_fences(salida))
         if not m:
             continue
@@ -642,11 +638,63 @@ def _readings_from_results(agent_results: dict) -> list[dict]:
             datos = json.loads(m.group(0))
         except (ValueError, TypeError):
             continue
+        if isinstance(datos, dict):
+            payloads.append(datos)
+
+    return payloads
+
+
+def _readings_from_results(agent_results: dict) -> list[dict]:
+    """
+    Las entradas de `test_interpretation` que los especialistas produjeron.
+
+    Alimenta el chequeo duro del validador: toda lectura fuera de rango tiene
+    que aparecer donde el usuario lee.
+    """
+    lecturas: list[dict] = []
+    for datos in _specialist_payloads(agent_results):
         entradas = datos.get("test_interpretation")
         if isinstance(entradas, list):
             lecturas.extend(e for e in entradas if isinstance(e, dict))
-
     return lecturas
+
+
+#: Campos del payload del especialista de los que el validador deriva el tier
+#: visible. Listas se concatenan en orden de ejecución; escalares se quedan con
+#: el primer valor no nulo — el primer step es el que el planner puso primero.
+_SPECIALIST_LISTS = ("recommendations", "chemical_actions", "test_interpretation")
+_SPECIALIST_SCALARS = ("likely_cause",)
+
+
+def _specialist_payload(agent_results: dict) -> dict:
+    """
+    Un solo payload fusionado con lo que el validador necesita.
+
+    Fusiona en vez de elegir uno: un turno puede repartirse entre química y
+    recuperación, y las recomendaciones de los dos son del mismo turno. El
+    orden de `agent_results` es el del plan, así que el que el planner puso
+    primero manda en los campos escalares.
+    """
+    fusion: dict = {k: [] for k in _SPECIALIST_LISTS}
+
+    for datos in _specialist_payloads(agent_results):
+        for k in _SPECIALIST_LISTS:
+            v = datos.get(k)
+            if isinstance(v, list):
+                fusion[k].extend(v)
+            elif v and k == "recommendations":
+                # `recommendations` a veces llega como string numerado; el
+                # validador lo normaliza, pero no puede si lo pisa una lista.
+                fusion.setdefault("_recommendations_text", []).append(str(v))
+        for k in _SPECIALIST_SCALARS:
+            if datos.get(k) and not fusion.get(k):
+                fusion[k] = datos[k]
+
+    if not fusion["recommendations"] and fusion.get("_recommendations_text"):
+        fusion["recommendations"] = "\n".join(fusion.pop("_recommendations_text"))
+
+    fusion.pop("_recommendations_text", None)
+    return fusion
 
 
 def _extract_text(content) -> str:
@@ -1673,6 +1721,10 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     # FASE 2 — enforcement (siempre, venga el payload de donde venga)
     # ============================================================
+    # Se parsea UNA vez, fuera de la closure: el reintento vuelve a entrar y
+    # volver a parsear el mismo JSON no cambia el resultado.
+    specialist = _specialist_payload(agent_results)
+
     def _aplicar_contrato(p):
         return enforce_contract(
             p, contract, agents, detail_cls=DetailSection,
@@ -1685,29 +1737,27 @@ def synthesizer(state: PoolAgentState) -> dict:
             # Para detectar cantidades que el synthesizer no pudo haber sacado
             # de ningún sitio. Ver unsupported_numbers.
             raw_content=raw_content,
+            # Mismo principio que `readings`: el modelo escribe la prosa, el
+            # código arma `actions` y `safety` desde el dato del especialista.
+            specialist=specialist,
         )
 
     try:
         payload, report = _aplicar_contrato(payload)
 
-        # El único reintento del nodo, y hasta ahora no existía: el docstring
-        # de enforce_contract prometía que "el caller puede reintentar UNA vez
-        # con instrucción correctiva" y nadie consultaba `needs_retry`.
+        # El único reintento del nodo. Cubre lo que el validador no puede
+        # arreglar solo.
         #
-        # Cubre lo que el validador no puede arreglar solo. `safety` es el
-        # caso real: el contrato la exige cuando hay un agente de riesgo, el
-        # modelo la omitió, y no hay forma honesta de inventarla — una línea
-        # de seguridad genérica es ruido, y una específica sería contenido que
-        # los especialistas no dieron.
+        # `safety` ya NO entra acá. Era el disparador real —siete rondas
+        # seguidas sobre la misma consulta— y cada una costaba una llamada
+        # completa, 2–3.5 s por turno, para pedir una línea que ahora sale por
+        # plantilla del payload del especialista (`render_safety`). Cuando esa
+        # plantilla no aplica es porque el dato no sostiene ninguna advertencia
+        # específica, y repreguntar solo produce una genérica: ruido en la
+        # línea más leída del tier visible. Queda como telemetría en
+        # `report.safety_missing`.
         if report.needs_retry:
             faltan = []
-            if report.safety_missing:
-                faltan.append(
-                    "the `safety` line: this turn involves chemical handling and "
-                    "the contract requires one. Give the hazard the operator "
-                    "cannot work out alone, not a generic precaution, and not a "
-                    "restatement of an action already listed."
-                )
             if report.answer_exceeds_budget:
                 faltan.append(
                     "`answer` is over the visible word budget: tighten it, and "
