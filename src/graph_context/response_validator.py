@@ -1015,7 +1015,7 @@ _CORRECTIVE_VERB_RE = re.compile(
 )
 
 
-d#: Frontera de oración: punto o punto y coma, espacio, y mayúscula. No parte
+#: Frontera de oración: punto o punto y coma, espacio, y mayúscula. No parte
 #: "7.4-7.6" ni "aprox. 50%" porque exige el espacio y la mayúscula después.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-ZÁÉÍÓÚÑ])")
 
