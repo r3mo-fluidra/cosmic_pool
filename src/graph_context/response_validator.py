@@ -35,7 +35,7 @@ MAX_ACTIONS = 4
 #: porque llevan producto, cantidad y objetivo. En el último trace se cayeron
 #: la dilución (18 palabras) y la cloración breakpoint (15), que eran las dos
 #: correcciones centrales del turno.
-MAX_ACTION_WORDS = 22
+MAX_ACTION_WORDS = 40
 
 NO_CAP = 9999  # presupuesto centinela: arquetipo `critical`, sin techo
 
@@ -1138,21 +1138,26 @@ def _first_sentence(text: str) -> str:
 
 def normalize_actions(payload, detail_cls, report: ValidationReport) -> None:
     """
-    Reglas: máximo MAX_ACTIONS bullets, cada uno ≤ MAX_ACTION_WORDS palabras.
-    Lo que no cumple NO se borra: se reubica a `details`.
+    Máximo MAX_ACTIONS bullets. Lo excedente NO se borra: va a `details`.
 
-    Este es el ÚNICO punto del pipeline donde se recorta la lista de acciones.
-    `render_actions` ya no filtra por largo justamente para que todo lo
-    excedente pase por acá y termine en `details` en vez de desaparecer.
+    Se conserva el ORDEN del especialista: los cuatro primeros quedan
+    visibles, el resto baja. Un bullet que supere MAX_ACTION_WORDS baja
+    también, pero eso es una malformación y se anota aparte — si empieza a
+    dispararse seguido, el prompt del especialista está devolviendo párrafos
+    donde pide imperativos.
     """
     kept: list[str] = []
     relocated: list[str] = []
+    malformed = 0
 
     for action in payload.actions or []:
         action = action.strip()
         if not action:
             continue
-        if _words(action) > MAX_ACTION_WORDS or len(kept) >= MAX_ACTIONS:
+        if _words(action) > MAX_ACTION_WORDS:
+            relocated.append(action)
+            malformed += 1
+        elif len(kept) >= MAX_ACTIONS:
             relocated.append(action)
         else:
             kept.append(action)
@@ -1164,6 +1169,8 @@ def normalize_actions(payload, detail_cls, report: ValidationReport) -> None:
         _append_detail(payload, OVERFLOW_LABEL, body, detail_cls)
         report.actions_relocated += len(relocated)
         report.notes.append(f"{len(relocated)} acción(es) reubicadas a details")
+    if malformed:
+        report.notes.append(f"{malformed} acción(es) superaban {MAX_ACTION_WORDS} palabras")
 
 
 # --------------------------------------------------------------------------
