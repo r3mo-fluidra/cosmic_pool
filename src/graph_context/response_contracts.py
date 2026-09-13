@@ -240,19 +240,15 @@ ARCHETYPE_CONTRACTS = {
         "shape": (
             "Lead with the verdict in one sentence: what is wrong and, when a "
             "closure or a stop is called for, WHICH single reading triggers it. "
-            "That sentence is the opening, not the whole answer.\n"
-            "Then `readings`, one entry per reported value that is not "
-            "comfortably in range: that is where measured figures belong, and "
-            "it renders as a list so the prose does not have to carry them. A "
-            "reading the user reported and the answer never mentions reads as "
-            "a reading you found acceptable. Keep `answer` to the verdict and "
-            "the reasoning — one to three sentences — and let the panel be a "
-            "panel. When the raw content "
-            "carries an operating target, give it — the target is the number "
-            "the operator acts on. When it carries a likely cause, name it: "
-            "correcting the values without naming what produced them means the "
-            "same state returns.\n"
-            "Then the first verification."
+            "That sentence is the opening, not the whole answer. Keep `answer` "
+            "to the verdict and the reasoning — one to three sentences — and "
+            "let the panel be a panel.\n"
+            "What `answer` is for is what the panel cannot say: which single "
+            "reading forces the closure, what mechanism connects them, and "
+            "what produced the state. When the raw content carries a likely "
+            "cause, name it — correcting the values without naming what "
+            "produced them means the same state returns.\n"
+            "Then the corrective actions, then the first verification."
         ),
         "budget": 900,
         "details": [

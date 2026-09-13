@@ -86,8 +86,10 @@ def _safety_block(resolved: bool | str) -> str:
     if resolved is True:
         return """### Safety (required)
 `safety` must be populated: one imperative line naming the single most
-consequential hazard and the action that avoids it. It is rendered in tier 1
-and is never collapsed. Leaving it empty forces a regeneration.
+consequential hazard and the action that avoids it. It names what the operator
+cannot work out from the readings alone — a product incompatibility, a handling
+risk, a contamination exposure. It is NOT a restatement of `actions[0]`, and
+NOT a generic precaution. It is rendered in tier 1 and is never collapsed.
 Immediate protective action comes before any explanation."""
     if resolved == "conditional":
         return """### Safety (conditional)
@@ -95,7 +97,9 @@ Populate `safety` only when the turn involves chemical handling or dosing,
 hazardous or energized equipment, electrical hazard, or pressurized systems.
 A turnover or volume calculation needs no warning; an acid dose does.
 When it applies the rules above are binding: one imperative line, tier 1, never
-collapsed. Otherwise leave it null — no generic boilerplate."""
+collapsed, naming what the operator cannot work out from the readings alone —
+never a restatement of `actions[0]` and never a generic precaution. Otherwise
+leave it null — no generic boilerplate."""
     return """### Safety
 Leave `safety` null. Do not add generic precautions the task does not require."""
 
@@ -197,28 +201,16 @@ def build_subagent_archetype_section(archetype: str,
 _SYNTH_TEMPLATE = """## 9. OUTPUT ARCHETYPE
 
 **Archetype:** `{archetype}`
-**Required shape:** Lead with the verdict in one sentence: what is wrong and,
-when a closure or a stop is called for, WHICH single reading triggers it. That
-sentence is the opening, not the whole answer. Keep `answer` to the verdict and
-the reasoning — one to three sentences.
+**Required shape:** {shape}
 
-Then `readings`: leave it as an empty array. The system renders the panel from
-the specialist payload; you do not write reading lines, and you do not repeat
-measured figures in `answer` beyond the one that triggers the verdict.
+`readings` is not yours to write: leave it as an empty array. The system
+renders the panel from the specialist payload, and it does not repeat what you
+put there. Do not restate measured figures in `answer` beyond the one that
+carries the verdict.
 
-Then `actions`: the corrective steps, in the order the specialist gave them,
-most important first. Where the raw content carries an `order_rationale`, the
-sequence it describes is the order — do not resequence it.
-
-Then `safety`: one imperative line. Required, never null. It names the hazard
-the operator cannot work out from the readings alone — a product
-incompatibility, a handling risk, a contamination exposure. It is NOT a
-restatement of `actions[0]`, and NOT a generic precaution.
-
-Then the first verification.
-
-When the raw content carries a likely cause, name it: correcting the values
-without naming what produced them means the same state returns.
+Where `actions` apply, keep the order the specialist gave them, most important
+first. When the raw content carries an `order_rationale`, the sequence it
+describes IS the order — do not resequence it.
 
 Follow that shape exactly; do not substitute a preferred format. Numbered steps
 means numbered steps. A list means no narrative between items. A one-sentence

@@ -202,12 +202,38 @@ class TestInterpretacionDePanel:
         # infracción inexistente.
         assert "WHICH single reading triggers it" in shape
 
-    def test_exige_cubrir_toda_lectura_fuera_de_rango(self, shape):
-        assert "reads as a reading you found acceptable" in shape
+    def test_ya_no_le_pide_al_modelo_cubrir_las_lecturas(self, shape):
+        """
+        El shape exigía "una entrada por valor reportado que no esté
+        cómodamente en rango" y avisaba de que una lectura omitida "reads as a
+        reading you found acceptable". Las dos frases describen un trabajo que
+        el modelo ya no hace: `build_readings` arma el panel entero desde el
+        payload del especialista, incluidas las lecturas EN rango, y sustituye
+        lo que el modelo haya escrito.
 
-    def test_exige_el_objetivo_operativo_y_la_causa(self, shape):
-        assert "operating target" in shape
+        Dejar la instrucción sería pedirle que escriba lo que se le va a
+        descartar, y gastar presupuesto visible en ello. La garantía de que
+        ninguna lectura se pierde no se relajó: se mudó al código, y vive en
+        test_visible_readings.
+        """
+        assert "reads as a reading you found acceptable" not in shape
+        assert "one entry per reported value" not in shape
+
+    def test_la_causa_sigue_siendo_del_modelo(self, shape):
+        """
+        Lo que el panel NO puede decir: qué mecanismo conecta las lecturas y
+        qué produjo el estado. Eso sigue siendo prosa.
+        """
         assert "likely cause" in shape
+        assert "what produced the state" in shape
+
+    def test_el_objetivo_operativo_lo_pone_el_panel(self, shape):
+        """
+        `_OBJETIVO` lo renderiza como sufijo de cada línea, con su propia
+        etiqueta para que no se confunda con el límite. Pedírselo también al
+        modelo lo duplicaba en el tier visible.
+        """
+        assert "operating target" not in shape
 
     def test_hay_un_details_para_el_desglose_completo(self):
         assert "Full reading breakdown" in get_contract("assessment")["details"]

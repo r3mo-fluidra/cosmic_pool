@@ -432,9 +432,24 @@ class TestVozEnSegundaPersona:
     def test_prefiere_la_linea_de_mayor_alcance(self, P):
         assert "the one with\n  the longest reach" in P or "the one with the longest reach" in P
 
-    def test_vacio_es_mejor_que_duplicado(self, P):
-        assert "An empty\n  field is better than a duplicate one" in P or \
-               "An empty field is better than a duplicate one" in P
+    def test_la_linea_es_obligatoria_no_opcional(self, P):
+        """
+        Este test exigía lo contrario — "An empty field is better than a
+        duplicate one" — y se quedó atrás cuando acb91c6 invirtió la política
+        a propósito. La versión vieja contradecía el contrato que el validador
+        aplica: `assessment` resuelve `safety_required` a True en cuanto hay
+        un agente de riesgo, así que un prompt que autoriza el null le pide al
+        modelo justo lo que se le va a marcar como incumplimiento.
+
+        La inversión salió barata después: `render_safety` deriva la línea del
+        payload del especialista, así que "nunca null" lo cumple el código en
+        el caso frecuente en vez de costar un reintento.
+
+        Lo que NO cambió es la regla de fondo, y sigue comprobada arriba: la
+        línea tiene que aportar algo que no esté ya en `actions`.
+        """
+        assert "never\n  null, never omitted" in P or "never null, never omitted" in P
+        assert "An empty field is better than a duplicate one" not in P
 
 
 class TestGrafiaYUnidades:
