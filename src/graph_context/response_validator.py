@@ -5,8 +5,6 @@ Enforcement determinística del contrato de respuesta emitido por el synthesizer
 
 El prompt le PIDE al LLM que respete el presupuesto; este módulo lo GARANTIZA.
 Principio rector: nunca borrar información, solo reubicarla a `details`.
-La única excepción es el recorte de acciones malformadas (>12 palabras),
-que se reubican también en lugar de descartarse.
 
 Uso:
     payload, report = enforce_contract(payload, contract, state["assigned_agents"])
@@ -16,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, asdict
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 from .water_targets import (
     closure_required, is_published_figure, resolve_panel, target_band,
@@ -27,7 +25,18 @@ from .water_targets import (
 # --------------------------------------------------------------------------
 
 MAX_ACTIONS = 4
-MAX_ACTION_WORDS = 12
+
+#: Tope de palabras por bullet.
+#:
+#: Era 12, y ninguna acción química real entra en 12 palabras: "Perform a
+#: partial drain and refill of approximately 50% to reduce cyanuric acid to
+#: 30-50 ppm" son 17. Con el tope viejo el filtro seleccionaba por brevedad y
+#: no por importancia — y las acciones que importan son largas justamente
+#: porque llevan producto, cantidad y objetivo. En el último trace se cayeron
+#: la dilución (18 palabras) y la cloración breakpoint (15), que eran las dos
+#: correcciones centrales del turno.
+MAX_ACTION_WORDS = 22
+
 NO_CAP = 9999  # presupuesto centinela: arquetipo `critical`, sin techo
 
 # Agentes cuyo contenido implica manejo de producto químico o riesgo directo.
@@ -49,6 +58,23 @@ SAFETY_LABEL_PATTERN = re.compile(
     r"safety|warning|hazard",
     re.IGNORECASE,
 )
+
+#: Aviso de procedencia, UNA vez al pie del panel — no pegado a cada línea.
+#:
+#: La versión anterior colgaba "educational range, not a code limit" de cada
+#: veredicto, con lo que la respuesta se desmentía a sí misma: la prosa decía
+#: "you must close the pool because free chlorine is below the required 2.0 ppm
+#: minimum" y el panel, dos líneas abajo, decía que ese mínimo no era un
+#: límite de código. Un operador que necesita cerrar acaba de recibir la
+#: excusa perfecta para no hacerlo.
+PANEL_FOOTER = {
+    "en": ("Limits follow the CDC Model Aquatic Health Code where published; "
+           "ranges marked *typical* are operating practice. Your state or "
+           "county code governs — verify against it."),
+    "es": ("Los límites siguen el CDC Model Aquatic Health Code donde está "
+           "publicado; los rangos marcados *habitual* son práctica operativa. "
+           "Rige el código de tu estado o condado: verificalo."),
+}
 
 
 # --------------------------------------------------------------------------
@@ -81,6 +107,10 @@ class ValidationReport:
     #: cambia es que ahora se detecta. Si alguna vez se vacía sin que caiga
     #: `targets_filled`, es que el retrieval empezó a traer citas de verdad.
     limits_demoted: list[str] = field(default_factory=list)
+    #: Parámetros que SÍ tienen cota normativa y conservaron el veredicto de
+    #: código. Contraparte de `limits_demoted`: si esto se vacía, algo rompió
+    #: `_CODE_BACKED` y el panel dejó de afirmar límites que existen.
+    limits_kept: list[str] = field(default_factory=list)
     #: Parámetros a los que se les rellenó `operating_target` desde la tabla.
     targets_filled: list[str] = field(default_factory=list)
     #: Lecturas cuyo `status` no coincidía con el que sale de la banda, en
@@ -137,9 +167,16 @@ class ValidationReport:
 #: Los tres llegan igual de lejos: un operador que los repite ante un
 #: inspector reporta un incumplimiento que no existe.
 #:
-#: `{limit}` se rellena con `regulatory_limit`. Las plantillas que lo usan
-#: solo se eligen cuando ese campo tiene valor: un estado de violación sin
-#: límite que lo respalde se degrada antes de llegar aquí (coherent_status).
+#: ESTRUCTURA: anidado por idioma, igual que `_BANDA_PHRASING`. La versión
+#: anterior lo definía plano y con el nombre sin guion bajo, así que
+#: `reading_note` levantaba NameError en cuanto una lectura NO derivaba de
+#: banda. No explotaba solo porque `reconcile_with_published_bands` marcaba
+#: `band_derived` en todo, y esa rama retorna antes: el primer parámetro fuera
+#: de la tabla (ORP, salt, temperatura) tumbaba el turno.
+#:
+#: `{limit}` se rellena con `regulatory_limit` YA FORMATEADO CON UNIDAD por
+#: `_con_unidad`, así que la plantilla no lleva `{u}`: "{limit}{u}" producía
+#: "2 ppm ppm" y, peor, un KeyError porque `.format()` solo recibe `limit`.
 _STATUS_PHRASING = {
     "en": {
         "below_minimum": "in violation, below the {limit} minimum",
@@ -150,38 +187,56 @@ _STATUS_PHRASING = {
     },
     "es": {
         "below_minimum": "en infracción, por debajo del mínimo de {limit}",
-        "at_floor":      "cumple, sin margen sobre el mínimo",
+        "at_floor":      "cumple, sin margen en el piso",
         "in_range":      "en rango",
-        "at_ceiling":    "cumple, sin margen bajo el máximo",
-        "above_maximum": "en infracción, por encima del máximo de {limit}",
+        "at_ceiling":    "cumple, sin margen en el techo",
+        "above_maximum": "en infracción, por encima del tope de {limit}",
     },
 }
 
-#: El mismo veredicto cuando la cifra que lo respalda es una banda EDUCATIVA,
-#: no un límite de código. Ver water_targets: el corpus no publica cotas
-#: normativas, así que un `regulatory_limit` que coincide con un extremo de la
-#: banda publicada es esa banda reetiquetada, y se degrada a esto.
+#: El mismo veredicto cuando la cifra que lo respalda es una banda de PRÁCTICA
+#: OPERATIVA y no un límite de código. El valor sigue estando fuera del rango
+#: publicado —eso es accionable y se dice— pero sin atribuirle una autoridad
+#: normativa que no tiene.
 #:
-#: La degradación no borra el hallazgo — el valor sigue estando fuera del rango
-#: publicado y eso es accionable — le quita la autoridad que no tiene. La
-#: diferencia entre "infracción" y "fuera del rango habitual" es la diferencia
-#: entre lo que el sistema sabe y lo que se estaba atribuyendo.
+#: El disclaimer NO va acá. Iba pegado a cada línea y dejaba a la respuesta
+#: contradiciéndose con su propia prosa; ahora vive una sola vez en
+#: `PANEL_FOOTER`. La palabra "typical"/"habitual" ya marca la diferencia
+#: dentro de la línea, que es todo lo que la línea necesita.
 _BANDA_PHRASING = {
     "en": {
-        "below_minimum": "below the typical {bound} floor — educational range, not a code limit",
+        "below_minimum": "below the typical {bound} floor",
         "at_floor":      "at the floor of the typical range",
         "in_range":      "in range",
         "at_ceiling":    "at the top of the typical range",
-        "above_maximum": "above the typical {bound} ceiling — educational range, not a code limit",
+        "above_maximum": "above the typical {bound} ceiling",
     },
     "es": {
-        "below_minimum": "por debajo del piso habitual de {bound} — rango educativo, no límite de código",
+        "below_minimum": "por debajo del piso habitual de {bound}",
         "at_floor":      "en el piso del rango habitual",
         "in_range":      "en rango",
         "at_ceiling":    "en el techo del rango habitual",
-        "above_maximum": "por encima del techo habitual de {bound} — rango educativo, no límite de código",
+        "above_maximum": "por encima del techo habitual de {bound}",
     },
 }
+
+#: Parámetros con cota NORMATIVA real, no banda de práctica. Estos NO se
+#: degradan: conservan "in violation, below the 2 ppm minimum".
+#:
+#: Que el corpus no tenga la cita ingerida es un problema de retrieval, no
+#: motivo para decirle al operador que el límite no existe. Y la asimetría de
+#: coste va al revés que en pH: no afirmar el código de pH deja al operador con
+#: el número y sin etiqueta; no afirmar el mínimo de cloro libre pone "no es un
+#: límite de código" debajo de la cifra que dispara un cierre obligatorio.
+#:
+#: OJO — el mínimo de cloro libre depende del estabilizador (2.0 ppm con CYA
+#: presente, 1.0 sin él). La banda de `water_targets` tiene que codificar el
+#: caso con estabilizador para que esta cita sea correcta; verificalo ahí.
+_CODE_BACKED = frozenset({
+    "free chlorine", "fc",
+    "combined chlorine", "cc",
+    "cyanuric acid", "cya",
+})
 
 #: Para una lectura cuyo estado no se sostiene: se informa el valor y, si lo
 #: hay, el objetivo, sin lenguaje de cumplimiento en ninguna dirección.
@@ -199,8 +254,8 @@ _CON_OBJETIVO = {
 #: trae el límite deja al operador corrigiendo hasta el borde de la infracción.
 #:
 #: Va como sufijo y con su propia palabra ("target"/"objetivo") justamente para
-#: que no se confunda con el número normativo: el último fallo observado fue un
-#: operating_target presentado como techo de código.
+#: que no se confunda con el número normativo: uno de los fallos observados fue
+#: un operating_target presentado como techo de código.
 _OBJETIVO = {
     "en": "; target {target}",
     "es": "; objetivo {target}",
@@ -233,10 +288,19 @@ _UNIDAD = {
 }
 
 
+def _clave(parameter: str) -> str:
+    """Nombre de parámetro normalizado: 'Free_Chlorine' -> 'free chlorine'."""
+    return re.sub(r"[^a-z0-9]+", " ", (parameter or "").lower()).strip()
+
+
 def unit_for(parameter: str) -> str:
     """La unidad de un parámetro, o "" si no la conocemos o no la lleva (pH)."""
-    clave = re.sub(r"[^a-z0-9]+", " ", (parameter or "").lower()).strip()
-    return _UNIDAD.get(clave, "")
+    return _UNIDAD.get(_clave(parameter), "")
+
+
+def is_code_backed(parameter: str) -> bool:
+    """¿Este parámetro tiene cota normativa publicada, no banda de práctica?"""
+    return _clave(parameter) in _CODE_BACKED
 
 
 #: Números que no hace falta respaldar: son lenguaje, no cantidades.
@@ -309,7 +373,7 @@ def unsupported_numbers(payload, raw_content: str) -> list[str]:
 _VACIAS = frozenset({
     "el", "la", "los", "las", "un", "una", "de", "del", "a", "al", "en", "y",
     "o", "que", "no", "se", "su", "hasta", "para", "con", "por",
-    "the", "a", "an", "of", "to", "in", "and", "or", "not", "your", "until",
+    "the", "an", "of", "to", "in", "and", "or", "not", "your", "until",
     "is", "are", "be", "all",
 })
 _PALABRA_RE = re.compile(r"[a-záéíóúñü]+", re.IGNORECASE)
@@ -358,45 +422,6 @@ def safety_repeats_an_action(payload) -> bool:
     )
 
 
-def _visible_text(payload) -> str:
-    partes = [getattr(payload, "answer", "") or "", getattr(payload, "safety", "") or ""]
-    partes += list(getattr(payload, "actions", None) or [])
-    # `readings` también es tier 1: una lectura que el synthesizer ya puso ahí
-    # está reportada, y volver a añadirla la duplicaría.
-    for r in (getattr(payload, "readings", None) or []):
-        partes += [getattr(r, "parameter", "") or "", getattr(r, "measured", "") or "",
-                   getattr(r, "note", "") or ""]
-    return " ".join(partes).lower()
-
-
-def _reading_is_visible(reading: dict, visible: str) -> bool:
-    """
-    ¿Está esta lectura REPORTADA en el tier visible, no solo nombrada?
-
-    La señal es el VALOR MEDIDO, no el nombre del parámetro. Nombrarlo dentro
-    de una acción ("baja el pH") no cuenta: el operador no se entera de cuánto
-    marcó ni de que incumple. El valor es lo que convierte una tarea en un dato.
-
-    Y el nombre no sirve para decidirlo: el especialista emite sus parámetros
-    en inglés ("Free Chlorine") y el turno puede estar en español, así que
-    buscar el nombre daba ausente en TODAS las lecturas de cualquier turno en
-    español — y el validador las duplicaba todas. Las cifras no se traducen.
-
-    El coste es un falso positivo posible: si el mismo número aparece en el
-    texto por otro motivo, la lectura se da por reportada. Prefiero eso a
-    duplicar, porque el synthesizer sí tiene instrucciones de poblar
-    `readings` y este chequeo es la red, no la vía principal.
-    """
-    medido = reading.get("measured")
-    if medido is None:
-        # Sin valor no hay nada que comprobar ni que añadir.
-        return True
-
-    crudo = f"{medido}"
-    normalizado = crudo.rstrip("0").rstrip(".") if "." in crudo else crudo
-    return crudo in visible or normalizado in visible
-
-
 #: Estados que afirman un incumplimiento. Solo son sostenibles si hay un
 #: límite normativo contra el que medirlos.
 _VIOLATION_STATUSES = ("below_minimum", "above_maximum")
@@ -419,11 +444,35 @@ def coherent_status(reading: dict) -> str | None:
     sabemos que no podemos afirmar lo contrario. None deja la lectura fuera de
     las obligatorias y fuera del texto que este módulo genera, que es la
     conducta segura cuando el dato se contradice.
+
+    Una lectura ya reconciliada contra banda (`band_derived`) queda exenta: su
+    veredicto no se apoya en `regulatory_limit` sino en `educational_bound`, y
+    ese campo sí está poblado.
     """
     status = reading.get("status")
+    if reading.get("band_derived"):
+        return status
     if status in _VIOLATION_STATUSES and reading.get("regulatory_limit") is None:
         return None
     return status
+
+
+def _es_cifra_publicada(nombre: str, limite) -> bool:
+    """
+    ¿El `regulatory_limit` que trajo el especialista es una banda publicada
+    reetiquetada, en vez de una cita real?
+
+    Se delega en `water_targets.is_published_figure`. Si esa función tiene otra
+    firma, se asume que sí (conducta previa del módulo, que degradaba todo) —
+    pero se prefiere fallar hacia la degradación solo en parámetros que NO son
+    `_CODE_BACKED`; los que sí lo son ni llegan hasta acá.
+    """
+    if limite is None:
+        return False
+    try:
+        return bool(is_published_figure(nombre, limite))
+    except TypeError:
+        return True
 
 
 def reconcile_with_published_bands(test_interpretation, report=None) -> list[dict]:
@@ -432,23 +481,30 @@ def reconcile_with_published_bands(test_interpretation, report=None) -> list[dic
 
     DOS COSAS, Y LA SEGUNDA ES LA QUE CORTA LA OSCILACIÓN.
 
-    1. El límite. El corpus no publica ninguno —cero nodos con cotas, ver
-       water_targets— así que todo `regulatory_limit` sobre un parámetro
-       cubierto es una banda educativa reetiquetada y se retira. En el trace
-       6660e14f las tres cifras (pH 7.8, cianúrico 90, cloro 2) son extremos
-       publicados; ninguna era una cita.
+    1. El límite. Un `regulatory_limit` que coincide con un extremo de la banda
+       publicada es esa banda reetiquetada, y se retira. En el trace 6660e14f
+       las cifras del especialista eran extremos publicados, no citas.
+
+       CON UNA EXCEPCIÓN, que es el cambio de esta versión: los parámetros de
+       `_CODE_BACKED` conservan el veredicto normativo. Cloro libre, cloro
+       combinado y ácido cianúrico SÍ tienen cota en el MAHC; que el corpus no
+       la tenga ingerida es un fallo de retrieval y no autoriza a decirle al
+       operador que el límite no existe. La versión anterior degradaba todo sin
+       condición —`is_published_figure` estaba importada y nunca se llamaba— y
+       el resultado era un panel que decía "not a code limit" debajo de la
+       cifra que dispara un cierre obligatorio, contradiciendo la prosa del
+       mismo turno.
 
     2. El estado. Se DERIVA del valor medido contra la banda, y lo que dijera
-       el especialista se descarta. La versión anterior de este paso sustituía
-       el límite y dejaba el status al modelo, con lo que una alcalinidad de
-       130 etiquetada `above_maximum` se renderizaba "por encima del techo de
-       180" — con 130 < 180. El mismo panel daba veredictos distintos en
-       corridas distintas sobre los mismos números, y esa es la oscilación.
+       el especialista se descarta. La versión anterior sustituía el límite y
+       dejaba el status al modelo, con lo que una alcalinidad de 130 etiquetada
+       `above_maximum` se renderizaba "por encima del techo de 180" — con
+       130 < 180. El mismo panel daba veredictos distintos en corridas
+       distintas sobre los mismos números, y esa es la oscilación.
 
-    ASIMETRÍA DELIBERADA: una jurisdicción real puede poner su máximo de pH
-    justo en 7.8, y en ese caso esto retira un límite verdadero. Se acepta. El
-    sistema no puede distinguir una coincidencia de un reetiquetado, y las dos
-    equivocaciones no cuestan lo mismo: no afirmar un código que existe deja al
+    ASIMETRÍA DELIBERADA en los parámetros NO normativos: una jurisdicción real
+    puede poner su máximo de pH justo en 7.8, y en ese caso esto retira un
+    límite verdadero. Se acepta. No afirmar un código que existe deja al
     operador con el número y sin la etiqueta; afirmar uno que no existe le hace
     reportar una infracción inventada ante un inspector.
 
@@ -475,18 +531,38 @@ def reconcile_with_published_bands(test_interpretation, report=None) -> list[dic
         banda = target_band(nombre)
 
         if banda is not None:
-            if r.get("regulatory_limit") is not None and report is not None:
-                report.limits_demoted.append(_format_parameter(nombre))
-            r["regulatory_limit"] = None
-
             if status is not None:
                 if report is not None and status != r.get("status"):
                     report.status_corrected.append(
                         f"{_format_parameter(nombre)}: {r.get('status')}→{status}"
                     )
                 r["status"] = status
-                r["band_derived"] = True
-                r["educational_bound"] = cota
+
+            if is_code_backed(nombre):
+                # Cota normativa: se conserva el veredicto de código. Si el
+                # especialista no trajo el límite, se toma el de la banda —
+                # que para estos parámetros ES la cifra del MAHC.
+                if r.get("regulatory_limit") is None and cota is not None:
+                    r["regulatory_limit"] = cota
+                r["band_derived"] = False
+                if report is not None:
+                    report.limits_kept.append(_format_parameter(nombre))
+            elif _es_cifra_publicada(nombre, r.get("regulatory_limit")) \
+                    or r.get("regulatory_limit") is None:
+                # Banda de práctica: se retira la autoridad normativa y el
+                # veredicto pasa al fraseo con "typical"/"habitual".
+                if r.get("regulatory_limit") is not None and report is not None:
+                    report.limits_demoted.append(_format_parameter(nombre))
+                r["regulatory_limit"] = None
+                if status is not None:
+                    r["band_derived"] = True
+                    r["educational_bound"] = cota
+            else:
+                # Trajo un límite que NO coincide con la banda: puede ser una
+                # cita real de jurisdicción. Se respeta tal cual vino.
+                if report is not None:
+                    report.limits_kept.append(_format_parameter(nombre))
+                r["band_derived"] = False
 
             if r.get("operating_target") is None:
                 objetivo = banda.target_text()
@@ -503,8 +579,10 @@ def required_readings(test_interpretation) -> list[dict]:
     """
     Las lecturas que el tier visible NO puede omitir.
 
-    Filtra también las incoherentes: una violación sin límite que la respalde
-    no se reporta como violación.
+    Ya no la usa `enforce_contract` —`enforce_visible_readings` reconstruye el
+    panel entero, incluidas las que están en rango— pero se conserva porque es
+    parte de la superficie pública del módulo y puede estar importada desde
+    tests o desde el nodo synthesizer.
     """
     if not isinstance(test_interpretation, list):
         return []
@@ -559,13 +637,25 @@ def _format_parameter(nombre: str) -> str:
     return " ".join(_GRAFIA.get(w, w.capitalize()) for w in limpio.split())
 
 
+def _tabla(mapa: dict, language: str) -> dict:
+    """
+    La sub-tabla del idioma, con fallback a inglés.
+
+    `or` y no `.get(language, default)`: si algún día alguien agrega `"fr": {}`
+    el default no salta y el dict vacío rompe abajo. El fallback es inglés
+    porque el especialista escribe en inglés y ese es el idioma en el que el
+    panel siempre tiene material.
+    """
+    return mapa.get(language) or mapa["en"]
+
+
 def reading_note(reading: dict, language: str, unit: str | None = None) -> str:
     """
     La nota de una lectura, armada por plantilla desde sus propios campos.
 
     El modelo no interviene: elige la frase el `status`, y el número que la
     acompaña sale de `regulatory_limit`, nunca de `operating_target`. Mezclar
-    los dos fue el último fallo observado — "above the 120 ppm operating
+    los dos fue uno de los fallos observados — "above the 120 ppm operating
     ceiling" presenta un objetivo de industria como si fuera un techo de
     código.
 
@@ -579,33 +669,37 @@ def reading_note(reading: dict, language: str, unit: str | None = None) -> str:
     if unit is None:
         unit = unit_for(str(reading.get("parameter", "")))
 
-    idioma = _STATUS_PHRASING.get(language, _STATUS_PHRASING["es"])
     status = coherent_status(reading)
     limite = reading.get("regulatory_limit")
     objetivo = reading.get("operating_target")
 
-    # Un límite degradado por `reconcile_with_published_bands` deja aquí su
-    # cifra. El veredicto se emite igual —el valor está fuera del rango
-    # publicado— pero con el fraseo que no le atribuye código, y `status` se
-    # lee del original: sin `regulatory_limit`, coherent_status lo habría
-    # anulado y la lectura saldría sin veredicto teniendo con qué darlo.
-    cota = reading.get("educational_bound")
+    def _con_objetivo(nota: str, estado: str) -> str:
+        # En `in_range` no se da: no hay nada que corregir, y un objetivo
+        # colgado de una lectura sana se lee como una tarea que no existe.
+        if objetivo is not None and estado != "in_range":
+            nota += _tabla(_OBJETIVO, language).format(
+                target=_con_unidad(objetivo, unit))
+        return nota
+
+    # Banda de práctica: veredicto sin autoridad normativa. `status` se lee del
+    # original porque `coherent_status` ya lo deja pasar cuando band_derived.
     if reading.get("band_derived"):
-        banda = _BANDA_PHRASING.get(language, _BANDA_PHRASING["es"])
+        banda = _tabla(_BANDA_PHRASING, language)
         crudo = reading.get("status")
         if crudo in banda:
-            nota = banda[crudo].format(
-                bound=_con_unidad(cota, unit) if cota is not None else "")
-            if objetivo is not None and crudo != "in_range":
-                nota += _OBJETIVO.get(language, _OBJETIVO["es"]).format(
-                    target=_con_unidad(objetivo, unit))
-            return nota
+            cota = reading.get("educational_bound")
+            return _con_objetivo(
+                banda[crudo].format(
+                    bound=_con_unidad(cota, unit) if cota is not None else ""),
+                crudo,
+            )
 
+    idioma = _tabla(_STATUS_PHRASING, language)
     if status is None or status not in idioma:
         if objetivo is not None:
-            return _CON_OBJETIVO.get(language, _CON_OBJETIVO["es"]).format(
+            return _tabla(_CON_OBJETIVO, language).format(
                 target=_con_unidad(objetivo, unit))
-        return _SIN_VEREDICTO.get(language, _SIN_VEREDICTO["es"])
+        return _tabla(_SIN_VEREDICTO, language)
 
     plantilla = idioma[status]
     if "{limit}" in plantilla:
@@ -613,17 +707,12 @@ def reading_note(reading: dict, language: str, unit: str | None = None) -> str:
             # No debería ocurrir — coherent_status ya degrada esos casos —
             # pero una plantilla con un hueco sin rellenar es peor que una
             # frase sin cifra.
-            return _SIN_VEREDICTO.get(language, _SIN_VEREDICTO["es"])
+            return _tabla(_SIN_VEREDICTO, language)
         nota = plantilla.format(limit=_con_unidad(limite, unit))
     else:
         nota = plantilla
 
-    # En `in_range` no se da: no hay nada que corregir, y un objetivo colgado
-    # de una lectura sana se lee como una tarea pendiente que no existe.
-    if objetivo is not None and status != "in_range":
-        nota += _OBJETIVO.get(language, _OBJETIVO["es"]).format(
-            target=_con_unidad(objetivo, unit))
-    return nota
+    return _con_objetivo(nota, status)
 
 
 def build_readings(test_interpretation: list[dict], language: str, linea_cls):
@@ -658,6 +747,19 @@ def build_readings(test_interpretation: list[dict], language: str, linea_cls):
             note=reading_note(r, language, unidad),
         ))
     return lineas
+
+
+def panel_needs_footer(test_interpretation) -> bool:
+    """
+    ¿Alguna línea del panel se apoya en una banda de práctica?
+
+    Si todas las lecturas tienen cota normativa, el aviso de procedencia sobra
+    y solo gasta espacio en pantalla.
+    """
+    return any(
+        isinstance(r, dict) and r.get("band_derived")
+        for r in (test_interpretation or [])
+    )
 
 
 def enforce_visible_readings(payload, readings: list[dict], language: str,
@@ -712,9 +814,9 @@ def _infer_reading_cls(payload):
 # Mismo principio que `readings`: el modelo escribe la prosa —el veredicto, el
 # razonamiento, la causa— y el código arma los campos estructurados. La
 # diferencia con el panel de lecturas es que estas dos NO se pueden armar por
-# plantilla: `actions` es texto del especialista, y ese texto viene en inglés
-# (ver _reading_is_visible). Por eso solo se sustituyen cuando el turno se
-# responde en inglés; en español la traducción sigue siendo del modelo.
+# plantilla: `actions` es texto del especialista, y ese texto viene en inglés.
+# Por eso solo se sustituyen cuando el turno se responde en inglés; en español
+# la traducción sigue siendo del modelo.
 
 #: Productos que, si CAUSARON el problema, no pueden formar parte de la
 #: corrección. Se busca en `likely_cause`, no en las dosis: dosificar
@@ -737,15 +839,14 @@ _ACIDS = ("muriatic", "hydrochloric", "sodium bisulfate", "dry acid",
 #: que `coherent_status` existe para evitar, y no deja de serlo por aparecer en
 #: una advertencia.
 #:
-#: Y dice "el rango publicado", no "su techo": el techo sería una cota de
-#: código, y el corpus no publica ninguna (ver water_targets). Una línea de
-#: seguridad que reintroduce la afirmación que el panel acaba de quitar deja al
-#: turno diciendo las dos cosas.
+#: El ácido cianúrico SÍ es `_CODE_BACKED`, así que acá la palabra "techo"
+#: puede usarse con propiedad: la lectura conserva su veredicto normativo y la
+#: advertencia no reintroduce nada que el panel haya retirado.
 _SAFETY_PHRASING = {
     "en": {
         "stabilized_at_ceiling": (
             "Do not use trichlor or dichlor — they add cyanuric acid, "
-            "already at the top of the published range."
+            "already at its regulatory ceiling."
         ),
         "stabilized": (
             "Do not use trichlor or dichlor — they add the cyanuric acid "
@@ -759,7 +860,7 @@ _SAFETY_PHRASING = {
     "es": {
         "stabilized_at_ceiling": (
             "No uses tricloro ni dicloro: aportan ácido cianúrico, que ya "
-            "está en el techo del rango publicado."
+            "está en su techo normativo."
         ),
         "stabilized": (
             "No uses tricloro ni dicloro: aportan el ácido cianúrico que "
@@ -773,7 +874,7 @@ _SAFETY_PHRASING = {
 }
 
 #: Nombres con los que el especialista reporta el estabilizante.
-_CYA_NAMES = ("cyanuric", "cianúrico", "cianurico", "stabilizer", "cya")
+_CYA_NAMES = ("cyanuric", "cianúrico", "cianurico", "stabilizer")
 
 
 def _as_list(value) -> list[str]:
@@ -792,19 +893,23 @@ def _as_list(value) -> list[str]:
     return []
 
 
-def render_actions(specialist: dict, max_items: int = MAX_ACTIONS) -> list[str]:
+def render_actions(specialist: dict) -> list[str]:
     """
     Acciones correctivas desde el payload del especialista.
 
     Prioriza `recommendations` (ya vienen en imperativo); cae a la lista
     `chemical_actions`, que trae la acción dentro de un objeto.
 
-    Se descarta lo que no entra en MAX_ACTION_WORDS en vez de recortarlo. Un
-    bullet largo no se pierde —sigue en el material de origen y el modelo lo
-    tiene para la prosa— y truncar una frase a mitad es peor que no ponerla,
-    que es la misma regla que aplica `overflow_to_details`. Si NADA entra, se
-    devuelve vacío y el caller conserva lo que escribió el modelo: el
-    especialista fue prolijo en párrafos y el modelo ya los condensó.
+    DEVUELVE TODO, SIN FILTRAR POR LARGO. La versión anterior descartaba acá
+    lo que excedía MAX_ACTION_WORDS, con lo que esos bullets no llegaban nunca
+    a `payload.actions` y por tanto `normalize_actions` no podía reubicarlos:
+    se perdían en silencio, rompiendo el principio rector del módulo en la
+    primera función que corre. En el último trace se evaporaron así la
+    dilución y la cloración breakpoint — las dos correcciones centrales del
+    turno — mientras la prosa seguía diciendo que había que diluir.
+
+    El recorte y la reubicación son responsabilidad de `normalize_actions`,
+    que sí manda lo excedente a `details`.
     """
     items = _as_list(specialist.get("recommendations"))
     if not items:
@@ -813,7 +918,7 @@ def render_actions(specialist: dict, max_items: int = MAX_ACTIONS) -> list[str]:
             for a in specialist.get("chemical_actions") or []
             if isinstance(a, dict) and str(a.get("action", "")).strip()
         ]
-    return [i for i in items if _words(i) <= MAX_ACTION_WORDS][:max_items]
+    return items
 
 
 def _cya_at_ceiling(specialist: dict) -> bool:
@@ -823,7 +928,7 @@ def _cya_at_ceiling(specialist: dict) -> bool:
             continue
         nombre = str(r.get("parameter", "")).lower()
         tokens = set(re.split(r"[^a-záéíóúñü]+", nombre))
-        if any(n in nombre for n in _CYA_NAMES[:-1]) or "cya" in tokens:
+        if any(n in nombre for n in _CYA_NAMES) or "cya" in tokens:
             if coherent_status(r) in ("at_ceiling", "above_maximum"):
                 return True
     return False
@@ -846,7 +951,7 @@ def render_safety(specialist: dict, language: str = "es") -> str | None:
     conserva entonces lo que haya escrito el modelo: acá no se inventa una
     advertencia genérica, que es ruido en la línea más leída del tier visible.
     """
-    frases = _SAFETY_PHRASING.get(language, _SAFETY_PHRASING["es"])
+    frases = _tabla(_SAFETY_PHRASING, language)
 
     cause = str(specialist.get("likely_cause") or "").lower()
     if any(k in cause for k in _STABILIZED):
@@ -877,7 +982,7 @@ def enforce_closure_action(payload, readings, language: str,
     """
     Si el panel obliga a cerrar, el cierre es `actions[0]`. Puesto por código.
 
-    La ronda pasada faltó justamente esto: la acción de cierre venía de
+    Una ronda faltó justamente esto: la acción de cierre venía de
     `recommendations`, así que dependía de que el especialista la escribiera —
     y el turno que más la necesita es aquel en el que se equivoca. El
     disparador es el valor medido de desinfectante contra el mínimo publicado,
@@ -890,7 +995,7 @@ def enforce_closure_action(payload, readings, language: str,
     if not closure_required(readings):
         return
 
-    linea = _CIERRE.get(language, _CIERRE["es"])
+    linea = _tabla(_CIERRE, language)
     tokens = _contenido(linea)
     resto = [
         a for a in (payload.actions or [])
@@ -979,6 +1084,18 @@ def _safety_trigger(contract: dict, agents: Optional[list[str]], payload) -> str
     return "lexicon" if HAZARD_PATTERN.search(surface) else ""
 
 
+def resolve_safety_required(contract: dict, agents: Optional[list[str]],
+                            payload) -> bool:
+    """
+    Versión booleana de `_safety_trigger`, para callers externos.
+
+    `enforce_contract` usa el trigger directamente porque necesita el motivo
+    para la telemetría; esto se conserva por si el nodo synthesizer o los tests
+    lo importan.
+    """
+    return bool(_safety_trigger(contract, agents, payload))
+
+
 def _words(text: str | None) -> int:
     if not text:
         return 0
@@ -1016,31 +1133,6 @@ def _first_sentence(text: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Resolución de safety condicional
-# --------------------------------------------------------------------------
-
-def resolve_safety_required(contract: dict, agents: Optional[list[str]], payload) -> bool:
-    """
-    `safety_required` puede ser True, False o "conditional".
-
-    "conditional" (arquetipo `calculation`): un cálculo de turnover no necesita
-    advertencia; una dosis de ácido sí. Se decide por agente de origen y,
-    como red, por léxico del contenido visible.
-    """
-    required = contract.get("safety_required", False)
-    if required is not True and required != "conditional":
-        return False
-    if required is True:
-        return True
-
-    if _has_hazard_agent(agents):
-        return True
-
-    surface = " ".join([payload.answer or "", *(payload.actions or [])])
-    return bool(_safety_trigger(contract, agents, payload))
-
-
-# --------------------------------------------------------------------------
 # Normalización de acciones
 # --------------------------------------------------------------------------
 
@@ -1048,6 +1140,10 @@ def normalize_actions(payload, detail_cls, report: ValidationReport) -> None:
     """
     Reglas: máximo MAX_ACTIONS bullets, cada uno ≤ MAX_ACTION_WORDS palabras.
     Lo que no cumple NO se borra: se reubica a `details`.
+
+    Este es el ÚNICO punto del pipeline donde se recorta la lista de acciones.
+    `render_actions` ya no filtra por largo justamente para que todo lo
+    excedente pase por acá y termine en `details` en vez de desaparecer.
     """
     kept: list[str] = []
     relocated: list[str] = []
@@ -1117,7 +1213,8 @@ def promote_safety_from_details(payload, report: ValidationReport) -> None:
 
     Si el contrato exige `safety` y el LLM lo omitió, se busca una sección
     plegada con pinta de advertencia y se sube su primera frase a tier 1.
-    Si no hay nada que promover, se marca `safety_missing` -> retry.
+    Si no hay nada que promover, se marca `safety_missing` — que ya NO gatilla
+    retry (ver ValidationReport.needs_retry), solo se mide.
     """
     if payload.safety and payload.safety.strip():
         return
@@ -1160,6 +1257,10 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
         (payload, report). Si `report.needs_retry` es True, el caller puede
         reintentar UNA vez con instrucción correctiva; si no, acepta la
         degradación determinística que ya se aplicó.
+
+        `report.panel_footer` no existe: el pie del panel se decide con
+        `panel_needs_footer(readings_reconciliadas)` y se renderiza en el nodo,
+        no acá — este módulo no compone la superficie final.
     """
     report = ValidationReport(
         archetype=contract.get("_name", ""),
@@ -1187,7 +1288,8 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     if readings:
         enforce_closure_action(payload, readings, language, report)
 
-    # 1. Normalizar bullets antes de medir presupuesto.
+    # 1. Normalizar bullets antes de medir presupuesto. Único punto de recorte:
+    #    lo que excede se reubica a `details`, no se pierde.
     normalize_actions(payload, detail_cls, report)
 
     # 2. Seguridad: promover ANTES del overflow, porque suma al conteo visible.
@@ -1211,16 +1313,16 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     # 4. Presupuesto.
     overflow_to_details(payload, report.budget, detail_cls, report)
 
-    # 4. Podar secciones vacías.
+    # 5. Podar secciones vacías.
     payload.details = [d for d in payload.details if d.body and d.body.strip()]
 
-    # 5. Telemetría de calidad del tier visible. No corrige nada: mide cuántas
+    # 6. Telemetría de calidad del tier visible. No corrige nada: mide cuántas
     #    veces el prompt no consigue lo que pide.
     report.safety_duplicates_action = safety_repeats_an_action(payload)
     if report.safety_duplicates_action:
         report.notes.append("safety repite una acción en vez de aportar algo nuevo")
 
-    # 6. Cantidades sin respaldo. Al final, sobre el texto definitivo, para
+    # 7. Cantidades sin respaldo. Al final, sobre el texto definitivo, para
     #    que no se le escape lo que el propio validador haya añadido.
     if raw_content:
         report.unsupported_numbers = unsupported_numbers(payload, raw_content)
@@ -1245,7 +1347,7 @@ def _infer_detail_cls(payload):
 
 
 # --------------------------------------------------------------------------
-# Fallback (paso 7)
+# Fallback
 # --------------------------------------------------------------------------
 
 def fallback_payload(raw_text: str, output_cls):
