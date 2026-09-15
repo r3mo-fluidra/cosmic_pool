@@ -15,6 +15,8 @@ import json
 import os
 import shutil
 from pathlib import Path
+from functools import lru_cache
+from urllib.parse import urlparse
 import uuid
 from dotenv import load_dotenv
 import pandas as pd
@@ -53,6 +55,7 @@ COLLECTION_NAME = "pool_manual_vectors"
 QDRANT_ENDPOINT = "QDRANT_URL"
 QDRANT_ENDPOINT_LEGACY = "QDRANT_ENDPOINT"
 QDRANT_API_KEY = "QDRANT_API_KEY"
+QDRANT_TIMEOUT_S = 12
 
 
 def _secret(key: str) -> str | None:
@@ -70,8 +73,12 @@ def _secret(key: str) -> str | None:
     except Exception:
         return None
 
+@lru_cache(maxsize=1)
 def _make_client() -> QdrantClient:
     """Punto UNICO de construccion del cliente Qdrant.
+
+    Cacheado: cada QdrantClient abre su propio pool httpx y rehace el
+    handshake TLS. Se reconstruia en cada llamada a cargar_vector_store().
 
     Servidor si QDRANT_URL esta definido. El modo embedded queda solo como
     fallback de desarrollo: toma un lock exclusivo de archivo y es
@@ -79,10 +86,16 @@ def _make_client() -> QdrantClient:
     """
     url = _secret(QDRANT_ENDPOINT) or _secret(QDRANT_ENDPOINT_LEGACY)
     if url:
+        parsed = urlparse(url)
+        # Sin puerto explicito qdrant-client asume 6333. Lo dejamos visible
+        # para poder moverlo por entorno sin tocar codigo.
+        port = parsed.port or int(_secret("QDRANT_PORT") or 6333)
         return QdrantClient(
             url=url,
+            port=port,
             api_key=_secret(QDRANT_API_KEY),
-            timeout=30,
+            timeout=QDRANT_TIMEOUT_S,
+            prefer_grpc=False,
         )
 
     if not QDRANT_PATH.exists():
