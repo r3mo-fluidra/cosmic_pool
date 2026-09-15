@@ -6,8 +6,7 @@ Deterministic enforcement of the response contract emitted by the synthesizer.
 The prompt ASKS the LLM to respect the budget; this module GUARANTEES it.
 Guiding principle: never delete information, only relocate it to `details`.
 
-Usage:
-    payload, report = enforce_contract(payload, contract, state["assigned_agents"])
+    payload, report = enforce_contract(payload, contract, agents, vessel=vessel)
 """
 
 from __future__ import annotations
@@ -17,7 +16,11 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
 from .water_targets import (
-    closure_required, is_published_figure, resolve_panel, target_band,
+    closure_required,
+    is_published_figure,
+    resolve_panel,
+    target_band,
+    VesselContext,
 )
 
 # --------------------------------------------------------------------------
@@ -26,24 +29,10 @@ from .water_targets import (
 
 MAX_ACTIONS = 4
 
-#: Word cap per bullet.
-#:
-#: Its ONLY job is to catch a MALFORMED bullet: a whole paragraph where a line
-#: belonged. It is NOT a selection criterion.
-#:
-#: It was 12, then 22, and both times it discarded the turn's central action —
-#: the last one by a single word. The cause is that length is orthogonal to
-#: importance: the specialist orders by priority, and its most important
-#: actions are the long ones because they carry product, quantity and target.
-#: With MAX_ACTIONS=4 the worst case is ~160 visible words, comfortable inside
-#: any archetype budget, so the real trimming is done by MAX_ACTIONS and
-#: `overflow_to_details`, not by this.
 MAX_ACTION_WORDS = 40
 
 NO_CAP = 9999  # sentinel budget: `critical` archetype, no ceiling
 
-# Agents whose content implies chemical handling or direct risk.
-# They resolve `safety_required = "conditional"` to True.
 HAZARD_AGENTS = {"chemistry", "contamination", "safety", "math", "recovery"}
 
 # Lexical fallback in case the archetype is `calculation` with no hazardous
@@ -60,13 +49,9 @@ OVERFLOW_LABEL = "Next actions (overflow)"
 SAFETY_LABEL_PATTERN = re.compile(r"safety|warning|hazard", re.IGNORECASE)
 
 #: Provenance notice, ONCE at the foot of the panel — not glued to every line.
-#:
-#: An earlier version hung "educational range, not a code limit" off every
-#: verdict, which left the response contradicting itself: the prose said "you
-#: must close the pool because free chlorine is below the required 2.0 ppm
-#: minimum" and the panel, two lines below, said that minimum was not a code
-#: limit. An operator who needs to close just received the perfect excuse not
-#: to.
+#: Hung off every verdict, it contradicted the prose: "close the pool, free
+#: chlorine is below the required minimum" over a line saying that minimum was
+#: not a code limit. That is a perfect excuse not to close.
 PANEL_FOOTER = {
     "en": ("Limits follow the CDC Model Aquatic Health Code where published; "
            "ranges marked *typical* are operating practice. Your state or "
@@ -90,66 +75,52 @@ class ValidationReport:
     overflowed: bool = False
     actions_relocated: int = 0
     safety_promoted: bool = False
-    #: The contract required `safety` and there was nothing to put there. This
-    #: NO LONGER triggers a retry: now that the line is derived from the
-    #: specialist payload (`render_safety`), the real case that fired it — a
-    #: model omitting it while holding the data — is solved without calling
-    #: the model again. Still measured: if this comes back full, the payload
-    #: did not support a warning either.
+    #: Contract required `safety` and there was nothing to put there. No longer
+    #: triggers a retry: the line is now built by template from the specialist
+    #: payload. Measured only.
     safety_missing: bool = False
     answer_exceeds_budget: bool = False  # -> triggers retry
     #: `actions` / `safety` built by code from the specialist payload rather
     #: than accepted as the model wrote them.
     actions_rendered: bool = False
     safety_rendered: bool = False
-    #: Parameters whose `regulatory_limit` turned out to be a relabelled
-    #: practice band. While this stays full, the specialist keeps presenting
-    #: targets as code, and all that changed is that we now detect it.
+    #: `regulatory_limit` values that turned out to be relabelled practice
+    #: bands. While this stays full, the specialist keeps presenting targets as
+    #: code and all that changed is that we detect it.
     limits_demoted: list[str] = field(default_factory=list)
     #: Parameters that DO have a regulatory bound and kept the code verdict.
-    #: Counterpart to `limits_demoted`: if this empties out, something broke
-    #: `_CODE_BACKED` and the panel stopped asserting limits that exist.
+    #: If this empties out, `_CODE_BACKED` broke.
     limits_kept: list[str] = field(default_factory=list)
-    #: Parameters whose `operating_target` was filled in from the band because
-    #: the specialist left it empty.
+    #: `operating_target` filled in from the band because the specialist left
+    #: it empty.
     targets_filled: list[str] = field(default_factory=list)
-    #: Parameters whose `operating_target` had to be REPLACED because what the
-    #: specialist supplied was implausible: zero, an echo of the measured
-    #: value, or a figure outside the band. Distinct from `targets_filled`.
+    #: `operating_target` REPLACED or withdrawn: zero, an echo of the measured
+    #: value, outside the band, or a parameter with no publishable target.
     targets_replaced: list[str] = field(default_factory=list)
-    #: Readings whose `status` disagreed with the band-derived one, formatted
-    #: as "pH: above_maximum→in_range". This is the direct measure of the
-    #: oscillation: the specialist judging the same numbers two ways across
-    #: two runs. The panel no longer reflects it, but the turn produced it.
+    #: Readings whose `status` disagreed with the band-derived one, as
+    #: "pH: above_maximum→in_range". Direct measure of the oscillation.
     status_corrected: list[str] = field(default_factory=list)
     #: The panel forces a closure and the action was inserted by code.
     closure_inserted: bool = False
     #: Out-of-range readings the visible tier omitted.
     readings_missing: list[str] = field(default_factory=list)
     readings_appended: bool = False
-    #: Quantities in the visible tier that do not appear in the source
-    #: material. The worst failure mode per the synthesizer's own prompt.
+    #: Quantities in the visible tier absent from the source material. The
+    #: worst failure mode per the synthesizer's own prompt.
     unsupported_numbers: list[str] = field(default_factory=list)
-    #: `safety` repeats an action instead of adding something new. Measured,
-    #: not corrected: dropping a safety line is worse than repeating one.
+    #: `safety` repeats an action. Measured, not corrected: dropping a safety
+    #: line is worse than repeating one.
     safety_duplicates_action: bool = False
     #: Actions asking to correct a parameter the panel reported as in range.
-    #: Measured only: the fix is for the specialist to draft against the
-    #: reconciled readings, and that is a graph change, not a validator one.
+    #: Measured only: the fix belongs in the specialist, not here.
     actions_vs_panel: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
     def needs_retry(self) -> bool:
         """
-        One retry only. If it fails again, the degradation is accepted.
-
-        `safety_missing` was removed from here. It was the trigger that fired
-        most — seven rounds in a row — and every firing costs a full model
-        call, 2–3.5 s of pure latency per turn, to ask for a line that is now
-        built by template from the payload. When `render_safety` returns None
-        it is because the payload supports no specific warning, and asking
-        again does not change the data: it produces a generic one.
+        One retry only. `safety_missing` was removed from here: it fired seven
+        rounds in a row at 2-3.5 s each, for a line now built by template.
         """
         return self.answer_exceeds_budget
 
@@ -161,26 +132,7 @@ class ValidationReport:
 # Phrasing tables — the model writes none of this
 # --------------------------------------------------------------------------
 
-#: The wording of each status, by template. The model does NOT write it.
-#:
-#: Four evaluation rounds on the same query showed it does not hold as a
-#: prompt instruction. The observed failures, all on data the specialist had
-#: classified correctly:
-#:   - "extremely high" over an at_ceiling (intensification)
-#:   - an in_range turned into "above the maximum" (re-grading)
-#:   - "above the 120 ppm operating ceiling" over an entry with no limit
-#:     (an operating target presented as a regulatory ceiling)
-#: All three travel just as far: an operator repeating them to an inspector
-#: reports a violation that does not exist.
-#:
-#: STRUCTURE: nested by language, like `_BAND_PHRASING`. An earlier version
-#: defined it flat and under a different name, so `reading_note` raised
-#: NameError as soon as a reading did NOT derive from a band.
-#:
-#: `{limit}` is filled with `regulatory_limit` ALREADY FORMATTED WITH ITS UNIT
-#: by `_with_unit`, so the template carries no `{u}`: "{limit}{u}" produced
-#: "2 ppm ppm" and, worse, a KeyError because `.format()` only receives
-#: `limit`.
+
 _STATUS_PHRASING = {
     "en": {
         "below_minimum": "in violation, below the {limit} minimum",
@@ -201,12 +153,7 @@ _STATUS_PHRASING = {
 #: The same verdict when the figure backing it is an OPERATING PRACTICE band
 #: rather than a code limit. The value is still outside the published range —
 #: that is actionable and is said — but without attributing regulatory
-#: authority it does not have.
-#:
-#: The disclaimer does NOT live here. It used to be glued to each line and
-#: left the response contradicting its own prose; it now lives once in
-#: `PANEL_FOOTER`. The word "typical"/"habitual" already marks the difference
-#: inside the line, which is all the line needs.
+#: authority it does not have. The disclaimer lives once in `PANEL_FOOTER`.
 _BAND_PHRASING = {
     "en": {
         "below_minimum": "below the typical {bound} floor",
@@ -224,8 +171,8 @@ _BAND_PHRASING = {
     },
 }
 
-#: For a reading whose status does not hold: report the value and, if there is
-#: one, the target — with no compliance language in either direction.
+#: For a reading whose status does not hold: the value and, if there is one,
+#: the target — with no compliance language in either direction.
 _NO_VERDICT = {
     "en": "reported; no code bound available",
     "es": "reportado; sin límite normativo disponible",
@@ -235,60 +182,47 @@ _REPORTED_WITH_TARGET = {
     "es": "reportado; objetivo operativo {target}",
 }
 
-#: The operating target, when there IS a verdict. The limit says where the
-#: violation begins; the target says where to leave the water. A panel
-#: carrying only the limit leaves the operator correcting to the edge of the
-#: violation.
-#:
-#: It goes as a suffix and with its own word ("target"/"objetivo") precisely
-#: so it is not confused with the regulatory figure: one observed failure was
-#: an operating_target presented as a code ceiling.
+#: The limit says where the violation begins; the target says where to leave
+#: the water. Goes as a suffix with its own word so it is not read as the
+#: regulatory figure — one observed failure was exactly that.
 _TARGET_SUFFIX = {
     "en": "; target {target}",
     "es": "; objetivo {target}",
 }
 
-#: The target when `constraint_conflict` says it CANNOT be reached.
-#:
-#: The panel was printing "target 6.75 ppm" while the prose of the same turn
-#: said that level exceeds the permitted maximum. An unqualified target reads
-#: as achievable, and the synthesizer prompt already warned exactly that:
-#: "never present the in-range target on its own when this field is set —
-#: alone it reads as achievable and sufficient, and it is neither".
+#: The target when `constraint_conflict` says it CANNOT be reached. The panel
+#: was printing "target 6.75 ppm" while the same turn said that level exceeds
+#: the permitted maximum: unqualified, a target reads as achievable.
 _TARGET_BLOCKED_SUFFIX = {
     "en": "; target {target} — blocked until {fix} comes down",
     "es": "; objetivo {target} — bloqueado hasta bajar {fix}",
 }
 
-#: Parameters with a REAL regulatory bound, not a practice band. These are not
-#: demoted: they keep "in violation, below the 2 ppm minimum".
+#: Parameters with a REAL regulatory bound, not a practice band. Not demoted:
+#: they keep "in violation, below the 2 ppm minimum".
 #:
 #: That the corpus lacks the ingested citation is a retrieval problem, not a
 #: reason to tell the operator the limit does not exist. And the cost
-#: asymmetry runs the other way than for pH: failing to assert the pH code
-#: leaves the operator with the number and no label; failing to assert the
-#: free chlorine minimum puts "not a code limit" under the figure that
-#: triggers a mandatory closure.
+#: asymmetry runs the other way than for pH: failing to assert the free
+#: chlorine minimum puts "not a code limit" under the figure that triggers a
+#: mandatory closure.
 #:
-#: NOTE — the free chlorine minimum depends on stabilizer (2.0 ppm with CYA
-#: present, 1.0 without). The band in `water_targets` must encode the
-#: stabilized case for this citation to be correct; verify it there.
+#: NOTE — the free chlorine minimum depends on stabilizer AND on vessel type
+#: (3 ppm in spas). `water_targets` encodes both; this set only decides
+#: whether the verdict keeps regulatory language.
 _CODE_BACKED = frozenset({
     "free chlorine", "fc",
     "combined chlorine", "cc",
     "cyanuric acid", "cya",
 })
 
-#: Unit per parameter. The specialist emits `measured` as a bare number —0.8,
-#: 7.9, 90.0— so the unit is lost between its payload and the screen: in trace
-#: 148acb15 all seven values arrived without ppm. A figure without a unit is
-#: not a reading, it is a number, and 0.8 without ppm tells nobody the pool is
-#: in violation.
+#: Unit per parameter. The specialist emits `measured` as a bare number, so the
+#: unit is lost between its payload and the screen: in trace 148acb15 all seven
+#: values arrived without ppm. 0.8 without ppm tells nobody the pool is in
+#: violation.
 #:
-#: Temperature is NOT in the table, on purpose. The specialist returns 82 with
-#: no scale, and choosing one here is invention: 82 °F and 82 °C describe two
-#: unrelated pools. No unit is worse than the right one, but far better than
-#: the wrong one.
+#: Temperature is NOT here, on purpose: the specialist returns 82 with no
+#: scale, and 82 °F and 82 °C describe two unrelated pools.
 _UNITS = {
     "free chlorine":     "ppm",
     "combined chlorine": "ppm",
@@ -305,8 +239,8 @@ _UNITS = {
     "cya": "ppm", "ta": "ppm", "ch": "ppm",
 }
 
-#: Parameter spellings that do not survive a .title(). "ph" -> "Ph" is a name
-#: no operator writes.
+#: Spellings that do not survive a .title(). "ph" -> "Ph" is a name no operator
+#: writes.
 _SPELLING = {
     "ph": "pH", "orp": "ORP", "tds": "TDS", "cya": "CYA", "lsi": "LSI",
     "fc": "FC", "cc": "CC", "ta": "TA", "ch": "CH", "ppm": "ppm",
@@ -330,23 +264,15 @@ def is_code_backed(parameter: str) -> bool:
 
 def _lang_table(mapping: dict, language: str) -> dict:
     """
-    The language sub-table, falling back to English.
-
-    `or` rather than `.get(language, default)`: if someone later adds
-    `"fr": {}` the default would not kick in and the empty dict would break
-    downstream. The fallback is English because the specialist writes in
-    English and that is the language the panel always has material in.
+    The language sub-table, falling back to English. `or` rather than `.get`:
+    a later `"fr": {}` would otherwise return the empty dict.
     """
     return mapping.get(language) or mapping["en"]
 
 
 def _format_number(value) -> str:
-    """
-    No padding zeros: 2.0 -> '2', 7.8 -> '7.8'.
-
-    A string is returned untouched: if the specialist wrote "0.8 ppm", that
-    unit is theirs and beats the bare number.
-    """
+    """No padding zeros: 2.0 -> '2'. A string is returned untouched — if the
+    specialist wrote "0.8 ppm", that unit is theirs."""
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, float) and value.is_integer():
@@ -386,8 +312,8 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 _TRIVIAL_NUMBERS = frozenset({"0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
                               "10", "12", "24", "48", "72", "100"})
 
-#: Minimal stopwords, es/en. No external dependency needed: all that matters
-#: is that "the/de/la/to" do not inflate the similarity between short phrases.
+#: Minimal stopwords, es/en. All that matters is that "the/de/la/to" do not
+#: inflate the similarity between short phrases.
 _STOPWORDS = frozenset({
     "el", "la", "los", "las", "un", "una", "de", "del", "a", "al", "en", "y",
     "o", "que", "no", "se", "su", "hasta", "para", "con", "por",
@@ -396,11 +322,9 @@ _STOPWORDS = frozenset({
 })
 _WORD_RE = re.compile(r"[a-záéíóúñü]+", re.IGNORECASE)
 _DUPLICATE_THRESHOLD = 0.55
-#: Stem truncation, not lemmatization. "cerrada"/"cerrar" and "closed"/"close"
-#: describe the same action and without this they look nothing alike: literal
-#: comparison scored 0.5 and 0.4 on what is obviously a repetition. Five chars
-#: is short enough to absorb inflection in both languages and long enough not
-#: to conflate distinct words.
+#: Stem truncation, not lemmatization. "cerrada"/"cerrar" scored 0.5 and 0.4
+#: literally on what is obviously a repetition. Five chars absorbs inflection
+#: in both languages without conflating distinct words.
 _STEM = 5
 
 
@@ -422,52 +346,36 @@ def _first_sentence(text: str) -> str:
 
 def unsupported_numbers(payload, raw_content: str) -> list[str]:
     """
-    Quantities that appear in the visible tier and not in the source material.
+    Quantities in the visible tier absent from the source material.
 
-    The synthesizer prompt calls this the system's worst failure mode ("never
-    invent a dosage... filling a gap to satisfy a shape"), and it happened
-    anyway: with `calculation_request` unexecuted, the synthesizer wrote
-    "drain and refill thirty to forty percent". The number was nowhere in the
-    payload, and it was also wrong — neither fraction reached the stabilizer
-    target the agent itself had asked for.
+    With `calculation_request` unexecuted, the synthesizer wrote "drain and
+    refill thirty to forty percent" — nowhere in the payload, and wrong. An
+    invented number arrives with the same confidence as the real ones.
 
-    An invented number is worse than a missing one: it arrives with the same
-    confidence as the real ones and the operator cannot tell them apart.
-
-    Detects, does not correct. Rewriting the sentence containing it would
-    require understanding the sentence; what can be asserted unambiguously is
-    that the number has no backing, and that is enough to decide a retry and
-    to measure frequency in Langfuse.
+    Detects, does not correct: rewriting the sentence would require
+    understanding it.
     """
     if not raw_content:
         return []
 
     def _canon(x: str) -> str:
-        """3.0 and 3 are the same number; 90 and 9 are not.
-
-        A bare `rstrip("0")` turned "90" into "9", so a 90 in the panel did
-        not match the 90.0 in the source and was reported as invented. Zeros
-        are only stripped when there is a decimal part to strip.
-        """
+        """3.0 and 3 are the same number; 90 and 9 are not. A bare rstrip("0")
+        turned "90" into "9" and reported a real figure as invented."""
         x = x.replace(",", ".")
         return x.rstrip("0").rstrip(".") if "." in x else x
 
     source_numbers = {_canon(o) for o in _NUMBER_RE.findall(raw_content)}
 
-    # Only `answer`, `actions` and `safety`: what the MODEL writes. The
-    # `readings` field is built by this module from the specialist payload, so
-    # its figures come from the source by definition and counting them would
-    # only produce noise.
+    # Only what the MODEL writes. `readings` is built by this module from the
+    # specialist payload, so its figures come from the source by definition.
     model_written = " ".join([
         getattr(payload, "answer", "") or "",
         getattr(payload, "safety", "") or "",
         *(getattr(payload, "actions", None) or []),
     ])
 
-    # "thirty to forty percent" carries no digits: numbers spelled as words
-    # escape this check, and that is a conscious limitation. It covers the
-    # frequent case (figures) without risking false positives from a numeral
-    # parser in two languages.
+    # Numbers spelled as words escape this check: a conscious limitation, to
+    # avoid false positives from a numeral parser in two languages.
     suspects = []
     for n in _NUMBER_RE.findall(model_written):
         if n in _TRIVIAL_NUMBERS or _canon(n) in source_numbers:
@@ -490,22 +398,14 @@ def coherent_status(reading: dict) -> str | None:
     """
     A reading's status, demoted if it contradicts itself.
 
-    An `above_maximum` with `regulatory_limit` null asserts that a maximum the
-    entry itself says it does not know was exceeded. Measured: the specialist
-    returned total alkalinity as above_maximum with no limit, judging it
-    against its operating_target — and the parameter was not only compliant,
-    it was practically on target. Declaring a healthy parameter in violation
-    travels just as far as calling a ceiling a violation: an operator
-    repeating it to an inspector reports a violation that does not exist.
+    `above_maximum` with `regulatory_limit` null asserts a maximum the entry
+    says it does not know. Observed: total alkalinity judged above_maximum
+    against its operating_target while practically on target — an operator
+    repeating that to an inspector reports a violation that does not exist.
 
-    Demoted to None rather than to "in_range": we do not know it is in range,
-    we know we cannot assert the opposite. None keeps the reading out of the
-    required set and out of the text this module generates, which is the safe
-    behaviour when the data contradicts itself.
-
-    A reading already reconciled against a band (`band_derived`) is exempt:
-    its verdict rests on `educational_bound`, not on `regulatory_limit`, and
-    that field is populated.
+    Demoted to None, not "in_range": we do not know it is in range, we know we
+    cannot assert the opposite. Readings reconciled against a band
+    (`band_derived`) are exempt — their verdict rests on `educational_bound`.
     """
     status = reading.get("status")
     if reading.get("band_derived"):
@@ -515,42 +415,38 @@ def coherent_status(reading: dict) -> str | None:
     return status
 
 
-def _is_published_bound(name: str, limit) -> bool:
+def _is_published_bound(name: str, limit,
+                        vessel: "VesselContext | None" = None) -> bool:
     """
-    Is the `regulatory_limit` the specialist supplied a relabelled published
-    band rather than a real citation?
+    Is the specialist's `regulatory_limit` a relabelled published band rather
+    than a real citation? Only non-`_CODE_BACKED` parameters reach here.
 
-    Delegates to `water_targets.is_published_figure`. If that function has a
-    different signature, we assume yes (the module's previous behaviour, which
-    demoted everything) — but only parameters that are NOT `_CODE_BACKED` ever
-    reach here.
+    The `except TypeError` assumes yes (the module's previous behaviour). It
+    also masks a signature mismatch, so verify `is_published_figure` accepts
+    `vessel` before trusting a run where everything came back demoted.
     """
     if limit is None:
         return False
     try:
-        return bool(is_published_figure(name, limit))
+        return bool(is_published_figure(name, limit, vessel))
     except TypeError:
         return True
 
 
-def _target_is_plausible(name: str, target, measured) -> bool:
+def _target_is_plausible(name: str, target, measured,
+                         vessel: "VesselContext | None" = None) -> bool:
     """
     Does the specialist's `operating_target` work as a target?
 
-    Three rejections, all three observed in real traces:
+    Three rejections, all observed: ZERO (combined chlorine came back 0.0 in
+    six runs — zero chloramines is not an operable state), ECHO of the measured
+    value (temperature 82.0 over 82.0), and OUTSIDE THE BAND (a target aimed at
+    the violation).
 
-      - ZERO. No pool parameter has a target of zero. Combined chlorine came
-        back with 0.0 in six consecutive runs and the panel printed
-        "target 0 ppm" — zero chloramines is not an operable state.
-      - ECHO OF THE MEASURED VALUE. Temperature came back with
-        `operating_target: 82.0` over `measured: 82.0`: that is the reading
-        repeated, not a target.
-      - OUTSIDE THE BAND. If the target, treated as a reading, would not
-        resolve in range, it is a target aimed at the violation.
-
-    The third is evaluated by running `resolve_panel` on a synthetic item
-    rather than reading the band's endpoints, because the internal shape of
-    `target_band` is not part of this module's contract.
+    The third runs `resolve_panel` on a synthetic item rather than reading the
+    band's endpoints: the internal shape of `target_band` is not this module's
+    contract. That item carries no cyanuric acid, so the stabilized floor never
+    applies here.
     """
     if target is None:
         return False
@@ -567,65 +463,36 @@ def _target_is_plausible(name: str, target, measured) -> bool:
         except (TypeError, ValueError):
             pass
     try:
-        status, _ = resolve_panel([{"parameter": name, "measured": value}])[0]
+        status, _ = resolve_panel(
+            [{"parameter": name, "measured": value}], vessel)[0]
     except Exception:
         return True
     return status in ("in_range", "at_floor", "at_ceiling")
 
 
-def reconcile_with_published_bands(test_interpretation, report=None) -> list[dict]:
+def reconcile_with_published_bands(
+        test_interpretation, report=None,
+        vessel: "VesselContext | None" = None) -> list[dict]:
     """
-    Replace `status` and `regulatory_limit` with what the table supports.
+    Rewrite each reading's verdict from the published band for THIS vessel.
 
-    THREE THINGS, AND THE SECOND IS THE ONE THAT STOPS THE OSCILLATION.
-
-    1. The limit. A `regulatory_limit` matching an endpoint of the published
-       band is that band relabelled, and it is withdrawn.
-
-       WITH ONE EXCEPTION: `_CODE_BACKED` parameters keep the regulatory
-       verdict. Free chlorine, combined chlorine and cyanuric acid DO have
-       bounds in the MAHC; that the corpus lacks the citation is a retrieval
-       failure and does not license telling the operator the limit does not
-       exist. An earlier version demoted everything unconditionally —
-       `is_published_figure` was imported and never called — and the result
-       was a panel saying "not a code limit" under the figure that triggers a
-       mandatory closure, contradicting the prose of the same turn.
-
-    2. The status. It is DERIVED from the measured value against the band, and
-       whatever the specialist said is discarded. An earlier version replaced
-       the limit and left the status to the model, so a total alkalinity of
-       130 tagged `above_maximum` rendered as "above the 180 ceiling" — with
-       130 < 180. The same panel gave different verdicts on the same numbers
-       across runs, and that is the oscillation.
-
-    3. The operating target. Filled from the band when the specialist left it
-       empty, and REPLACED when what it supplied is implausible (see
-       `_target_is_plausible`). Checking only `is None` was not enough: a
-       target of 0.0 is not None and printed as "target 0 ppm" for six runs.
-
-    DELIBERATE ASYMMETRY on non-regulatory parameters: a real jurisdiction may
-    set its pH maximum at exactly 7.8, and in that case this withdraws a true
-    limit. Accepted. Failing to assert a code that exists leaves the operator
-    with the number and no label; asserting one that does not exist makes them
-    report an invented violation to an inspector.
-
-    A parameter the table does NOT cover is left untouched: there is no basis
-    to withdraw its limit or to judge it, and declaring it in range out of
-    ignorance would be a clearance nobody issued.
-
-    Returns a new list; does not mutate the caller's dicts.
+    `vessel` is load-bearing, not decoration. In trace 35b8a774 an indoor spa
+    resolved against pool bands: the specialist had correctly called free
+    chlorine 2.2 below_minimum and cyanuric acid 35 above_maximum, this
+    function demoted both to in_range, and the panel printed a clearance under
+    an order to close.
     """
     if not isinstance(test_interpretation, list):
         return []
 
-    resolved = resolve_panel(test_interpretation)
+    resolved = resolve_panel(test_interpretation, vessel)
     output = []
     for r, (status, bound) in zip(test_interpretation, resolved):
         if not isinstance(r, dict):
             continue
         r = dict(r)
         name = str(r.get("parameter", ""))
-        band = target_band(name)
+        band = target_band(name, vessel)
 
         if band is not None:
             if status is not None:
@@ -636,18 +503,17 @@ def reconcile_with_published_bands(test_interpretation, report=None) -> list[dic
                 r["status"] = status
 
             if is_code_backed(name):
-                # Regulatory bound: the code verdict is kept. If the
-                # specialist did not supply the limit, the band's is used —
-                # for these parameters that IS the MAHC figure.
+                # Regulatory bound: the code verdict is kept. If the specialist
+                # did not supply the limit, the band's is used.
                 if r.get("regulatory_limit") is None and bound is not None:
                     r["regulatory_limit"] = bound
                 r["band_derived"] = False
                 if report is not None:
                     report.limits_kept.append(_format_parameter(name))
-            elif (_is_published_bound(name, r.get("regulatory_limit"))
+            elif (_is_published_bound(name, r.get("regulatory_limit"), vessel)
                   or r.get("regulatory_limit") is None):
-                # Practice band: regulatory authority is withdrawn and the
-                # verdict moves to the "typical"/"habitual" phrasing.
+                # Practice band: regulatory authority withdrawn, verdict moves
+                # to the "typical"/"habitual" phrasing.
                 if r.get("regulatory_limit") is not None and report is not None:
                     report.limits_demoted.append(_format_parameter(name))
                 r["regulatory_limit"] = None
@@ -655,14 +521,25 @@ def reconcile_with_published_bands(test_interpretation, report=None) -> list[dic
                     r["band_derived"] = True
                     r["educational_bound"] = bound
             else:
-                # Supplied a limit that does NOT match the band: it may be a
-                # real jurisdictional citation. Respected as it came.
+                # A limit that does NOT match the band: may be a real
+                # jurisdictional citation. Respected as it came.
                 if report is not None:
                     report.limits_kept.append(_format_parameter(name))
                 r["band_derived"] = False
 
             current_target = r.get("operating_target")
-            if not _target_is_plausible(name, current_target, r.get("measured")):
+            if not band.fill_target:
+                # The corpus says this parameter has no publishable target.
+                # The flag was only consulted in `target_text()` — the
+                # REPLACEMENT path — so a plausible target from the specialist
+                # printed anyway: free chlorine with CYA 90 showed "target
+                # 2 ppm" while the same turn explained 6.75 were needed.
+                if current_target is not None:
+                    r["operating_target"] = None
+                    if report is not None:
+                        report.targets_replaced.append(_format_parameter(name))
+            elif not _target_is_plausible(
+                    name, current_target, r.get("measured"), vessel):
                 replacement = band.target_text()
                 if replacement:
                     r["operating_target"] = replacement
@@ -683,12 +560,9 @@ def reconcile_with_published_bands(test_interpretation, report=None) -> list[dic
 
 def required_readings(test_interpretation) -> list[dict]:
     """
-    The readings the visible tier cannot omit.
-
-    No longer used by `enforce_contract` — `enforce_visible_readings` rebuilds
-    the whole panel, in-range readings included — but kept because it is part
-    of the module's public surface and may be imported by tests or by the
-    synthesizer node.
+    The readings the visible tier cannot omit. No longer used by
+    `enforce_contract` — `enforce_visible_readings` rebuilds the whole panel —
+    but kept as public surface.
     """
     if not isinstance(test_interpretation, list):
         return []
@@ -705,12 +579,11 @@ def required_readings(test_interpretation) -> list[dict]:
 def _target_blocked_by(reading: dict, conflict: dict | None) -> str | None:
     """
     The parameter to correct, if THIS reading's target is the one the conflict
-    declares unreachable. None otherwise.
+    declares unreachable.
 
-    Matching is by VALUE (`operating_target` == `needed_level`), not by name:
-    `parameter_to_correct` names the parameter to MOVE — cyanuric acid — not
-    the one that ended up blocked — free chlorine — and the payload has no
-    field for the latter.
+    Matched by VALUE, not by name: `parameter_to_correct` names the parameter
+    to MOVE (cyanuric acid), not the one left blocked (free chlorine), and the
+    payload has no field for the latter.
     """
     if not isinstance(conflict, dict):
         return None
@@ -730,23 +603,16 @@ def _target_blocked_by(reading: dict, conflict: dict | None) -> str | None:
 def reading_note(reading: dict, language: str, unit: str | None = None,
                  conflict: dict | None = None) -> str:
     """
-    A reading's note, assembled by template from its own fields.
+    A reading's note, assembled by template. The model plays no part.
 
-    The model plays no part: `status` picks the phrase, and the number
-    accompanying it comes from `regulatory_limit`, never from
-    `operating_target`. Mixing the two was one of the observed failures —
-    "above the 120 ppm operating ceiling" presents an industry target as if it
-    were a code ceiling.
-
-    The target does appear, but behind and with its own label: it is the
-    number the operator acts on, and without it the note says where the
-    violation begins without saying where to leave the water. And if
-    `conflict` declares it unreachable, it is marked as such: a blocked target
-    printed bare invites exactly what the prose just forbade.
+    `status` picks the phrase; the number comes from `regulatory_limit`, never
+    from `operating_target` — mixing them produced "above the 120 ppm operating
+    ceiling", an industry target dressed as a code ceiling. The target does
+    appear, behind and labelled, because without it the note says where the
+    violation begins but not where to leave the water.
     """
     # `unit=None` means "derive it", not "no unit": a caller that forgets the
-    # argument produces a half-finished line — the value with ppm and the
-    # limit without — and that is precisely the defect this closes.
+    # argument produces a half-finished line.
     if unit is None:
         unit = unit_for(str(reading.get("parameter", "")))
 
@@ -756,9 +622,8 @@ def reading_note(reading: dict, language: str, unit: str | None = None,
     blocked_by = _target_blocked_by(reading, conflict)
 
     def _append_target(note: str, state: str) -> str:
-        # Not given on `in_range`: there is nothing to correct, and a target
-        # hanging off a healthy reading reads as a pending task that does not
-        # exist.
+        # Not on `in_range`: a target hanging off a healthy reading reads as a
+        # pending task that does not exist.
         if target is None or state == "in_range":
             return note
         target_text = _with_unit(target, unit)
@@ -768,9 +633,7 @@ def reading_note(reading: dict, language: str, unit: str | None = None,
         return note + _lang_table(_TARGET_SUFFIX, language).format(
             target=target_text)
 
-    # Practice band: verdict without regulatory authority. `status` is read
-    # from the original because `coherent_status` lets it through when
-    # band_derived is set.
+    # Practice band: verdict without regulatory authority.
     if reading.get("band_derived"):
         band = _lang_table(_BAND_PHRASING, language)
         raw_status = reading.get("status")
@@ -792,9 +655,8 @@ def reading_note(reading: dict, language: str, unit: str | None = None,
     template = phrasing[status]
     if "{limit}" in template:
         if limit is None:
-            # Should not happen — coherent_status already demotes those cases
-            # — but a template with an unfilled hole is worse than a phrase
-            # with no figure.
+            # Should not happen — `coherent_status` demotes those — but an
+            # unfilled hole is worse than a phrase with no figure.
             return _lang_table(_NO_VERDICT, language)
         note = template.format(limit=_with_unit(limit, unit))
     else:
@@ -806,21 +668,13 @@ def reading_note(reading: dict, language: str, unit: str | None = None,
 def build_readings(test_interpretation: list[dict], language: str, line_cls,
                    conflict: dict | None = None):
     """
-    Every panel line, built from the specialist's data.
-
-    REPLACES whatever the synthesizer wrote in `readings`; does not complete
-    it. An earlier version only added what was missing, so a badly worded line
-    from the model passed through intact while the absent ones were corrected
-    — half the problem fixed and half not.
+    Every panel line, built from the specialist's data. REPLACES `readings`,
+    does not complete it: an earlier version let a badly worded model line
+    through intact while correcting the absent ones.
 
     ALL reported parameters are included, in-range ones too: the operator
-    handed over seven readings and seeing all seven is the confirmation that
-    all seven were read. Omitting the correct ones forces inference by
-    absence.
-
-    `conflict` is the specialist payload's `constraint_conflict`. It is passed
-    whole to `reading_note`, which decides which line — if any — carries its
-    target marked unreachable.
+    handed over seven readings and seeing all seven confirms all seven were
+    read.
     """
     lines = []
     for r in test_interpretation or []:
@@ -830,10 +684,8 @@ def build_readings(test_interpretation: list[dict], language: str, line_cls,
         measured = r.get("measured")
         if not name or measured is None:
             continue
-        # The unit is resolved from the RAW name ("free_chlorine"), not the
-        # formatted one, and applied to all three figures in the line: the
-        # value, the limit and the target. Half a line with units is worse
-        # than none.
+        # Unit resolved from the RAW name and applied to all three figures:
+        # half a line with units is worse than none.
         unit = unit_for(str(r.get("parameter", "")))
         lines.append(line_cls(
             parameter=name,
@@ -844,12 +696,8 @@ def build_readings(test_interpretation: list[dict], language: str, line_cls,
 
 
 def panel_needs_footer(test_interpretation) -> bool:
-    """
-    Does any panel line rest on a practice band?
-
-    If every reading has a regulatory bound, the provenance notice is
-    redundant and only costs screen space.
-    """
+    """Does any panel line rest on a practice band? If none does, the
+    provenance notice only costs screen space."""
     return any(
         isinstance(r, dict) and r.get("band_derived")
         for r in (test_interpretation or [])
@@ -873,14 +721,9 @@ def enforce_visible_readings(payload, readings: list[dict], language: str,
     """
     Replace `readings` with the lines built from the data.
 
-    It does not check what the model wrote nor complete what is missing: it
-    replaces it. Four evaluation rounds on the same query showed that
-    status-based phrasing does not hold as a prompt instruction, and the
-    version that only completed let a badly worded line through intact while
-    correcting the absent ones — half a solution.
-
-    What the model still writes is the prose above: the verdict, the
-    reasoning, the cause. The figure panel is assembled here.
+    Four evaluation rounds showed status-based phrasing does not hold as a
+    prompt instruction. The model still writes the prose above — the verdict,
+    the reasoning, the cause; the figure panel is assembled here.
     """
     line_cls = _infer_reading_cls(payload)
     if line_cls is None or not readings:
@@ -894,9 +737,8 @@ def enforce_visible_readings(payload, readings: list[dict], language: str,
 
     current = {(r.parameter, r.note) for r in payload.readings}
     report.readings_appended = True
-    # Telemetry: which lines did not match what the model had put there. If
-    # this comes back full turn after turn, the prompt still is not achieving
-    # it and the enforcement is covering for it.
+    # Telemetry: which lines did not match what the model put there. Full turn
+    # after turn means the prompt still is not achieving it.
     report.readings_missing = sorted(
         {p for p, _ in current - previous}
     ) if previous else [r.parameter for r in payload.readings]
@@ -906,37 +748,26 @@ def enforce_visible_readings(payload, readings: list[dict], language: str,
 # Actions and safety from the specialist payload
 # --------------------------------------------------------------------------
 #
-# Same principle as `readings`: the model writes the prose — the verdict, the
-# reasoning, the cause — and the code assembles the structured fields. The
-# difference from the reading panel is that these two CANNOT be built by
-# template: `actions` is the specialist's text, and that text comes in
-# English. So they are only substituted when the turn is answered in English;
-# in Spanish the translation remains the model's.
+# Same principle as `readings`: the model writes the prose, the code assembles
+# the structured fields. The difference is that these two cannot be built by
+# template — `actions` is the specialist's text, and that text comes in
+# English. So they are only substituted when the turn is answered in English.
 
 #: Products that, if they CAUSED the problem, cannot be part of the fix.
-#: Searched in `likely_cause`, not in the doses: dosing hypochlorite is
-#: normal, having got here on trichlor is the finding.
+#: Searched in `likely_cause`, not in the doses.
 _STABILIZED = ("trichlor", "dichlor", "stabilized chlorine",
                "chlorinated isocyanurate", "isocyanurate",
                "tricloro", "dicloro", "cloro estabilizado")
 
-#: Commonly handled acids. They appear in `chemical_actions`, not in the
-#: cause: what matters is that the operator will handle one.
+#: Commonly handled acids. Searched in `chemical_actions`: what matters is that
+#: the operator will handle one.
 _ACIDS = ("muriatic", "hydrochloric", "sodium bisulfate", "dry acid",
           "muriático", "muriatico", "clorhídrico", "clorhidrico",
           "bisulfato", "ácido seco", "acido seco")
 
-#: The safety line, by template and by language. Like `_STATUS_PHRASING`: the
-#: model does not write it.
-#:
-#: The `stabilized_at_ceiling` variant is only chosen when a reading backs it.
-#: Asserting a limit the data does not support is exactly the failure
-#: `coherent_status` exists to prevent, and it does not stop being one by
-#: appearing in a warning.
-#:
-#: Cyanuric acid IS `_CODE_BACKED`, so "regulatory ceiling" can be used here
-#: with propriety: the reading keeps its regulatory verdict and the warning
-#: reintroduces nothing the panel withdrew.
+#: The safety line, by template. The `stabilized_at_ceiling` variant is only
+#: chosen when a reading backs it: asserting an unsupported limit does not stop
+#: being a failure by appearing in a warning.
 _SAFETY_PHRASING = {
     "en": {
         "stabilized_at_ceiling": (
@@ -971,17 +802,16 @@ _SAFETY_PHRASING = {
 #: Names under which the specialist reports the stabilizer.
 _CYA_NAMES = ("cyanuric", "cianúrico", "cianurico", "stabilizer")
 
-#: The closure action, by template. The model does not write it and it does
-#: not depend on the specialist remembering to include it.
+#: The closure action, by template. Does not depend on the specialist
+#: remembering to include it.
 _CLOSURE = {
     "en": "Close the pool to bathers immediately",
     "es": "Cerrá la pileta a los bañistas de inmediato",
 }
 
-#: Leading time clause: "After dilution,", "Once refilled,". Trimmed BEFORE
-#: classifying, because it names a step that is NOT this item's. Without this,
-#: "After dilution, retest all parameters" contains "dilution" and
-#: `_CORRECTIVE_VERB_RE` treated it as corrective — the filter did nothing.
+#: Leading time clause: "After dilution,". Trimmed BEFORE classifying, because
+#: it names a step that is NOT this item's — without it, "After dilution,
+#: retest all parameters" read as corrective and the filter did nothing.
 _LEADING_TIME_CLAUSE_RE = re.compile(
     r"^\s*(?:after|before|once|following|when|"
     r"luego\s+de|después\s+de|despues\s+de|antes\s+de|una\s+vez)\b"
@@ -989,8 +819,7 @@ _LEADING_TIME_CLAUSE_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: Same at the tail: "Retest pH 4 hours after adding acid" — the "adding"
-#: belongs to the previous step, not to this one.
+#: Same at the tail: "Retest pH 4 hours after adding acid".
 _TRAILING_TIME_CLAUSE_RE = re.compile(
     r"[,\s]+(?:after|before|once|following|"
     r"luego\s+de|después\s+de|despues\s+de|antes\s+de)\s+.*$",
@@ -1014,26 +843,32 @@ _CORRECTIVE_VERB_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The same set WITHOUT the closure verbs. An item carrying one of these
+#: orders something besides closing, so it is not a duplicate of the closure
+#: line no matter how much it overlaps.
+_NON_CLOSURE_VERB_RE = re.compile(
+    r"\b(?:add|dose|dilut|drain|refill|lower|raise|chlorinat|shock|"
+    r"backwash|brush|vacuum|clean|replace|adjust|balance|"
+    r"agreg|dosif|diluí|diluir|drená|drenar|bajá|bajar|subí|subir|"
+    r"clorá|clorar|reemplaz|ajust)\w*\b",
+    re.IGNORECASE,
+)
 
-#: Frontera de oración: punto o punto y coma, espacio, y mayúscula. No parte
-#: "7.4-7.6" ni "aprox. 50%" porque exige el espacio y la mayúscula después.
+#: Sentence boundary: period or semicolon, space, uppercase. Does not split
+#: "7.4-7.6" because it requires the space and the capital.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-ZÁÉÍÓÚÑ])")
 
 
 def _as_list(value) -> list[str]:
     """
     `recommendations` arrives as a list, as a numbered string, or as running
-    prose. Normalize all three.
+    prose. All three have been observed across runs, so all three must work.
 
-    The numbered split requires a period PLUS a space (`\\d+\\.\\s+`), so "7.4"
-    or "3.4 ppm" do not break the sentence in half.
-
-    THE PROSE FALLBACK is not cosmetic. In trace 57cabbd9 the specialist sent
-    four actions as one unnumbered paragraph; with only the numbered split it
-    came back as a single 43-word item, which exceeded MAX_ACTION_WORDS and
-    was relocated whole. The operator saw a closed pool and no corrective
-    step. The specialist has now alternated between list, numbered string and
-    running prose across runs, so all three have to work.
+    The numbered split requires a period PLUS a space, so "7.4" does not break
+    the sentence in half. The PROSE fallback is not cosmetic: in trace 57cabbd9
+    four actions came as one unnumbered paragraph, exceeded MAX_ACTION_WORDS
+    and were relocated whole — the operator saw a closed pool and no corrective
+    step.
     """
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
@@ -1046,20 +881,17 @@ def _as_list(value) -> list[str]:
         return parts
 
     # No numbering: fall back to sentence boundaries. A single sentence comes
-    # back as a single item, which is the correct outcome.
+    # back as a single item, which is correct.
     return [p.strip() for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
 
 
 def _is_verification_only(item: str) -> bool:
     """
-    Is this item purely a verification instruction?
+    Is this item purely a verification instruction? Evaluated on the CORE — the
+    item stripped of its time clauses, which name other steps.
 
-    Evaluated on the CORE — the item stripped of its time clauses — because
-    those clauses name other steps and contaminate verb detection.
-
-    Fails toward keeping: an ambiguous item stays in the list. Losing a real
-    correction to a false positive is far worse than spending a slot on one
-    retest too many.
+    Fails toward keeping: losing a real correction to a false positive is far
+    worse than one retest too many.
     """
     core = _LEADING_TIME_CLAUSE_RE.sub("", item)
     core = _TRAILING_TIME_CLAUSE_RE.sub("", core)
@@ -1067,34 +899,9 @@ def _is_verification_only(item: str) -> bool:
 
 
 def render_actions(specialist: dict) -> list[str]:
-    """
-    Corrective actions from the specialist payload.
-
-    Prefers `recommendations` (already imperative); falls back to the
-    `chemical_actions` list, which wraps the action in an object.
-
-    RETURNS EVERYTHING, WITH NO LENGTH FILTER. An earlier version discarded
-    anything over MAX_ACTION_WORDS here, so those bullets never reached
-    `payload.actions` and `normalize_actions` could not relocate them: they
-    were lost silently, breaking the module's guiding principle in the first
-    function that runs. That is how the dilution and the breakpoint
-    chlorination — the turn's two central corrections — evaporated while the
-    prose kept saying the pool had to be diluted. Trimming and relocation are
-    `normalize_actions`' responsibility.
-
-    THE ONLY THING DISCARDED HERE is pure verification items, and not for
-    their shape but because they are DUPLICATE content: `retest_guidance` is
-    its own payload field and has its own `details` section, so a "retest all
-    parameters" inside `recommendations` is the third copy of the same text.
-    The difference from the length filter is that that one lost information
-    and this one does not: the data is still there, twice, where it belongs.
-
-    It matters because there are four slots and the specialist does not
-    prioritize them. In trace 2ad488c6, "After dilution, retest all
-    parameters" took third place and pushed "Chlorinate to restore the
-    disinfectant barrier" out of the visible tier — in a pool closed precisely
-    for chlorine below minimum.
-    """
+    """The specialist's actions, verification-only items dropped. If
+    EVERYTHING was verification the list is returned intact: the turn may be a
+    follow-up, and no actions would be worse."""
     items = _as_list(specialist.get("recommendations"))
     if not items:
         items = [
@@ -1104,9 +911,6 @@ def render_actions(specialist: dict) -> list[str]:
         ]
 
     corrective = [i for i in items if not _is_verification_only(i)]
-    # If EVERYTHING was verification, the list is returned intact: the turn
-    # may legitimately be a follow-up — "I already dosed, what do I watch?" —
-    # and leaving it with no actions would be worse than repeating the retest.
     return corrective or items
 
 
@@ -1124,22 +928,8 @@ def _cya_at_ceiling(specialist: dict) -> bool:
 
 
 def render_safety(specialist: dict, language: str = "es") -> str | None:
-    """
-    One imperative line, derived from the payload. Never duplicates an action.
-
-    Priority: the product that caused the problem over the handling
-    incompatibility. If the operator got here on trichlor, repeating trichlor
-    is what puts them back in the same place; the other is handling hygiene,
-    always true and therefore less informative.
-
-    Neither can come out of an action in the list: one bans a product that
-    will not be used and the other is about mixing order. By construction, not
-    by check.
-
-    Returns None when the payload supports neither. The caller then keeps
-    whatever the model wrote: no generic warning is invented here, which would
-    be noise on the most-read line of the visible tier.
-    """
+    """The safety line by template, or None when the payload supports no
+    specific warning."""
     phrases = _lang_table(_SAFETY_PHRASING, language)
 
     cause = str(specialist.get("likely_cause") or "").lower()
@@ -1158,23 +948,18 @@ def render_safety(specialist: dict, language: str = "es") -> str | None:
     return None
 
 
-
 def enforce_closure_action(payload, readings, language: str,
-                           report: ValidationReport) -> None:
+                           report: ValidationReport,
+                           vessel: "VesselContext | None" = None) -> None:
     """
-    If the panel forces a closure, the closure is `actions[0]`. Put by code.
+    Insert the closure action when the readings force one.
 
-    One round this was exactly what was missing: the closure action came from
-    `recommendations`, so it depended on the specialist writing it — and the
-    turn that needs it most is the one where the specialist gets it wrong. The
-    trigger is the measured disinfectant value against the published minimum,
-    via `closure_required`, not anyone's `status`.
-
-    If the specialist ALREADY wrote it, it is not duplicated: it is reordered
-    to the front. Two bullets saying the same thing spend the slot the next
-    correction needs.
+    `closure_required` derives from the measured value and the vessel's band,
+    not from anyone's status: in trace 35b8a774 the specialist said
+    `status: "closed"` and the pool bands said 2.2 ppm was fine, so nothing
+    fired. With `vessel` the spa floor of 3 ppm applies and it does.
     """
-    if not closure_required(readings):
+    if not closure_required(readings, vessel):
         return
 
     line = _lang_table(_CLOSURE, language)
@@ -1182,23 +967,21 @@ def enforce_closure_action(payload, readings, language: str,
 
     def _is_just_the_closure(action: str) -> bool:
         """
-        Both directions, not one.
+        An item is the closure repeated if it CONTAINS the closure and orders
+        no other correction.
 
-        The old check measured only how much of the closure appears in the
-        action, so any long action that mentioned closing in passing scored
-        0.75 and was dropped. In trace 57cabbd9 that removed a paragraph
-        carrying the dilution, the acid and the chlorination because its first
-        four words were "Close the pool immediately".
-
-        Requiring the overlap in both directions means an item is only
-        discarded when it is SUBSTANTIALLY the closure and nothing else.
+        Bidirectional overlap could not separate the two cases: the 57cabbd9
+        paragraph was long because it carried dilution, acid and chlorination;
+        the 10b378b9 line was long because it carried a justification. The
+        second passed, duplicated the closure and pushed dilution out of the
+        visible tier. What distinguishes them is a corrective verb other than
+        closing, not word count.
         """
         other = _content_tokens(action)
         if not tokens or not other:
             return False
-        overlap = len(tokens & other)
-        return (overlap / len(tokens) >= _DUPLICATE_THRESHOLD
-                and overlap / len(other) >= _DUPLICATE_THRESHOLD)
+        has_closure = len(tokens & other) / len(tokens) >= _DUPLICATE_THRESHOLD
+        return has_closure and not _NON_CLOSURE_VERB_RE.search(action)
 
     rest = [a for a in (payload.actions or []) if not _is_just_the_closure(a)]
     payload.actions = [line] + rest
@@ -1208,20 +991,9 @@ def enforce_closure_action(payload, readings, language: str,
 
 def enforce_visible_tier(payload, specialist: dict, language: str,
                          report: ValidationReport) -> None:
-    """
-    Replace `actions` and `safety` with what can be derived from the payload.
-
-    Each is replaced only if there is something to replace it with. What the
-    model wrote is not relocated to `details`: that would be the same content
-    twice, once above and once folded, and the source material already keeps
-    it whole.
-
-    `actions` is skipped when the turn is not answered in English. The
-    specialist writes in English and its bullets would go in untranslated in a
-    Spanish response — swapping a well-written action for the same action in
-    another language is a regression, not enforcement. `safety` always
-    applies: it comes from a template and the template exists in both.
-    """
+    """`actions` and `safety` from the specialist payload. Actions only in
+    English — the specialist's text is English and translating it is the
+    model's job."""
     if language == "en":
         actions = render_actions(specialist)
         if actions:
@@ -1244,21 +1016,7 @@ def enforce_visible_tier(payload, specialist: dict, language: str,
 # --------------------------------------------------------------------------
 
 def safety_repeats_an_action(payload) -> bool:
-    """
-    Does `safety` say no more than an action already in the list?
-
-    Measured: under an action "close the pool to bathers", the safety field
-    said "keep the pool closed until chlorine is restored". The most-read line
-    of the visible tier spent repeating the first action, and the one that did
-    carry unique information — the ban on the product that caused the problem
-    — gone.
-
-    Measured, not corrected. Suppressing a safety line for resembling
-    something else is a far worse failure than leaving it repeated, and
-    lexical overlap cannot distinguish a repetition from a deliberate
-    reinforcement. The prompt asks for the line with the longest reach; this
-    says how often it does not deliver one.
-    """
+    """Does `safety` restate an action instead of adding something new?"""
     safety = getattr(payload, "safety", None)
     actions = getattr(payload, "actions", None) or []
     if not safety or not actions:
@@ -1274,8 +1032,8 @@ def safety_repeats_an_action(payload) -> bool:
     )
 
 
-#: Aliases an action might use to name a panel parameter. The key is the form
-#: normalized by `_key()`.
+#: Aliases an action might use to name a panel parameter. Keys are `_key()`
+#: normalized.
 _PARAM_ALIASES = {
     "free chlorine":     ("free chlorine", "fc", "chlorine residual",
                           "cloro libre"),
@@ -1290,7 +1048,7 @@ _PARAM_ALIASES = {
                           "dureza cálcica", "dureza"),
 }
 
-#: Verbs that ask to MOVE a parameter. Naming it without one of these is not a
+#: Verbs that ask to MOVE a parameter. Naming it without one is not a
 #: contradiction: "retest alkalinity" does not argue with "in range".
 _ADJUST_VERB_RE = re.compile(
     r"\b(?:lower|raise|reduce|increase|drop|bring\s+(?:up|down)|correct|adjust|"
@@ -1300,10 +1058,8 @@ _ADJUST_VERB_RE = re.compile(
 
 
 def _mentions_parameter(text: str, param_key: str) -> bool:
-    """
-    Does the action name this parameter? With word boundaries: "ph" cannot
-    match inside "phosphate".
-    """
+    """Does the action name this parameter? With word boundaries: "ph" cannot
+    match inside "phosphate"."""
     lowered = (text or "").lower()
     for alias in _PARAM_ALIASES.get(param_key, ()):
         if re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", lowered):
@@ -1312,30 +1068,8 @@ def _mentions_parameter(text: str, param_key: str) -> bool:
 
 
 def actions_contradict_panel(payload, readings) -> list[str]:
-    """
-    Actions asking to correct a parameter the panel declared in range.
-
-    MEASURES, DOES NOT CORRECT. The recommendations are drafted by the
-    specialist against ITS own `status`, and `reconcile_with_published_bands`
-    corrects the reading afterwards: if the specialist sent total alkalinity
-    as `above_maximum` with an invented limit of 120, the panel shows it "in
-    range" and the action still says "lower total alkalinity". The operator
-    receives both.
-
-    The specialist's text is not edited. Rewriting a recommendation would
-    require understanding which part of the sentence belongs to which
-    parameter — "add acid to lower total alkalinity AND pH" is half correct —
-    and a blind trim would break the action that is actually needed. What can
-    be asserted unambiguously is that there is a discrepancy, and that is
-    enough to measure frequency in Langfuse.
-
-    The real fix does not live here: it is for the specialist to receive the
-    reconciled readings BEFORE drafting. This counter says how urgent that
-    graph change is.
-
-    Requires the ALREADY reconciled readings: on the raw ones there would be
-    no discrepancy to detect, because they are the source of the text.
-    """
+    """Actions asking to correct a parameter the panel reported as in range.
+    Measured only."""
     findings = []
     in_range = {
         _key(str(r.get("parameter", "")))
@@ -1362,13 +1096,7 @@ def actions_contradict_panel(payload, readings) -> list[str]:
 # --------------------------------------------------------------------------
 
 def _has_hazard_agent(agents: Optional[list[str]]) -> bool:
-    """
-    Namespace tolerant. Accepts slug ("chemistry"), display name ("Pool
-    Chemistry Agent") and any casing/separator, because the value arriving in
-    state["assigned_agents"] is produced by the planner and is not normalized.
-    A failure here is silent: intersection() with a display name is empty and
-    the warning is simply not required.
-    """
+    """Did a hazardous-domain agent produce content this turn?"""
     for raw in agents or []:
         norm = re.sub(r"[^a-z0-9]+", "_", (raw or "").lower()).strip("_")
         if not norm:
@@ -1383,11 +1111,8 @@ def _has_hazard_agent(agents: Optional[list[str]]) -> bool:
 
 
 def _safety_trigger(contract: dict, agents: Optional[list[str]], payload) -> str:
-    """
-    Returns WHAT required safety: "contract" | "agent" | "lexicon" | "".
-    Kept separate from the boolean so enforce_contract can record the reason
-    without changing the public signature.
-    """
+    """Why safety is required this turn: "contract", "agent", "lexicon", or ""
+    for not required."""
     required = contract.get("safety_required", False)
     if required is True:
         return "contract"
@@ -1406,13 +1131,7 @@ def _safety_trigger(contract: dict, agents: Optional[list[str]], payload) -> str
 
 def resolve_safety_required(contract: dict, agents: Optional[list[str]],
                             payload) -> bool:
-    """
-    Boolean version of `_safety_trigger`, for external callers.
-
-    `enforce_contract` uses the trigger directly because it needs the reason
-    for telemetry; this is kept in case the synthesizer node or the tests
-    import it.
-    """
+    """Public boolean form of `_safety_trigger`."""
     return bool(_safety_trigger(contract, agents, payload))
 
 
@@ -1457,18 +1176,8 @@ def _infer_detail_cls(payload):
 # --------------------------------------------------------------------------
 
 def normalize_actions(payload, detail_cls, report: ValidationReport) -> None:
-    """
-    At most MAX_ACTIONS bullets. Overflow is NOT deleted: it goes to `details`.
-
-    The specialist's ORDER is preserved: the first four stay visible, the rest
-    move down. A bullet exceeding MAX_ACTION_WORDS moves down too, but that is
-    a malformation and is noted separately — if it starts firing often, the
-    specialist prompt is returning paragraphs where it asks for imperatives.
-
-    This is the ONLY point in the pipeline where the action list is trimmed.
-    `render_actions` no longer filters by length precisely so everything in
-    excess passes through here and ends up in `details` instead of vanishing.
-    """
+    """Cap the bullet list at MAX_ACTIONS and MAX_ACTION_WORDS. Overflow moves
+    to `details`, never gets deleted."""
     kept: list[str] = []
     relocated: list[str] = []
     malformed = 0
@@ -1504,13 +1213,7 @@ def normalize_actions(payload, detail_cls, report: ValidationReport) -> None:
 
 def overflow_to_details(payload, budget: int, detail_cls,
                         report: ValidationReport) -> None:
-    """
-    Move actions down from the end until the budget is met.
-
-    `answer` and `safety` are untouchable: if they exceed the budget on their
-    own, `answer_exceeds_budget` is set and the caller decides (retry or
-    accept). Truncating a sentence mid-way is worse than running long.
-    """
+    """Relocate trailing actions until the visible tier fits the budget."""
     if budget >= NO_CAP:
         return
 
@@ -1541,12 +1244,9 @@ def overflow_to_details(payload, budget: int, detail_cls,
 
 def promote_safety_from_details(payload, report: ValidationReport) -> None:
     """
-    Hard rule: nothing safety-related stays behind the fold.
-
-    If the contract requires `safety` and the LLM omitted it, a folded section
-    that looks like a warning is located and its first sentence is promoted to
-    tier 1. If there is nothing to promote, `safety_missing` is set — which no
-    longer triggers a retry (see ValidationReport.needs_retry), only measures.
+    Hard rule: nothing safety-related stays behind the fold. If the contract
+    requires `safety` and it is empty, promote the first sentence of a folded
+    section that looks like a warning.
     """
     if payload.safety and payload.safety.strip():
         return
@@ -1572,7 +1272,9 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
                      detail_cls=None, readings: list[dict] | None = None,
                      language: str = "es",
                      raw_content: str = "",
-                     specialist: dict | None = None) -> tuple[Any, ValidationReport]:
+                     specialist: dict | None = None,
+                     vessel: "VesselContext | None" = None
+                     ) -> tuple[Any, ValidationReport]:
     """
     Apply the contract to the synthesizer payload.
 
@@ -1580,20 +1282,17 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
         payload:    SynthesizerOutput instance (mutated in place).
         contract:   ARCHETYPE_CONTRACTS entry.
         agents:     state["assigned_agents"], to resolve conditional safety.
-        detail_cls: details item class. If None it is inferred from the
-                    payload or falls back to a compatible dict-like.
+        detail_cls: details item class, inferred from the payload if None.
         readings:   the specialist's `test_interpretation`, raw.
         specialist: the sub-agents' merged JSON payload. `actions`, `safety`
                     and `constraint_conflict` come from here.
+        vessel:     pool/spa and indoor/outdoor. Selects the free chlorine
+                    floor and whether cyanuric acid is permitted, so passing
+                    None where a spa was meant produces a false clearance.
 
-    Returns:
-        (payload, report). If `report.needs_retry` is True the caller may
-        retry ONCE with a corrective instruction; otherwise it accepts the
-        deterministic degradation already applied.
-
-        There is no `report.panel_footer`: the panel foot is decided with
-        `panel_needs_footer(reconciled_readings)` and rendered in the node,
-        not here — this module does not compose the final surface.
+    Returns (payload, report). `report.needs_retry` lets the caller retry ONCE.
+    The panel footer is decided with `panel_needs_footer` in the node, not
+    here: this module does not compose the final surface.
     """
     report = ValidationReport(
         archetype=contract.get("_name", ""),
@@ -1609,17 +1308,17 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     report.visible_words_before = _visible_words(payload)
 
     # 0. Deterministic visible tier: `actions` and `safety` from the
-    #    specialist payload. Runs BEFORE normalization so the caps and the
-    #    budget apply to the final text, not to what gets discarded.
+    #    specialist payload. BEFORE normalization so the caps apply to the
+    #    final text, not to what gets discarded.
     if specialist:
         enforce_visible_tier(payload, specialist, language, report)
 
-    # 0b. The closure, if the disinfectant forces one. Runs over the RAW
-    #     readings — `closure_required` derives from the measured value, not
-    #     from anyone's status — and before normalization, so it takes a
-    #     bullet slot like any other action instead of sneaking past the cap.
+    # 0b. The closure, if the disinfectant forces one. Over the RAW readings,
+    #     and before normalization so it takes a bullet slot like any other
+    #     action instead of sneaking past the cap.
     if readings:
-        enforce_closure_action(payload, readings, language, report)
+        enforce_closure_action(payload, readings, language, report,
+                               vessel=vessel)
 
     # 1. Normalize bullets before measuring the budget. Only trimming point:
     #    what exceeds is relocated to `details`, never lost.
@@ -1631,15 +1330,13 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
         report.notes.append(f"safety required by: {trigger}")
         promote_safety_from_details(payload, report)
 
-    # 3. Readings BEFORE the budget: anything added has to compete for space
-    #    like the rest of the visible tier, not sneak past the cap.
-    #
-    #    Reconciliation against the published bands goes first: the panel is
-    #    built on the already-degraded readings, never on the raw ones. The
-    #    other way round, the line would assert a nonexistent code and the
-    #    degradation would arrive too late.
+    # 3. Readings BEFORE the budget: anything added competes for space like the
+    #    rest of the visible tier. Reconciliation goes first — the panel is
+    #    built on degraded readings, never on raw ones, or the line would
+    #    assert a nonexistent code and the degradation would arrive too late.
     if readings:
-        readings = reconcile_with_published_bands(readings, report)
+        readings = reconcile_with_published_bands(readings, report,
+                                                  vessel=vessel)
         enforce_visible_readings(
             payload, readings, language, report,
             conflict=(specialist or {}).get("constraint_conflict"),
@@ -1651,8 +1348,7 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     # 5. Prune empty sections.
     payload.details = [d for d in payload.details if d.body and d.body.strip()]
 
-    # 6. Visible-tier quality telemetry. Corrects nothing: measures how often
-    #    the prompt does not achieve what it asks for.
+    # 6. Visible-tier quality telemetry. Corrects nothing.
     report.safety_duplicates_action = safety_repeats_an_action(payload)
     if report.safety_duplicates_action:
         report.notes.append("safety repeats an action instead of adding something new")
@@ -1682,8 +1378,6 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
 # --------------------------------------------------------------------------
 
 def fallback_payload(raw_text: str, output_cls):
-    """
-    If structured output fails, the front end never sees a different format.
-    All the raw text goes into `answer`, unfolded and unvalidated.
-    """
+    """If structured output fails, the front end never sees a different
+    format. All the raw text goes into `answer`, unfolded and unvalidated."""
     return output_cls(answer=raw_text, actions=[], safety=None, details=[])

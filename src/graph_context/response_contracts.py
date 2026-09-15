@@ -536,3 +536,21 @@ def resolve_archetype_from_plan(
     
     # Resolver archetype
     return resolve_archetype(agents, is_oos)
+
+class VesselDeclaration(BaseModel):
+    """
+    The vessel the readings came from, as the specialist understood it.
+
+    This is not cosmetic metadata: it selects the free chlorine floor and
+    whether cyanuric acid is permitted at all. Leave an axis null when the
+    user did not say — a guess here silently moves a closure threshold.
+    """
+    kind: Literal["pool", "spa"] | None = Field(
+        default=None,
+        description="pool or spa. Null if the user did not specify.",
+    )
+    indoor: bool | None = Field(
+        default=None,
+        description="true if indoor/covered/enclosed, false if outdoor. "
+                    "Null if the user did not specify.",
+    )

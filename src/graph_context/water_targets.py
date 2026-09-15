@@ -53,8 +53,57 @@ sin volver a consultar. Al cambiar el corpus se regenera con:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+@dataclass(frozen=True)
+class VesselContext:
+    """
+    El vaso al que pertenece el panel.
+
+    Dos ejes independientes porque el corpus los trata por separado: el
+    mínimo de cloro libre depende de pileta/spa, y el cianúrico depende de
+    cubierto/descubierto Y de pileta/spa.
+
+    `None` en cualquiera de los dos significa NO SE SABE, que no es lo mismo
+    que un valor por defecto. Ver `for_vessel`.
+    """
+    kind: str | None = None       # "pool" | "spa"
+    indoor: bool | None = None    # True cubierto, False descubierto
+
+    def keys(self) -> tuple[str, ...]:
+        """Claves de override aplicables, de la MÁS específica a la menos."""
+        loc = None if self.indoor is None else ("indoor" if self.indoor else "outdoor")
+        salida: list[str] = []
+        if self.kind and loc:
+            salida.append(f"{self.kind}+{loc}")
+        if self.kind:
+            salida.append(self.kind)
+        if loc:
+            salida.append(loc)
+        return tuple(salida)
+
+
+UNKNOWN_VESSEL = VesselContext()
+
+
+@dataclass(frozen=True)
+class BandOverride:
+    """
+    Lo que cambia para un contexto. `None` hereda de la fila base.
+
+    No duplica la fila: una variante que solo mueve el piso declara el piso y
+    nada más, y el resto —unidad, node_id, verbatim, procedencia— sigue siendo
+    el de la transcripción original.
+    """
+    low: float | None = None
+    high: float | None = None
+    preferred_low: float | None = None
+    preferred_high: float | None = None
+    low_stabilized: float | None = None
+    #: El parámetro no debe estar presente en este vaso. Cualquier valor por
+    #: encima de cero es infracción y no hay banda que discutir.
+    prohibited: bool = False
+    note: str = ""
 
 @dataclass(frozen=True)
 class TargetBand:
@@ -83,6 +132,8 @@ class TargetBand:
     low_stabilized: float | None = None
     #: False cuando rellenar `operating_target` desde esta banda sería unsafe.
     fill_target: bool = True
+    prohibited: bool = False
+    by_vessel: tuple[tuple[str, "BandOverride"], ...] = ()
     fill_target_reason: str = ""
     node_id: str = ""
     source: str = ""
@@ -95,6 +146,43 @@ class TargetBand:
             [v for v in vals if v is not None] + list(self.extra_figures)
         )
 
+        
+    def for_vessel(self, vessel: "VesselContext | None") -> "TargetBand":
+                """
+                La banda resuelta para este vaso, o ella misma si no aplica ninguna.
+    
+                Se aplica UNA sola variante, la más específica que matchee. Acumular
+                overrides haría que el resultado dependiera del orden de la tupla, y
+                eso es justo el tipo de no-determinismo que este módulo elimina.
+                """
+                if vessel is None or not self.by_vessel:
+                    return self
+                overrides = dict(self.by_vessel)
+                for clave in vessel.keys():
+                    ov = overrides.get(clave)
+                    if ov is None:
+                        continue
+                    if ov.prohibited:
+                        return replace(
+                            self, low=None, high=0.0,
+                            preferred_low=None, preferred_high=None,
+                            low_stabilized=None, fill_target=False,
+                            prohibited=True,
+                            fill_target_reason=ov.note or self.fill_target_reason,
+                        )
+                    return replace(
+                        self,
+                        low=self.low if ov.low is None else ov.low,
+                        high=self.high if ov.high is None else ov.high,
+                        preferred_low=(self.preferred_low if ov.preferred_low is None
+                                    else ov.preferred_low),
+                        preferred_high=(self.preferred_high if ov.preferred_high is None
+                                        else ov.preferred_high),
+                        low_stabilized=(self.low_stabilized if ov.low_stabilized is None
+                                        else ov.low_stabilized),
+                    )
+                return self
+    
     def target_text(self) -> str | None:
         """La banda como texto, para `operating_target`. None si no se rellena."""
         if not self.fill_target:
@@ -128,6 +216,13 @@ WATER_TARGETS: dict[str, TargetBand] = {
         # diría 1–4 ppm y el operador reabriría con el agua sin desinfectar.
         fill_target=False,
         fill_target_reason="el objetivo escala con el cianúrico; ver fc_cya_proportional_target",
+        by_vessel=(
+            # "approximately 3 to 5 ppm in spas with a commonly cited 3 ppm
+            # minimum" — misma frase del verbatim, otra mitad.
+            ("spa", BandOverride(low=3.0, preferred_low=3.0, preferred_high=5.0,
+                                 low_stabilized=3.0,
+                                 note="mínimo de spa, 3 ppm")),
+        ),
         node_id="free_chlorine",
         source='CH19-19.1";CH02-2.2;CH11-11.6-free-chlorine-fc;CH31-31.3.1',
         verbatim=(
@@ -169,6 +264,14 @@ WATER_TARGETS: dict[str, TargetBand] = {
         # explícitamente como máximo— saliera "por encima del techo de 50".
         low=None, high=90.0, preferred_low=20.0, preferred_high=50.0,
         extra_figures=(0.0,),
+                by_vessel=(
+            # "zero indoors, and it is commonly prohibited in spas and
+            # increased-risk venues".
+            ("spa", BandOverride(prohibited=True,
+                                 note="el corpus lo da como prohibido en spa")),
+            ("indoor", BandOverride(prohibited=True,
+                                    note="el corpus lo da en cero en vaso cubierto")),
+        ),
         node_id="cyanuric_acid",
         source='CH19-19.1";CH13-13.2-what-cyanuric-acid-is-and-what-it-does;CH31-31.4',
         verbatim=(
@@ -266,9 +369,60 @@ def _canon(parameter: str) -> str:
     return _ALIAS.get(clave, clave)
 
 
-def target_band(parameter: str) -> TargetBand | None:
-    """La banda publicada para un parámetro, o None si el corpus no la trae."""
-    return WATER_TARGETS.get(_canon(parameter))
+@dataclass(frozen=True)
+class VesselContext:
+    """
+    El vaso al que pertenece el panel.
+
+    Dos ejes independientes porque el corpus los trata por separado: el
+    mínimo de cloro libre depende de pileta/spa, y el cianúrico depende de
+    cubierto/descubierto Y de pileta/spa.
+
+    `None` en cualquiera de los dos significa NO SE SABE, que no es lo mismo
+    que un valor por defecto. Ver `for_vessel`.
+    """
+    kind: str | None = None       # "pool" | "spa"
+    indoor: bool | None = None    # True cubierto, False descubierto
+
+    def keys(self) -> tuple[str, ...]:
+        """Claves de override aplicables, de la MÁS específica a la menos."""
+        loc = None if self.indoor is None else ("indoor" if self.indoor else "outdoor")
+        salida: list[str] = []
+        if self.kind and loc:
+            salida.append(f"{self.kind}+{loc}")
+        if self.kind:
+            salida.append(self.kind)
+        if loc:
+            salida.append(loc)
+        return tuple(salida)
+
+
+UNKNOWN_VESSEL = VesselContext()
+
+
+@dataclass(frozen=True)
+class BandOverride:
+    """
+    Lo que cambia para un contexto. `None` hereda de la fila base.
+
+    No duplica la fila: una variante que solo mueve el piso declara el piso y
+    nada más, y el resto —unidad, node_id, verbatim, procedencia— sigue siendo
+    el de la transcripción original.
+    """
+    low: float | None = None
+    high: float | None = None
+    preferred_low: float | None = None
+    preferred_high: float | None = None
+    low_stabilized: float | None = None
+    #: El parámetro no debe estar presente en este vaso. Cualquier valor por
+    #: encima de cero es infracción y no hay banda que discutir.
+    prohibited: bool = False
+    note: str = ""
+
+def target_band(parameter: str, vessel: "VesselContext | None" = None) -> TargetBand | None:
+    """La banda publicada para un parámetro en este vaso, o None si no está."""
+    banda = WATER_TARGETS.get(_canon(parameter))
+    return banda.for_vessel(vessel) if banda is not None else None
 
 
 #: Tolerancia de comparación. El especialista devuelve 7.8 y 90.0 tal cual,
@@ -276,7 +430,8 @@ def target_band(parameter: str) -> TargetBand | None:
 _EPS = 1e-6
 
 
-def is_published_figure(parameter: str, value) -> bool:
+def is_published_figure(parameter: str, value,
+                        vessel: "VesselContext | None" = None) -> bool:
     """
     ¿Este número es una cifra que el corpus publica como educativa?
 
@@ -285,7 +440,7 @@ def is_published_figure(parameter: str, value) -> bool:
     especialista recuperó un límite" de "el especialista reetiquetó un target",
     y hoy —con cero cotas normativas en el grafo— siempre es lo segundo.
     """
-    banda = target_band(parameter)
+    banda = target_band(parameter, vessel)
     if banda is None or value is None:
         return False
     try:
@@ -322,26 +477,10 @@ def _cya_presente(panel) -> bool:
     return False
 
 
-def resolve_status(parameter: str, measured, stabilized: bool = False):
-    """
-    Deriva (status, bound) de la banda publicada. Ignora lo que dijo el agente.
-
-    Es el arreglo de la oscilación. El paso anterior sustituyó el LÍMITE pero
-    dejó el `status` en manos del modelo, y con eso una alcalinidad de 130
-    etiquetada `above_maximum` se renderizaba "por encima del techo de 180"
-    con 130 < 180: el mismo panel daba veredictos distintos en corridas
-    distintas sobre los mismos números.
-
-    `bound` es la cifra contra la que se reporta, y es SIEMPRE una banda
-    educativa publicada — nunca un límite de código, que el corpus no trae.
-    El fraseo que la acompaña lo elige _BANDA_PHRASING y lo dice.
-
-    Devuelve (None, None) cuando no hay con qué juzgar: parámetro fuera de la
-    tabla, o valor no numérico. None NO es "in_range". Declarar en rango un
-    parámetro cuya banda no conocemos es dar un alta que nadie emitió, y es la
-    dirección en la que un fallo manda gente al agua.
-    """
-    banda = target_band(parameter)
+def resolve_status(parameter: str, measured, stabilized: bool = False,
+                   vessel: "VesselContext | None" = None):
+    
+    banda = target_band(parameter, vessel)
     if banda is None:
         return None, None
     try:
@@ -349,9 +488,18 @@ def resolve_status(parameter: str, measured, stabilized: bool = False):
     except (TypeError, ValueError):
         return None, None
 
+    if banda.prohibited:
+        # Cero no es "al borde del techo": es el único estado aceptable.
+        # Sin esta rama, un cianúrico de 0 en vaso cubierto salía `at_ceiling`
+        # y se renderizaba "compliant, no margin at the ceiling".
+        return ("above_maximum", 0.0) if v > _EPS else ("in_range", None)
+
     lo = banda.low
     if stabilized and banda.low_stabilized is not None:
-        lo = banda.low_stabilized
+        # MÁXIMO, no reemplazo. En un spa el piso base ya es 3.0 y el piso
+        # estabilizado de pileta es 2.0: reemplazar lo BAJABA, dejando pasar
+        # un spa con 2.2 ppm de cloro libre como suficiente.
+        lo = banda.low_stabilized if lo is None else max(lo, banda.low_stabilized)
     hi = banda.high
 
     if lo is not None:
@@ -365,12 +513,11 @@ def resolve_status(parameter: str, measured, stabilized: bool = False):
         if abs(v - hi) < _EPS:
             return "at_ceiling", hi
     if lo is None and hi is None:
-        # Fila presente pero sin banda a propósito (TDS). No hay veredicto.
         return None, None
     return "in_range", None
 
 
-def resolve_panel(panel):
+def resolve_panel(panel, vessel: "VesselContext | None" = None):
     """
     (status, bound) para cada lectura, resueltos con el contexto del panel.
 
@@ -380,7 +527,8 @@ def resolve_panel(panel):
     """
     estabilizado = _cya_presente(panel)
     return [
-        resolve_status(str(r.get("parameter", "")), r.get("measured"), estabilizado)
+        resolve_status(str(r.get("parameter", "")), r.get("measured"),
+                       estabilizado, vessel)
         if isinstance(r, dict) else (None, None)
         for r in panel or []
     ]
@@ -394,7 +542,7 @@ def resolve_panel(panel):
 CLOSURE_PARAMETERS = ("free chlorine",)
 
 
-def closure_required(panel) -> bool:
+def closure_required(panel, vessel: "VesselContext | None" = None) -> bool:
     """
     ¿El panel obliga a cerrar, por debajo del mínimo publicado de desinfectante?
 
@@ -403,7 +551,7 @@ def closure_required(panel) -> bool:
     pasada: el turno que más necesita el cierre es justo aquel en el que el
     especialista se equivoca de etiqueta.
     """
-    for r, (status, _) in zip(panel or [], resolve_panel(panel)):
+    for r, (status, _) in zip(panel or [], resolve_panel(panel, vessel)):
         if not isinstance(r, dict):
             continue
         if status == "below_minimum" and \

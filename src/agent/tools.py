@@ -106,17 +106,40 @@ def _gate(tool_name: str, arg_repr: str) -> str | None:
     budget = _TOOL_BUDGETS.get(tool_name, 1)
 
     if len(previous) >= budget:
-        hechas = "; ".join(repr(p) for p in previous)
+        used = "; ".join(repr(p) for p in previous)
+        remaining = [
+            t for t, b in _TOOL_BUDGETS.items()
+            if t != tool_name and len(calls.get(t, [])) < b
+        ]
+        if remaining:
+            guidance = (
+                "Use the evidence you already have, answer with "
+                'evidence_status = "insufficient_evidence" naming the gap, or '
+                "query one of the tools that still has budget: "
+                + ", ".join(f"`{t}`" for t in remaining) + "."
+            )
+        else:
+            # Observed in trace 32e037ad and in the spa variant: the agent
+            # tried all three retrieval tools one after another, each already
+            # exhausted, spending a full model call per attempt. The previous
+            # message said "switch to another tool" without knowing whether
+            # any were left, and the agent did exactly that.
+            guidance = (
+                "NO RETRIEVAL LEFT: every query tool has exhausted its budget "
+                "for this task. Trying another one returns this same message. "
+                "There is nothing further to consult: answer NOW with the "
+                "evidence you gathered, or with "
+                'evidence_status = "insufficient_evidence" naming the gap '
+                "precisely. That last one is a CORRECT and COMPLETE answer, "
+                "not a failure."
+            )
         return (
-            f"BUDGET_EXHAUSTED — `{tool_name}` ya se usó {len(previous)}/{budget} "
-            f"veces en esta tarea, con: {hechas}\n"
-            "Este límite lo aplica el sistema, no es una sugerencia: una nueva "
-            "llamada no se ejecuta. El índice es semántico — reformular busca el "
-            "mismo espacio y devuelve el mismo material.\n"
-            "Usa la evidencia que ya tienes, cambia a otra herramienta, o "
-            "responde con evidence_status = \"insufficient_evidence\" nombrando "
-            "el gap con precisión. Eso último es una respuesta CORRECTA y "
-            "COMPLETA, no un fallo."
+            f"BUDGET_EXHAUSTED — `{tool_name}` has been used "
+            f"{len(previous)}/{budget} times in this task, with: {used}\n"
+            "This limit is enforced by the system, it is not a suggestion: a "
+            "new call does not execute. The index is semantic — rephrasing "
+            "searches the same space and returns the same material.\n"
+            + guidance
         )
 
     previous.append(arg_repr)
