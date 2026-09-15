@@ -21,7 +21,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 import concurrent.futures
 
-
+from dataclasses import asdict
+from ..graph_context.vessel_detect import detect_vessel, VesselContext
 from .state import PoolAgentState, ExecutionStep, AgentResult
 # PLANNER_PROMPT ya no se importa acá: lo pone create_planner_chain como
 # system del template. Importarlo era lo que invitaba a mandarlo otra vez.
@@ -949,22 +950,7 @@ def _to_synthesizer(
     error: str | None = None,
     force_archetype: str | None = None,
 ) -> Command:
-    """
-    Única salida del orchestrator: fan-out a synthesizer y suggester.
-
-    Los dos corren en el mismo superstep. El suggester ya no depende de
-    `state["response"]` — su materia prima es `agent_results`, igual que
-    la del synthesizer (ver _suggester_material). Con eso sus ~1.2s salen
-    del camino crítico del usuario.
-
-    Escrituras disjuntas: synthesizer toca response, validation, archetype
-    y messages; suggester solo suggestions. `response` y `suggestions` son
-    NotRequired sin reducer, así que un solapamiento daría InvalidUpdateError.
-
-    `general` y `oos` siguen con goto="synthesizer" directo, no pasan por
-    acá: fuerzan archetype a conversational/oos, los dos suprimidos, y
-    `general` no hace retrieval. Paralelizarlos no ahorraría nada.
-    """
+    
     update = _resolve_and_update_archetype(
         execution_plan, agent_results, extra_results, error, force_archetype
     )
@@ -994,23 +980,26 @@ def build_context_node(
         else "planner"
     )
 
+    texto_usuario = next(
+        (m.content for m in reversed(state.get("messages") or [])
+         if getattr(m, "type", "") == "human"),
+        "",
+    )
+    # `content` llega como lista de bloques en entradas multimodales.
+    if not isinstance(texto_usuario, str):
+        texto_usuario = " ".join(
+            b.get("text", "") for b in texto_usuario if isinstance(b, dict)
+        )
+
     return Command(
         update={
             "turn_started_at": time.time(),
-            # Reset de turno. `agent_results` ya se limpia en el planner vía
-            # el centinela None de merge_agent_results; estos canales no
-            # tenían equivalente y sobrevivían en el checkpointer.
-            #
-            # `error` es el que más dolía: should_suggest corta con cualquier
-            # error, así que un solo turno fallido dejaba el thread sin chips
-            # de forma permanente.
-            #
-            # Va acá y no en el planner porque este nodo es la única puerta
-            # de entrada garantizada del turno — el planner puede no llegar
-            # a ejecutarse, o fallar antes de emitir su update.
+            
             "error": None,
             "planner_error": None,
             "archetype": None,
+            
+            "vessel": asdict(detect_vessel(texto_usuario)),
             "misroute_retries": 0,
             "response": None,
             "validation": {},
@@ -1018,7 +1007,6 @@ def build_context_node(
         },
         goto=next_node,
     )
-
 # ================================================================
 # SUMMARIZE MEMORY NODE
 # ================================================================
@@ -1724,22 +1712,16 @@ def synthesizer(state: PoolAgentState) -> dict:
     # Se parsea UNA vez, fuera de la closure: el reintento vuelve a entrar y
     # volver a parsear el mismo JSON no cambia el resultado.
     specialist = _specialist_payload(agent_results)
+    vessel = VesselContext(**(state.get("vessel") or {}))
 
     def _aplicar_contrato(p):
         return enforce_contract(
             p, contract, agents, detail_cls=DetailSection,
-            # El panel COMPLETO, también los parámetros en rango: el operador
-            # entregó siete lecturas y ver las siete confirma que se leyeron
-            # todas. El fraseo de cada una lo arma el validador por plantilla
-            # elegida por su `status` — el modelo no lo redacta.
             readings=_readings_from_results(agent_results),
             language=language_code,
-            # Para detectar cantidades que el synthesizer no pudo haber sacado
-            # de ningún sitio. Ver unsupported_numbers.
             raw_content=raw_content,
-            # Mismo principio que `readings`: el modelo escribe la prosa, el
-            # código arma `actions` y `safety` desde el dato del especialista.
             specialist=specialist,
+            vessel=vessel,
         )
 
     try:

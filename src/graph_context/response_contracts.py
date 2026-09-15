@@ -192,15 +192,6 @@ AGENT_TO_ARCHETYPE: dict[str, str] = {
 PRECEDENCE: list[str] = [
     "critical",
     "calculation",
-    # explanation por encima de assessment: cuando la pregunta es conceptual,
-    # el molde de assessment ("veredicto de qué está fuera de rango, luego la
-    # primera verificación") no tiene hueco para la respuesta. Medido: a la
-    # pregunta "qué fracción del cloro libre es HOCl a pH 7.2 frente a 7.8" el
-    # especialista recuperó la fórmula y el pKa correctos, y la respuesta final
-    # fue un rango operativo sin un solo número — el contrato empujaba a
-    # producir un veredicto y unas acciones, así que los números sobraban.
-    # Por debajo de critical y calculation: una advertencia y un número
-    # calculado siguen mandando sobre una explicación.
     "explanation",
     "assessment",
     "procedure",

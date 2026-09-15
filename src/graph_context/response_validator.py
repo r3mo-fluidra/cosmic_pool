@@ -805,13 +805,15 @@ _CYA_NAMES = ("cyanuric", "cianúrico", "cianurico", "stabilizer")
 #: The closure action, by template. Does not depend on the specialist
 #: remembering to include it.
 _CLOSURE = {
-    "en": "Close the pool to bathers immediately",
-    "es": "Cerrá la pileta a los bañistas de inmediato",
+    "en": {
+        "pool": "Close the pool to bathers immediately",
+        "spa":  "Close the spa to bathers immediately",
+    }
 }
 
-#: Leading time clause: "After dilution,". Trimmed BEFORE classifying, because
-#: it names a step that is NOT this item's — without it, "After dilution,
-#: retest all parameters" read as corrective and the filter did nothing.
+_VESSEL_NOUNS = frozenset({"pool", "spa", "pilet", "vesse", "tub"})
+
+
 _LEADING_TIME_CLAUSE_RE = re.compile(
     r"^\s*(?:after|before|once|following|when|"
     r"luego\s+de|después\s+de|despues\s+de|antes\s+de|una\s+vez)\b"
@@ -951,19 +953,13 @@ def render_safety(specialist: dict, language: str = "es") -> str | None:
 def enforce_closure_action(payload, readings, language: str,
                            report: ValidationReport,
                            vessel: "VesselContext | None" = None) -> None:
-    """
-    Insert the closure action when the readings force one.
-
-    `closure_required` derives from the measured value and the vessel's band,
-    not from anyone's status: in trace 35b8a774 the specialist said
-    `status: "closed"` and the pool bands said 2.2 ppm was fine, so nothing
-    fired. With `vessel` the spa floor of 3 ppm applies and it does.
-    """
+    
     if not closure_required(readings, vessel):
         return
 
-    line = _lang_table(_CLOSURE, language)
-    tokens = _content_tokens(line)
+    kind = (vessel.kind if vessel and vessel.kind else "pool")
+    line = _lang_table(_CLOSURE, language).get(kind, _lang_table(_CLOSURE, language)["pool"])
+    tokens = _content_tokens(line) - _VESSEL_NOUNS
 
     def _is_just_the_closure(action: str) -> bool:
         """
@@ -977,7 +973,7 @@ def enforce_closure_action(payload, readings, language: str,
         visible tier. What distinguishes them is a corrective verb other than
         closing, not word count.
         """
-        other = _content_tokens(action)
+        other = _content_tokens(action) - _VESSEL_NOUNS
         if not tokens or not other:
             return False
         has_closure = len(tokens & other) / len(tokens) >= _DUPLICATE_THRESHOLD

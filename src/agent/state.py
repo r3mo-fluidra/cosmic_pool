@@ -248,6 +248,7 @@ class PoolAgentState(TypedDict):
 
     # ── Planner output ───────────────────────────────────────────────
     detected_language: NotRequired[str]
+    vessel: Annotated[dict, lambda a, b: b]
     execution_plan: NotRequired[List[ExecutionStep]]
     missing_inputs: NotRequired[List[str]]  # ← añádelo al state también
 
