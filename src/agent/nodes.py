@@ -663,7 +663,7 @@ def _readings_from_results(agent_results: dict) -> list[dict]:
 #: visible. Listas se concatenan en orden de ejecución; escalares se quedan con
 #: el primer valor no nulo — el primer step es el que el planner puso primero.
 _SPECIALIST_LISTS = ("recommendations", "chemical_actions", "test_interpretation")
-_SPECIALIST_SCALARS = ("likely_cause",)
+_SPECIALIST_SCALARS = ("likely_cause", "constraint_conflict")
 
 
 def _specialist_payload(agent_results: dict) -> dict:
