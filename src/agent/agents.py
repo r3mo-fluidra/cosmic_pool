@@ -185,6 +185,7 @@ def _initialize():
         tools=MATH_TOOLS,
         name="math",
         system_prompt=build_agent_prompt(AGENT_REGISTRY[MATH], "math"),
+        middleware=[ToolBudgetMiddleware()],
     )
 
     _agents = {

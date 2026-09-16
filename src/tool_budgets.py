@@ -15,15 +15,25 @@ admite un intento por slug + un segundo sobre los seeds reales tras el miss.
 """
 
 RETRIEVAL_TOOL_BUDGETS: dict[str, int] = {
-    "vector_search": 1,
-    # 2 y no 1: una sola búsqueda de seeds no cubre un panel de análisis. En el
-    # trace 6660e14f el agente recibió siete parámetros, gastó su única llamada
-    # en una consulta general, y se quedó sin poder resolver los límites de
-    # cianúrico, alcalinidad y dureza — de ahí salió un regulatory_limit
-    # inventado para la dureza. Después pidió la tool dos veces más y el gate
-    # se las rechazó: ~4s de round trips por evidencia que no podía obtener.
-    "search_seed_nodes": 2,
-    "expand_subgraph": 2,
+    # --- Retrieval (Neo4j + Qdrant) --------------------------------------
+    "vector_search":      1,
+    "search_seed_nodes":  2,
+    "expand_subgraph":    2,
+
+    # --- Math (catálogo determinista) ------------------------------------
+    # Sin entradas acá el default de `_gate` es 1 por tool, y MATH no puede
+    # ni resolver un STATUS: CANDIDATES. Dimensionado sobre el trace
+    # 3562130029, donde murió contra el recursion_limit a los 13 calls.
+    "resolve_formula":    3,
+    "calculate":          2,
+    "get_constant":       3,
+    "convert_units":      2,
+    "lookup_product":     1,
+    "check_plausibility": 2,
 }
 
-RETRIEVAL_TOTAL = sum(RETRIEVAL_TOOL_BUDGETS.values())
+#: Solo las tools de retrieval. `RETRIEVAL_TOTAL` sumaba el dict entero y
+#: pasó a contar las de math en cuanto entraron: 18 donde debía decir 5.
+_RETRIEVAL_TOOLS = ("vector_search", "search_seed_nodes", "expand_subgraph")
+
+RETRIEVAL_TOTAL = sum(RETRIEVAL_TOOL_BUDGETS[t] for t in _RETRIEVAL_TOOLS)

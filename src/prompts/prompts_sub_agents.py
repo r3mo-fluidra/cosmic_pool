@@ -81,6 +81,28 @@ def _contract(*extra_fields: str) -> str:
         return BASE_OUTPUT_CONTRACT
     return BASE_OUTPUT_CONTRACT + " Additionally return: " + ", ".join(extra_fields) + "."
 
+CALC_REQUEST_FIELD = (
+    "calculation_request (null when nothing needs computing, or: intent, "
+    "known_inputs, missing_inputs). This is an executable handoff, not a note: "
+    "when missing_inputs is empty the system runs the calculation and the "
+    "number reaches the user in this same turn. "
+    "known_inputs: every value the computation needs, taken from what the user "
+    "reported or what you established yourself — put the unit in the key name "
+    "(pool_volume_gallons, target_fc_ppm). A target you derived is a known "
+    "input, not a missing one. "
+    "missing_inputs: ONLY values that have no standard default and that you "
+    "cannot establish — a volume the user never gave, a current reading nobody "
+    "measured. Anything with a conventional default is NOT missing: state the "
+    "default under `assumptions` and put the assumed value in known_inputs. "
+    "Product type and strength always have a default; so does any target you "
+    "are the one who sets. "
+    "A non-empty missing_inputs blocks the calculation entirely, so listing "
+    "something there that you could have assumed means the user gets a target "
+    "with no dose. When you hold everything needed, missing_inputs is [] — the "
+    "expected case, not a claim of omniscience. "
+    "This field is narrower than `missing_information`, which stays free to "
+    "record anything you could not establish."
+)
 
 # --- Shared tool instructions ---------------------------------------------
 
@@ -243,7 +265,8 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "more demanding' — so a number you find here is almost never a code "
         "bound, and the band it belongs to goes in operating_target. Relabeling "
         "a published target as a limit, or inventing one stricter than the "
-        "code, makes a compliant facility look in breach: the same error as "
+        "code, makes a compliant facility look in breach: the same error as ",
+        CALC_REQUEST_FIELD,
         "calling a ceiling a violation. Null is the correct, complete answer "
         "when no source names a code — the system reports the reading against "
         "the published band instead, which it can do only if you do not claim "
@@ -335,6 +358,7 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
         "Assess flow rate, turnover, and circulation adequacy for the venue.",
         "Evaluate hydraulic relationships between pumps, piping, flow, and system resistance.",
         "Identify the pump operating point and flow-related performance problems.",
+        CALC_REQUEST_FIELD,
         "Determine whether installed circulation and filtration components are "
         "appropriately matched to the required flow.",
         "Identify likely hydraulic causes of inadequate circulation, excessive flow, "
@@ -595,7 +619,8 @@ CONTAMINATION_AGENT_CONFIG = AgentConfig(
         "classification, doses applied, contact time achieved, verification "
         "readings, reopening decision). Do not design the form or assert that a "
         "code requires it.",
-        "Identify when the incident requires the health authority, a wildlife "
+        "Identify when the incident requires the health authority, a wildlife ",
+        CALC_REQUEST_FIELD,
         "professional, or other qualified personnel.",
     ),
     excluded_tasks=(
@@ -644,6 +669,7 @@ FACILITY_DESIGN_AGENT_CONFIG = AgentConfig(
     ),
     responsibilities=(
         "Evaluate proposed designs for circulation, filtration, and hydraulic adequacy.",
+        CALC_REQUEST_FIELD,
         "Recommend and size equipment for design specifications and target flow.",
         "Assess layout, geometry, decking, and access against design best practice.",
         "Identify design flaws, inefficiencies, and features that will be difficult to operate.",

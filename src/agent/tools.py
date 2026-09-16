@@ -48,6 +48,10 @@ _TOOL_CALLS: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "retrieval_tool_calls", default=None
 )
 
+_EXECUTED_TOOL_CALLS: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "executed_tool_calls", default=None
+)
+
 _TURN_THREAD_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "retrieval_turn_thread_id", default=""
 )
@@ -70,6 +74,7 @@ def begin_tool_scope(thread_id: str = "") -> None:
     que las tools registran los nodos tocados.
     """
     _TOOL_CALLS.set({})
+    _EXECUTED_TOOL_CALLS.set({})
     _TURN_THREAD_ID.set(thread_id or "")
 
 

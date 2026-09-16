@@ -70,37 +70,15 @@ logger = logging.getLogger(__name__)
 
 TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
-# El suggester corre en fan-out con el synthesizer (_to_synthesizer emite
-# goto=["synthesizer", "suggester"]), pero fan-out NO es "fuera del camino
-# crítico": las dos ramas van a END y el turno no cierra hasta que las dos
-# terminan. Con 25s el suggester podía dominar un turno cuya respuesta ya
-# estaba lista. 6s es el techo de lo que un chip opcional puede costar;
-# pasado eso degrada a [] como cualquier otro fallo del nodo.
+
 _SUGGESTER_DEADLINE_S = 6
 _MAX_MISROUTE_RETRIES = 2
 
-# ── Techos de wall-clock ─────────────────────────────────────────────────
-# Una sola declaración. Había DOS: 60.0 acá arriba y 120.0 doscientas líneas
-# más abajo, que la pisaba en silencio. Leyendo el fichero por orden parecía
-# que el techo por paso era 60s; el efectivo era 120.
-#
-# Van acá, en el bloque de configuración, y no abajo, porque `_direct_answer`
-# las usa como valor por defecto de un parámetro — y eso se evalúa al importar
-# el módulo, no al llamar la función. Declararlas después de esa firma es un
-# NameError en el import.
-#
-# STEP < TURN a propósito: cuando eran iguales, el presupuesto por paso salía
-# de min(STEP, remaining) == remaining, así que un solo sub-agente lento podía
-# consumir el turno entero y dejar al synthesizer sin tiempo para redactar. El
-# usuario esperaba dos minutos para recibir el payload estático de "servicio
-# no disponible".
-#
-# Con 75/110: un step agota 75s y quedan 35s para el resto del plan y la
-# síntesis. Números a calibrar contra la distribución real de Langfuse.
 STEP_DEADLINE_S = 75.0    # techo por sub-agente
 TURN_DEADLINE_S = 110.0   # techo por turno completo
 MIN_STEP_BUDGET_S = 8.0   # si queda menos que esto, no arranques otro paso
 
+_SYNTHETIC_MATH_STEP = 90
 # ================================================================
 # ROUTING: planner → general | oos | orchestrator
 # ================================================================
@@ -314,6 +292,10 @@ _SOFT_ERROR_PREFIXES = ("MISSING_INPUTS", "CANNOT_COMPUTE", "NO_GRAPH_COVERAGE",
 _CODE_FENCE_RE = re.compile(r"^\s*```(?:json|markdown)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
 
 
+
+
+
+
 def _strip_code_fences(text: str) -> str:
     """
     Red de seguridad: los sub-agentes emiten BASE_OUTPUT_CONTRACT envuelto en
@@ -496,7 +478,55 @@ def _step_num(key: str) -> int | None:
         return int(str(key).split("_", 1)[1])
     except (IndexError, ValueError):
         return None
- 
+
+
+def _pending_calculations(agent_results: dict) -> list[dict]:
+    
+    if not agent_results:
+        return []
+
+    found: list[tuple[int, dict]] = []
+
+    for key, result in agent_results.items():
+        num = _step_num(key)
+        if num is None:
+            continue
+
+        # Ya corrió math en este turno -> no re-disparar.
+        if _normalize_agent(_field(result, "agent")) == MATH_SLUG:
+            return []
+
+        if _status(result) != "ok":
+            continue
+
+        raw = _field(result, "output") or ""
+        if "calculation_request" not in raw:
+            continue  # evita un json.loads por cada resultado
+
+        try:
+            payload = json.loads(_strip_code_fences(raw))
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("math hop: output de %s no parseable como JSON", key)
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        req = payload.get("calculation_request")
+        if not isinstance(req, dict):
+            continue  # null es el caso normal: no hay nada que calcular
+
+        # missing_inputs puede venir list ([]) o dict ({}) según el agente.
+        if req.get("missing_inputs"):
+            continue
+
+        if not req.get("known_inputs"):
+            continue  # sobre vacío, no hay con qué calcular
+
+        found.append((num, req))
+
+    found.sort(key=lambda p: p[0])
+    return [req for _, req in found]
 
 def _skipped_result(step, reason: str):
     from .state import AgentResult  # ajustá el import
@@ -664,7 +694,18 @@ def _readings_from_results(agent_results: dict) -> list[dict]:
 #: visible. Listas se concatenan en orden de ejecución; escalares se quedan con
 #: el primer valor no nulo — el primer step es el que el planner puso primero.
 _SPECIALIST_LISTS = ("recommendations", "chemical_actions", "test_interpretation")
-_SPECIALIST_SCALARS = ("likely_cause", "constraint_conflict")
+_SPECIALIST_SCALARS = (
+    "likely_cause",
+    "constraint_conflict",
+    "remediation_target",
+    # Solo MATH los emite. Sin ellos, el número calculado llega al validador
+    # únicamente diluido dentro de `recommendations`, al final de la fila por
+    # orden de step, y `normalize_actions` lo recorta hacia `details`: en el
+    # trace dd928251 los 18.5 gal de hipoclorito quedaron dentro de un
+    # acordeón cerrado después de 58s de cálculo correcto.
+    "result",
+    "formula_name",
+)
 
 
 def _specialist_payload(agent_results: dict) -> dict:
@@ -1157,6 +1198,71 @@ def orchestrator(state: PoolAgentState) -> Command:
     pending = [s for s in execution_plan if s.step not in done]
  
     if not pending:
+        # --- Math hop determinístico -------------------------------------
+        # Un especialista sin tools de cálculo emitió calculation_request y
+        # el planner no programó un step de math. Sin esto, el sobre llega
+        # cerrado al synthesizer: el usuario recibe "hipercloriná a 20 ppm"
+        # sin saber cuántas libras. Se despacha por run_step normal, así que
+        # hereda deadline, fallbacks y formato de AgentResult.
+        calcs = _pending_calculations(agent_results)
+        if calcs:
+            remaining = _remaining_budget(state)
+            if remaining > MIN_STEP_BUDGET_S:
+                # El primero por número de step: el dueño del incidente
+                # (contamination en step_1) manda sobre el duplicado que
+                # chemistry pueda haber emitido después.
+                req = calcs[0]
+
+                user_message = ""
+                for msg in reversed(state.get("messages", [])):
+                    if getattr(msg, "type", None) == "human":
+                        user_message = _extract_text(msg.content)
+                        break
+
+                math_step = ExecutionStep(
+                    step=_SYNTHETIC_MATH_STEP,
+                    task=(
+                        "Resolve the calculation requested by the specialist. "
+                        f"Intent: {req.get('intent', 'numeric computation')}"
+                    ),
+                    assigned_agent="math",
+                    oos=False,
+                    depends_on=[],
+                    explanatory=False,
+                )
+
+                logger.info(
+                    "math hop: despachando cálculo sintético (%s)",
+                    req.get("intent", "")[:80],
+                )
+
+                return Command(
+                    update={},
+                    goto=[
+                        Send(
+                            "run_step",
+                            {
+                                "step": math_step,
+                                "user_message": user_message,
+                                "deadline_s": max(
+                                    MIN_STEP_BUDGET_S,
+                                    min(STEP_DEADLINE_S, remaining),
+                                ),
+                                "agent_results": agent_results,
+                                "conversation_summary": state.get(
+                                    "conversation_summary", ""
+                                ),
+                                # Lo consume _build_agent_context (paso 4).
+                                "calculation_request": req,
+                            },
+                        )
+                    ],
+                )
+
+            logger.info(
+                "math hop: omitido, quedan %.1fs de budget de turno", remaining
+            )
+
         return _to_synthesizer(
             execution_plan, agent_results
         )
@@ -1321,20 +1427,20 @@ def run_step_node(payload: dict, config: RunnableConfig) -> Command:
     user_message = payload["user_message"]
     deadline_s = float(payload.get("deadline_s", STEP_DEADLINE_S))
     step_key = f"step_{step.step}"
-    
+    calc_req = payload.get("calculation_request")
     # ✅ OBTENER EL ESTADO COMPLETO DEL PAYLOAD
     # Asumiendo que el Send desde orchestrator incluye el estado
     state = {
         "agent_results": payload.get("agent_results") or {},
         "conversation_summary": payload.get("conversation_summary") or "",
+        "calculation_request": calc_req,
     }
  
-    # Gate de MATH. `_normalize_agent` y MATH_SLUG, no `== MATH`: la constante
-    # MATH vale "Pool Math Agent" y assigned_agent vale "math", así que la
-    # comparación era False SIEMPRE y este gate no se ejecutó nunca. Una
-    # consulta de dosificación sin números se comía un ReAct loop completo
-    # para concluir lo que este `if` resuelve en microsegundos.
-    if _normalize_agent(step.assigned_agent) == MATH_SLUG and not math_inputs_present(user_message):
+    if (
+        _normalize_agent(step.assigned_agent) == MATH_SLUG
+        and not calc_req
+        and not math_inputs_present(user_message)
+    ):
         return Command(
             update={"agent_results": {step_key: missing_inputs_result(step, user_message)}},
             goto="orchestrator",
@@ -1440,6 +1546,29 @@ def _build_agent_context(state: dict, step: ExecutionStep, user_message: str) ->
         "",
     ]
 
+    # 1b. Sobre del math hop. Los valores acá NO están en el mensaje del
+    #     usuario: los estableció el especialista al resolver el incidente
+    #     (un target de 20 ppm que salió de evaluar el CYA, por ejemplo).
+    #     Sin esta inyección el agente de math ve una tarea sin números.
+    calc_req = state.get("calculation_request")
+    if isinstance(calc_req, dict) and calc_req.get("known_inputs"):
+        context_parts.append("--- CALCULATION REQUEST (from the owning specialist) ---")
+        intent = calc_req.get("intent")
+        if intent:
+            context_parts.append(f"Intent: {intent}")
+        context_parts.append("Known inputs:")
+        for name, value in calc_req["known_inputs"].items():
+            context_parts.append(f"  - {name}: {value}")
+        context_parts += [
+            "",
+            "These values are authoritative and already validated. Use them as "
+            "given; do not re-derive them from the user message, which may not "
+            "contain them. Every input needed is listed above -- if a formula "
+            "you select requires a value that is not there, report "
+            "CANNOT_COMPUTE naming the missing value instead of assuming one.",
+            "",
+        ]
+
     # 2. Resultados de pasos de los que depende
     if step.depends_on:
         context_parts.append("--- PREVIOUS STEP RESULTS (Dependencies) ---")
@@ -1479,7 +1608,7 @@ def _build_agent_context(state: dict, step: ExecutionStep, user_message: str) ->
                     context_parts.append("")
     
     # 4. Instrucción sobre cómo usar el contexto
-    if step.depends_on or previous_step_num >= 1:
+    if step.depends_on or (previous_step_num >= 1 and f"step_{previous_step_num}" in agent_results):
         context_parts.append("--- INSTRUCTIONS ---")
         context_parts.append(
             "Apply the Context Sharing rules from your system prompt to the "

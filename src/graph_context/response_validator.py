@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
+import logging
+
 
 from .water_targets import (
     closure_required,
@@ -22,6 +24,8 @@ from .water_targets import (
     target_band,
     VesselContext,
 )
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -71,6 +75,7 @@ class ValidationReport:
     archetype: str = ""
     visible_words_before: int = 0
     visible_words_after: int = 0
+    remediation_target_inserted: bool = False
     budget: int = 0
     overflowed: bool = False
     actions_relocated: int = 0
@@ -177,6 +182,18 @@ _NO_VERDICT = {
     "en": "reported; no code bound available",
     "es": "reportado; sin límite normativo disponible",
 }
+
+_REMEDIATION = {
+    "en": {
+        "with_time": "Raise {param} to {conc} and hold for {time}.",
+        "no_time":   "Raise {param} to {conc}.",
+    },
+    "es": {
+        "with_time": "Elevar {param} a {conc} y mantener durante {time}.",
+        "no_time":   "Elevar {param} a {conc}.",
+    },
+}
+
 _REPORTED_WITH_TARGET = {
     "en": "reported; operating target {target}",
     "es": "reportado; objetivo operativo {target}",
@@ -985,6 +1002,118 @@ def enforce_closure_action(payload, readings, language: str,
     report.notes.append("closure inserted by code: disinfectant below minimum")
 
 
+def _fmt_target_value(value, unit_hint: str = "ppm") -> str | None:
+    """
+    `concentration` llega como 20.0 en una corrida y como
+    "20 ppm (after lowering CYA to <= 15 ppm)" en otra. Deriva del esquema,
+    no de un caso raro: el contrato declara el campo sin tipo ni unidad.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return f"{_format_number(value)} {unit_hint}"
+    text = str(value).strip()
+    return text or None
+
+
+def _fmt_contact_time(value) -> str | None:
+    """
+    Numérico se interpreta en MINUTOS: es lo que emitió el especialista
+    (1680.0 = 28 h) y lo que usa el catálogo de CT en ppm-min. Un valor
+    menor a 60 se lee como horas, porque ningún hold de desinfección dura
+    menos de una hora y "45 minutos" casi siempre sería "45 horas" mal
+    tipado.
+
+    Heurística, no contrato. El arreglo de fondo es declarar la unidad en
+    el campo; mientras no esté, esto evita mostrar "28 minutos".
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        minutes = float(value)
+        if minutes < 60:
+            return f"{_format_number(minutes)} hours"
+        hours = minutes / 60
+        if abs(hours - round(hours)) < 0.01:
+            return f"{int(round(hours))} hours"
+        return f"{_format_number(round(hours, 1))} hours"
+    text = str(value).strip()
+    return text or None
+
+
+def render_remediation_target(specialist: dict, language: str) -> str | None:
+    """La línea del objetivo de remediación, o None si no hay uno utilizable."""
+    target = specialist.get("remediation_target")
+    if not isinstance(target, dict):
+        return None
+
+    conc = _fmt_target_value(target.get("concentration"))
+    if not conc:
+        return None
+
+    param = _format_parameter(str(target.get("parameter") or "free chlorine"))
+    time = _fmt_contact_time(target.get("contact_time"))
+    phrases = _lang_table(_REMEDIATION, language)
+
+    if time:
+        return phrases["with_time"].format(param=param, conc=conc, time=time)
+    return phrases["no_time"].format(param=param, conc=conc)
+
+
+def enforce_remediation_target(payload, specialist: dict, language: str,
+                               report: ValidationReport) -> None:
+    """
+    Garantiza que el objetivo de remediación esté en el tier visible.
+
+    Va en la posición 1, detrás del cierre: `normalize_actions` recorta por
+    el final, así que una acción al principio no se puede relocalizar a
+    `details`. Un turno crítico no puede decirle al operador que
+    hipercloriné sin decirle a cuánto.
+    """
+    logger.warning(
+        "REMED: llamada | tipo=%s | valor=%r | acciones=%d",
+        type(specialist.get("remediation_target")).__name__,
+        specialist.get("remediation_target"),
+        len(payload.actions or []),
+    )
+    line = render_remediation_target(specialist, language)
+    if not line:
+        return
+
+    target = specialist.get("remediation_target") or {}
+    conc = _fmt_target_value(target.get("concentration"))
+    numero = re.search(r"\d+(?:[.,]\d+)?", conc or "")
+    patron = (
+        re.compile(rf"\b{re.escape(numero.group(0))}\s*ppm\b", re.I)
+        if numero else None
+    )
+
+    acciones = list(payload.actions or [])
+
+    # El dedupe corre contra lo que va a SOBREVIVIR, no contra la lista
+    # entera. En el trace 5608d16d la recomendación del especialista traía
+    # el target, el dedupe la dio por cubierta, y normalize_actions la
+    # relocalizó a `details` por venir séptima de trece: el turno salió sin
+    # target visible justo cuando esta función existía para evitarlo.
+    supervivientes = acciones[:MAX_ACTIONS]
+
+    if patron:
+        for i, accion in enumerate(supervivientes):
+            if patron.search(accion):
+                # Ya está y va a sobrevivir: nada que insertar.
+                return
+        # Está, pero fuera del corte: la subimos en vez de duplicarla.
+        for i, accion in enumerate(acciones[MAX_ACTIONS:], start=MAX_ACTIONS):
+            if patron.search(accion):
+                acciones.pop(i)
+                line = accion          # el texto del especialista gana
+                break
+
+    posicion = min(len(acciones), MAX_ACTIONS - 1)
+    payload.actions = acciones[:posicion] + [line] + acciones[posicion:]
+    report.remediation_target_inserted = True
+    report.notes.append("remediation target inserted by code")
+
 def enforce_visible_tier(payload, specialist: dict, language: str,
                          report: ValidationReport) -> None:
     """`actions` and `safety` from the specialist payload. Actions only in
@@ -1303,18 +1432,18 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
 
     report.visible_words_before = _visible_words(payload)
 
-    # 0. Deterministic visible tier: `actions` and `safety` from the
+     # 0. Deterministic visible tier: `actions` and `safety` from the
     #    specialist payload. BEFORE normalization so the caps apply to the
     #    final text, not to what gets discarded.
     if specialist:
         enforce_visible_tier(payload, specialist, language, report)
 
-    # 0b. The closure, if the disinfectant forces one. Over the RAW readings,
-    #     and before normalization so it takes a bullet slot like any other
-    #     action instead of sneaking past the cap.
-    if readings:
-        enforce_closure_action(payload, readings, language, report,
-                               vessel=vessel)
+    # 0a. El objetivo de remediación, sobre las acciones que 0 acaba de
+    #     poner. El orden importa: con la lista vacía la inserción es lo
+    #     único que sobrevive, y el trace 907cfabe salió con una sola
+    #     acción -- clorar a 20 ppm, sin el cierre ni el drenaje delante.
+    if specialist:
+        enforce_remediation_target(payload, specialist, language, report)
 
     # 1. Normalize bullets before measuring the budget. Only trimming point:
     #    what exceeds is relocated to `details`, never lost.

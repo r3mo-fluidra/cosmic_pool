@@ -18,7 +18,7 @@ Every literal that the validator enforces is imported, never retyped.
 from __future__ import annotations
 
 
-from ..tool_budgets import RETRIEVAL_TOOL_BUDGETS, RETRIEVAL_TOTAL
+from ..tool_budgets import RETRIEVAL_TOOL_BUDGETS
 from ..graph_context.response_contracts import get_contract, NO_CAP
 from ..graph_context.response_validator import (
     MAX_ACTIONS,

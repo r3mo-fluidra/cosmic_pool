@@ -1,34 +1,10 @@
-"""
-middleware.py
-=============
-Presupuesto de tools aplicado en la capa de binding, no en la tool.
-
-`_gate` en tools.py rechaza la llamada DESPUÉS de que el modelo ya gastó
-el razonamiento para decidirla. El trace 6e13ad4c lo muestra: 4.09s y 645
-tokens de reasoning para pedir un `vector_search` que el gate contestó en
-0ms con BUDGET_EXHAUSTED. Ese costo no lo recupera ningún mensaje de
-rechazo, porque se paga antes de que la tool exista.
-
-Este middleware filtra las tools agotadas de `request.tools` antes de cada
-llamada al modelo. La tool no está en el schema, así que no se puede pedir.
-Cuando no queda ninguna, el modelo no tiene otra salida que responder.
-
-El conteo sale de `request.messages`, no del ContextVar de tools.py: el
-middleware corre en el mismo thread que la llamada al modelo, así que no
-depende de que el contexto cruce el _STEP_POOL de nodes.py.
-
-Sin anotaciones de tipo a propósito: los nombres de ModelRequest/ModelResponse
-se movieron entre versiones de langchain 1.x y un import roto acá tumbaría
-el módulo entero de agentes.
-"""
-
 from __future__ import annotations
 
 import logging
 
 from langchain.agents.middleware import AgentMiddleware
 
-from .tools import _TOOL_BUDGETS
+from .tools import _TOOL_BUDGETS, _EXECUTED_TOOL_CALLS
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +21,7 @@ def _calls_so_far(messages) -> dict[str, int]:
 
 
 class ToolBudgetMiddleware(AgentMiddleware):
-    """
-    Quita del scope las tools cuyo presupuesto ya se consumió.
-
-    Una tool que no figura en _TOOL_BUDGETS no tiene límite. Deliberado:
-    el middleware es inerte para MATH_TOOLS y para pool_general_knowledge,
-    que llevan su propio control.
-    """
+    
 
     name = "tool_budget"
 
@@ -73,4 +43,45 @@ class ToolBudgetMiddleware(AgentMiddleware):
             )
             request = request.override(tools=allowed)
 
+        return handler(request)
+
+    def wrap_tool_call(self, request, handler):
+        """
+        bloquea la ejecución de la tool si ya se gastó su presupuesto en este step.
+        """
+        logger.info(
+            "wrap_tool_call: name=%r scope=%s",
+            getattr(getattr(request, "tool", None), "name", None)
+            or (getattr(request, "tool_call", None) or {}).get("name"),
+            "activo" if _EXECUTED_TOOL_CALLS.get() is not None else "None",
+        )
+        name = getattr(getattr(request, "tool", None), "name", None) \
+            or (request.tool_call or {}).get("name")
+
+        if not name:
+            return handler(request)
+
+        budget = _TOOL_BUDGETS.get(name)
+        if budget is None:
+            return handler(request)          # tool sin presupuesto declarado
+
+        executed = _EXECUTED_TOOL_CALLS.get()
+        if executed is None:
+            return handler(request)          # sin scope de step activo
+
+        used = executed.get(name, 0)
+        if used >= budget:
+            logger.info(
+                "tool_budget: %s bloqueada en ejecución (%d/%d)",
+                name, used, budget,
+            )
+            return (
+                f"BUDGET_EXHAUSTED — `{name}` already ran {used}/{budget} "
+                "times in this task. This call did not execute and neither "
+                "will the next one. Report what you have already established, "
+                "with its assumptions. A partial result with its provenance "
+                "is a valid answer; stopping with nothing is not."
+            )
+
+        executed[name] = used + 1
         return handler(request)
