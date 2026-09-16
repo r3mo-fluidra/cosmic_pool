@@ -50,7 +50,7 @@ from ..graph_context.response_contracts import (
     usable_results, DetailSection, agents_from_results
 )
 from ..graph_context.response_validator import enforce_contract, fallback_payload
-from ..prompts.prompt_archetype import build_synthesizer_archetype_section
+from ..prompts.prompt_archetype import build_synthesizer_archetype_section, build_test_readings_section
 from ..graph_context.suggestions import (
     SUPERNODES,
     Suggestion,
@@ -1791,15 +1791,16 @@ def synthesizer(state: PoolAgentState) -> dict:
         archetype, agents, usable = "conversational", [], []
 
     contract = get_contract(archetype)
-
+    specialist = _specialist_payload(agent_results)
     # ============================================================
     # PROMPT
     # ============================================================
     system_content = SYNTHESIZER_PROMPT.format(
         archetype_section=build_synthesizer_archetype_section(archetype, agents),
+        test_readings_section=build_test_readings_section(
+            bool(specialist.get("test_interpretation"))
+        ),
         oos_instruction=oos_instruction,
-        language=language_instruction,
-        raw_content=raw_content,
     )
     llm_messages = [
         SystemMessage(content=system_content),
@@ -1840,7 +1841,7 @@ def synthesizer(state: PoolAgentState) -> dict:
     # ============================================================
     # Se parsea UNA vez, fuera de la closure: el reintento vuelve a entrar y
     # volver a parsear el mismo JSON no cambia el resultado.
-    specialist = _specialist_payload(agent_results)
+    
     vessel = VesselContext(**(state.get("vessel") or {}))
 
     def _aplicar_contrato(p):

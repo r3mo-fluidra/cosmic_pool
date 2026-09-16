@@ -122,6 +122,61 @@ line rather than fabricating content.
   tier 1 and its first sentence becomes the visible warning.
 * "{OVERFLOW_LABEL}" is reserved for the enforcement layer. Do not emit it."""
 
+def build_test_readings_section(has_test_interpretation: bool) -> str:
+    """
+    Return the reading-panel rules, or an empty string when the turn has none.
+
+    The panel rules are ~55 lines of parameter-grading guidance that only make
+    sense when a specialist emitted `test_interpretation`. Sending them on a
+    hydraulics or equipment turn spends tokens on vocabulary from a domain the
+    turn does not touch, and that vocabulary leaks: trace b986219a produced
+    "calculate your actual turnover and dosing" on a payload that never
+    mentioned dosing.
+    """
+    if not has_test_interpretation:
+        return ""
+
+    return """## Test readings (`test_interpretation`)
+When the raw content carries per-parameter entries, they are the answer, not
+background. Three rules, and the first one is not negotiable.
+
+**1. You never grade a reading. The panel is generated, not written.**
+
+Each parameter's line is built by template from its own `status`,
+`measured` and `regulatory_limit`, after you finish. `at_floor` and
+`at_ceiling` come out as compliant-with-no-margin, because a value sitting on
+a published bound complies with it.
+
+So do not re-state that grading in prose, and above all do not intensify it:
+no "extremely high" over a value the specialist called `at_ceiling`, no
+"critical" over an "elevated". Implying a breach that did not happen
+misstates the facility's regulatory position, and an operator who repeats it
+to an inspector reports a violation that does not exist.
+
+The sharpest form of that error is calling a number a code violation. The
+knowledge base publishes educational bands, not code bounds — it says so on
+every page that carries a figure — so "above the published range" is a claim
+you can support and "above the legal maximum" is not. Where a panel line reads
+"educational range, not a code limit", your prose may not upgrade it. The
+finding is still real and still worth stating plainly; what you do not have is
+the authority to attach to it. The limit that governs is the local code, and
+this system does not know it.
+
+What `answer` is for is what the panel cannot say: which single reading forces
+the closure, what mechanism connects them, and what produced the state.
+
+**2. Attribute a closure to the reading that causes it.** When several
+parameters are off but only one triggers the stop, say which one. Listing a
+compliant parameter among the reasons for a closure is the same error as
+calling it a violation.
+
+**3. `operating_target` is distinct from `regulatory_limit`.** The target is
+the number the operator dials to; the limit is the floor they must not cross.
+If the two differ, the target is what they act on and the limit is context. A
+missing input that blocks a dose does not block stating the target.
+
+"""
+
 
 # =====================================================================
 # Sub-agente
@@ -226,9 +281,10 @@ verdict means the verdict comes first, before any qualification.
 def build_synthesizer_archetype_section(archetype: str,
                                         agents: list[str] | None = None) -> str:
     """
-    `archetype` comes from resolve_archetype(...) at turn time, not from a
-    static agent config. `agents` is state["assigned_agents"], used to collapse
-    a "conditional" safety requirement the same way the validator will.
+        `archetype` comes from resolve_archetype(...) at turn time, not from a
+    static agent config. `agents` is the list of agent names that produced
+    usable results this turn, used to collapse a "conditional" safety
+    requirement the same way the validator will.
     """
     c = get_contract(archetype)
     required = c.get("safety_required", False)

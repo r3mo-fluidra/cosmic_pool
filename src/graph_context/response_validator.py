@@ -1115,13 +1115,37 @@ def enforce_remediation_target(payload, specialist: dict, language: str,
     report.notes.append("remediation target inserted by code")
 
 def enforce_visible_tier(payload, specialist: dict, language: str,
-                         report: ValidationReport) -> None:
-    """`actions` and `safety` from the specialist payload. Actions only in
-    English — the specialist's text is English and translating it is the
-    model's job."""
+                         report: ValidationReport,
+                         actions_optional: bool = False) -> None:
+    """
+    Replace `actions` and `safety` with the specialist's own text.
+
+    The specialist already writes imperative prose. Re-generating it through
+    the synthesizer buys nothing and opens room to invent, so where the
+    specialist has actions they win verbatim.
+
+    `actions_optional` archetypes are the exception. There the prompt tells the
+    model that actions should usually be empty, so an empty list is a decision,
+    not an omission: injecting the specialist's recommendations over it
+    reintroduces exactly the unrequested-chores tail the archetype exists to
+    prevent. When the model did emit actions they are still replaced verbatim —
+    the archetype governs WHETHER actions appear, never their wording.
+
+    Actions are replaced on English turns only. The specialist writes English
+    and translating it is the model's job, so on other languages the model's
+    own wording survives unchecked. `report.actions_rendered` records which
+    path ran.
+    """
     if language == "en":
         actions = render_actions(specialist)
-        if actions:
+        suppressed = actions_optional and not payload.actions
+
+        if actions and suppressed:
+            report.notes.append(
+                f"actions_optional archetype and the model emitted none: "
+                f"{len(actions)} specialist recommendation(s) withheld"
+            )
+        elif actions:
             report.actions_rendered = True
             dropped = [a for a in (payload.actions or []) if a not in actions]
             if dropped:
@@ -1436,7 +1460,10 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     #    specialist payload. BEFORE normalization so the caps apply to the
     #    final text, not to what gets discarded.
     if specialist:
-        enforce_visible_tier(payload, specialist, language, report)
+        enforce_visible_tier(
+            payload, specialist, language, report,
+            actions_optional=bool(contract.get("actions_optional")),
+        )
 
     # 0a. El objetivo de remediación, sobre las acciones que 0 acaba de
     #     poner. El orden importa: con la lista vacía la inserción es lo
