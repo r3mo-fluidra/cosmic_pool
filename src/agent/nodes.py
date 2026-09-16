@@ -83,6 +83,13 @@ _SYNTHETIC_MATH_STEP = 90
 # ROUTING: planner → general | oos | orchestrator
 # ================================================================
 
+_MATH_DELEGATED_AGENTS = frozenset(
+    node_name
+    for node_name, registry_key in SPECIALIST_SPECS
+    if AGENT_REGISTRY[registry_key].delegates_arithmetic
+)
+
+
 GENERAL_AGENT = "general"
 OOS_AGENT = "oos"
 # Roster válido para recuperar un MISROUTE. Sin whitelist, un nombre
@@ -481,7 +488,16 @@ def _step_num(key: str) -> int | None:
 
 
 def _pending_calculations(agent_results: dict) -> list[dict]:
-    
+    """
+    Collect the `calculation_request` payloads that justify a MATH hop.
+
+    Returns them ordered by the step that raised them. Returns an empty list
+    when MATH already ran this turn, so the hop never fires twice.
+
+    A request is skipped when its agent is not in _MATH_DELEGATED_AGENTS, when
+    the step did not finish ok, when `missing_inputs` is non-empty (nothing to
+    compute yet), or when `known_inputs` is empty (nothing to compute from).
+    """
     if not agent_results:
         return []
 
@@ -492,11 +508,20 @@ def _pending_calculations(agent_results: dict) -> list[dict]:
         if num is None:
             continue
 
+        agent = _normalize_agent(_field(result, "agent"))
+
         # Ya corrió math en este turno -> no re-disparar.
-        if _normalize_agent(_field(result, "agent")) == MATH_SLUG:
+        if agent == MATH_SLUG:
             return []
 
         if _status(result) != "ok":
+            continue
+
+        if agent not in _MATH_DELEGATED_AGENTS:
+            logger.debug(
+                "math hop: %s no delega aritmética; calculation_request ignorado",
+                agent,
+            )
             continue
 
         raw = _field(result, "output") or ""
@@ -527,18 +552,6 @@ def _pending_calculations(agent_results: dict) -> list[dict]:
 
     found.sort(key=lambda p: p[0])
     return [req for _, req in found]
-
-def _skipped_result(step, reason: str):
-    from .state import AgentResult  # ajustá el import
- 
-    return AgentResult(
-        agent=step.assigned_agent,
-        step=step.step,
-        output="",
-        sources=[],
-        error=reason,
-        status="skipped",
-    )
  
 
 def _remaining_budget(state) -> float:
@@ -1801,6 +1814,8 @@ def synthesizer(state: PoolAgentState) -> dict:
             bool(specialist.get("test_interpretation"))
         ),
         oos_instruction=oos_instruction,
+        language=language_instruction,
+        raw_content=raw_content,
     )
     llm_messages = [
         SystemMessage(content=system_content),

@@ -13,6 +13,7 @@ class AgentConfig:
     output_contract: str
     archetype: str
     tool_budget: int = 6  
+    delegates_arithmetic: bool = False
 
 """
 Optimized agent configurations for the Pool Chemistry Assistant.
@@ -80,6 +81,25 @@ def _contract(*extra_fields: str) -> str:
     if not extra_fields:
         return BASE_OUTPUT_CONTRACT
     return BASE_OUTPUT_CONTRACT + " Additionally return: " + ", ".join(extra_fields) + "."
+
+
+OWN_ARITHMETIC_RULE = (
+    "Compute the numbers your own assessment needs, and show the work. A "
+    "single-formula result over values the user gave you — a turnover from a "
+    "volume and a flow, a head loss from a length and a rate — is yours to "
+    "state, not to hand off. "
+    "Resolve the formula from the knowledge base and carry its source_id. "
+    "Never state a formula from memory. Report the inputs with their units, "
+    "the substituted expression, and the result with its unit, so the "
+    "arithmetic can be checked without being rerun. "
+    "Compute only over inputs you actually hold. A value nobody gave you and "
+    "that has no conventional default is not something to estimate: leave the "
+    "number unstated, list the input under `missing_information`, and give the "
+    "part of the assessment that does not depend on it. An invented input is "
+    "worse than no number. Where a value has a conventional default, state the "
+    "default under `assumptions` and compute with it."
+)
+
 
 CALC_REQUEST_FIELD = (
     "calculation_request (null when nothing needs computing, or: intent, "
@@ -289,11 +309,11 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
         "what interference, and how to confirm)",
         "chemical_actions (ordered list: action, chemical, rationale, and "
         "order_rationale when doing this first changes how well the next one works)",
-        "calculation_request (null, or: intent, known_inputs, missing_inputs)",
         "retest_guidance",
     ),
     archetype="assessment",
-    tool_budget= 6
+    tool_budget= 6,
+    delegates_arithmetic=True,
 )
 
 
@@ -358,17 +378,17 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
         "Assess flow rate, turnover, and circulation adequacy for the venue.",
         "Evaluate hydraulic relationships between pumps, piping, flow, and system resistance.",
         "Identify the pump operating point and flow-related performance problems.",
-        CALC_REQUEST_FIELD,
+        OWN_ARITHMETIC_RULE,
         "Determine whether installed circulation and filtration components are "
         "appropriately matched to the required flow.",
         "Identify likely hydraulic causes of inadequate circulation, excessive flow, "
         "pressure change, or short-circuiting.",
-        "State the inputs required for any hydraulic calculation and delegate the arithmetic.",
     ),
     excluded_tasks=(
-        f"Numeric flow, turnover, volume, and head-loss results -- owned by the {MATH}.",
         f"Hydraulic design of a new or renovated system -- owned by the {FACILITY_DESIGN}.",
-        f"Equipment condition, wear, fouling, and repair -- owned by the {EQUIPMENT}.",
+        f"Equipment condition, wear, fouling, and repair -- owned by the {EQUIPMENT}. "
+        f"You may name wear or restriction as a hydraulic cause of an observed flow "
+        f"deficit; the condition verdict and the repair decision are not yours.",
         f"Water chemistry diagnosis and chemical dosing -- owned by the {CHEMISTRY}.",
         f"Chemical feeder and controller configuration -- owned by the {CHEMISTRY} "
         f"(setpoints) and the {EQUIPMENT} (hardware).",
@@ -382,10 +402,11 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
         "hydraulic_assessment",
         "required_flow_basis (venue type, turnover requirement, source)",
         "observed_conditions",
-        "calculation_request (null, or: intent, known_inputs, missing_inputs)",
+        "calculations (list, empty when none: quantity, formula_name, source_id, "
+        "inputs (name, value, unit), expression, result (value, unit))",
     ),
     archetype="assessment",
-    tool_budget= 6 
+    tool_budget= 6
 )
 
 
@@ -619,9 +640,9 @@ CONTAMINATION_AGENT_CONFIG = AgentConfig(
         "classification, doses applied, contact time achieved, verification "
         "readings, reopening decision). Do not design the form or assert that a "
         "code requires it.",
-        "Identify when the incident requires the health authority, a wildlife ",
-        CALC_REQUEST_FIELD,
+        "Identify when the incident requires the health authority, a wildlife "
         "professional, or other qualified personnel.",
+        CALC_REQUEST_FIELD,
     ),
     excluded_tasks=(
         f"Routine chemistry, water balance, and non-incident disinfection -- owned "
@@ -651,7 +672,8 @@ CONTAMINATION_AGENT_CONFIG = AgentConfig(
         "documentation_required",
     ),
     archetype="critical",
-    tool_budget= 6 
+    tool_budget= 6 ,
+    delegates_arithmetic=True,
 )
 
 
@@ -698,7 +720,8 @@ FACILITY_DESIGN_AGENT_CONFIG = AgentConfig(
         "calculation_request (null, or: intent, known_inputs, missing_inputs)",
     ),
     archetype="assessment",
-    tool_budget= 6 
+    tool_budget= 6 ,
+    delegates_arithmetic=True,
 )
 
 
@@ -843,7 +866,8 @@ RECOVERY_AGENT_CONFIG = AgentConfig(
         "systems_requiring_inspection",
     ),
     archetype="procedure",
-    tool_budget= 6 
+    tool_budget= 6 ,
+    delegates_arithmetic=True,
 )
 
 
