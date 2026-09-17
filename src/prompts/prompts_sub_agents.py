@@ -64,16 +64,26 @@ OUT_OF_SCOPE = (
 
 # --- Shared output contract ------------------------------------------------
 
-BASE_OUTPUT_CONTRACT = (
-    "Return a JSON object with: status, findings, evidence, assumptions, "
-    "missing_information, recommendations, escalation_required, "
-    "escalation_target."
+
+_ESCALATION_TARGETS = (
+    "chemistry, equipment, hydraulics, operations, compliance, contamination, "
+    "facility_design, safety, recovery, records"
 )
 
 BASE_OUTPUT_CONTRACT = (
     "Return a JSON object with: status, evidence_status, findings, evidence, "
     "assumptions, missing_information, recommendations, escalation_required, "
-    "escalation_target."
+    "escalation_target.\n"
+    "`escalation_target` is null unless `escalation_required` is true. When it "
+    "is true, the value is EXACTLY ONE of these strings and nothing else — no "
+    "prose, no title, no slash-separated pair:\n"
+    f"  {_ESCALATION_TARGETS}\n"
+    "  on_site_professional — a licensed or certified human the operator must "
+    "call in, when no specialist in the list can resolve it.\n"
+    "Never name the operator themselves: they are the reader, not an "
+    "escalation target. 'Pool Equipment Agent' and 'Pool Operator / Certified "
+    "Pool Service Professional' are both malformed; the first is `equipment`, "
+    "the second is `on_site_professional`."
 )
 
 def _contract(*extra_fields: str) -> str:
@@ -84,22 +94,28 @@ def _contract(*extra_fields: str) -> str:
 
 
 OWN_ARITHMETIC_RULE = (
-    "Compute the numbers your own assessment needs, and show the work. A "
-    "single-formula result over values the user gave you — a turnover from a "
-    "volume and a flow, a head loss from a length and a rate — is yours to "
-    "state, not to hand off. "
-    "Resolve the formula from the knowledge base and carry its source_id. "
-    "Never state a formula from memory. Report the inputs with their units, "
-    "the substituted expression, and the result with its unit, so the "
-    "arithmetic can be checked without being rerun. "
     "Compute only over inputs you actually hold. A value nobody gave you and "
     "that has no conventional default is not something to estimate: leave the "
     "number unstated, list the input under `missing_information`, and give the "
     "part of the assessment that does not depend on it. An invented input is "
     "worse than no number. Where a value has a conventional default, state the "
-    "default under `assumptions` and compute with it."
+    "default under `assumptions` and compute with it. "
+    "Every number you arrive at by arithmetic gets an entry in `calculations` — "
+    "no exception for a figure that is a step toward your conclusion rather "
+    "than the conclusion itself. A head loss you derived on the way to naming a "
+    "restriction is still a derived number, and the reader who wants to check "
+    "it has nowhere else to look. Stating it in prose alone leaves the field "
+    "empty and the arithmetic unauditable. `calculations` is empty only when "
+    "you performed no arithmetic at all."
 )
 
+CALCULATIONS_FIELD = (
+    "calculations (REQUIRED, one entry per number you derived by arithmetic, "
+    "including intermediate figures: quantity, formula_name, source_id, "
+    "inputs (name, value, unit), expression, result (value, unit). Empty list "
+    "ONLY when you performed no arithmetic. formula_name must be the name the "
+    "source carries — never a name you coined for a rearrangement of it)"
+)
 
 CALC_REQUEST_FIELD = (
     "calculation_request (null when nothing needs computing, or: intent, "
@@ -274,7 +290,14 @@ CHEMISTRY_AGENT_CONFIG = AgentConfig(
     ),
     tool_instructions=tool_instructions_AA ,
     output_contract=_contract(
-        "test_interpretation — ONE ENTRY PER PARAMETER RECEIVED, none omitted: "
+        "test_interpretation — ONE ENTRY PER PARAMETER RECEIVED, none omitted. "
+        "RECEIVED means the user stated a number for it in this turn. A "
+        "parameter you wish you had is NOT received: it belongs in "
+        "`missing_information` and nowhere else. If the user stated no "
+        "readings at all, this field is `[]` — an entry with measured=null "
+        "is never valid, and a turn with no numbers does not get a table of "
+        "empty rows. `status` is one of the five values below and never "
+        "'missing'. Entries: "
         "parameter, measured, regulatory_limit, operating_target, "
         "status (below_minimum | at_floor | in_range | at_ceiling | above_maximum), "
         "source_id for each bound. "
@@ -333,6 +356,7 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
         "State the maintenance procedure and the service interval for a specific "
         "component, with the basis for the interval. Operations assembles intervals "
         "into a program; you supply the per-component figure.",
+        OWN_ARITHMETIC_RULE,
         "Provide operator-level repair and adjustment guidance.",
         "Identify replacement parts, consumables, media, and their specifications.",
         "Assess condition and calibration needs of chemical feeders, controllers, and probes.",
@@ -343,7 +367,6 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
         f"Equipment selection for a new build or renovation -- owned by the "
         f"{FACILITY_DESIGN}.",
         f"Water chemistry diagnosis and chemical setpoints -- owned by the {CHEMISTRY}.",
-        f"All arithmetic -- owned by the {MATH}.",
         f"Assembling intervals into a calendar, rotation, or daily operating routine "
         f"-- owned by the {OPERATIONS}.",
         OUT_OF_SCOPE,
@@ -353,10 +376,8 @@ EQUIPMENT_AGENT_CONFIG = AgentConfig(
     ),
     tool_instructions=tool_instructions_symptom ,
     output_contract=_contract(
-        "suspected_components (ordered by likelihood)",
-        "diagnostic_steps",
         "maintenance_actions",
-        "parts (name, specification, quantity)",
+        CALCULATIONS_FIELD,
     ),
     archetype="procedure", 
     tool_budget= 6 
@@ -402,8 +423,7 @@ HYDRAULICS_AGENT_CONFIG = AgentConfig(
         "hydraulic_assessment",
         "required_flow_basis (venue type, turnover requirement, source)",
         "observed_conditions",
-        "calculations (list, empty when none: quantity, formula_name, source_id, "
-        "inputs (name, value, unit), expression, result (value, unit))",
+        CALCULATIONS_FIELD,
     ),
     archetype="assessment",
     tool_budget= 6
@@ -482,6 +502,7 @@ OPERATIONS_AGENT_CONFIG = AgentConfig(
         "Assemble component service intervals supplied by other agents into a "
         "preventive maintenance program with an owner and a cadence. Do not "
         "originate an interval yourself.",
+        OWN_ARITHMETIC_RULE,
         "Advise on water-quality management strategy at the program level "
         "(testing frequency, monitoring cadence, seasonal adjustment).",
         "Identify operational best practices and common operator errors.",
@@ -490,7 +511,6 @@ OPERATIONS_AGENT_CONFIG = AgentConfig(
     excluded_tasks=(
         f"Record formats, log design, retention, and inspection documentation -- "
         f"owned by the {RECORDS}.",
-        f"All calculation -- owned by the {MATH}.",
         f"Water chemistry diagnosis and treatment -- owned by the {CHEMISTRY}.",
         f"Equipment fault diagnosis and repair -- owned by the {EQUIPMENT}.",
         f"Flow and turnover assessment -- owned by the {HYDRAULICS}.",
@@ -507,6 +527,7 @@ OPERATIONS_AGENT_CONFIG = AgentConfig(
         "operational_guidance",
         "schedule (task, frequency, responsible_role)",
         "best_practices",
+        CALCULATIONS_FIELD,
     ),
     archetype="procedure",
     tool_budget= 6 
@@ -742,6 +763,7 @@ SAFETY_AGENT_CONFIG = AgentConfig(
         "Guide emergency action plan structure, drills, rescue equipment, and first aid readiness.",
         "Advise on entrapment and drain-cover safety requirements.",
         "Recommend safety equipment and signage for the venue type.",
+        OWN_ARITHMETIC_RULE,
         "Advise on illness prevention, bather hygiene, and surveillance for "
         "recreational water illness before any incident occurs.",
         "Advise on chemical handling, storage, spill response, ventilation, and PPE "
@@ -760,7 +782,6 @@ SAFETY_AGENT_CONFIG = AgentConfig(
         f"and worn, not what goes in the water.",
         f"Equipment repair and hydraulic assessment -- owned by the {EQUIPMENT} and "
         f"the {HYDRAULICS}.",
-        f"All calculation, including bather load -- owned by the {MATH}.",
         f"Whether a safety measure satisfies a specific code -- owned by the {COMPLIANCE}.",
         f"Physical design and construction of barriers and drains -- owned by the "
         f"{FACILITY_DESIGN}.",
@@ -774,6 +795,7 @@ SAFETY_AGENT_CONFIG = AgentConfig(
         "hazards (hazard, exposure, mitigation)",
         "required_equipment",
         "emergency_procedures",
+        CALCULATIONS_FIELD,
     ),
     archetype="reference",
     tool_budget= 6 
@@ -805,7 +827,6 @@ RECORDS_AGENT_CONFIG = AgentConfig(
         f"The operating routine that generates the records -- owned by the {OPERATIONS}.",
         f"Interpreting the technical content of a record (whether a logged reading "
         f"is a problem) -- owned by the relevant specialist agent.",
-        f"All calculation -- owned by the {MATH}.",
         OUT_OF_SCOPE,
     ),
     tools=(

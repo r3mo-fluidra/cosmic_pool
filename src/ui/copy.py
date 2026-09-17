@@ -158,7 +158,7 @@ AGENT_COPY: dict[str, dict[str, str]] = {
         "recovery": "Working out the next steps…",
         "records": "Checking the records…",
         "math": "Running the numbers…",
-        "ooo": "Seeing what I can help with…",
+        "oos": "Seeing what I can help with…",
         "_fallback": "Looking into it…",
     },
     "es": {
@@ -174,7 +174,7 @@ AGENT_COPY: dict[str, dict[str, str]] = {
         "recovery": "Definiendo los próximos pasos…",
         "records": "Revisando los registros…",
         "math": "Haciendo los cálculos…",
-        "ooo": "Viendo en qué puedo ayudarte…",
+        "oos": "Viendo en qué puedo ayudarte…",
         "_fallback": "Revisando…",
     },
 }
@@ -214,7 +214,43 @@ ACTION_COPY: dict[str, dict[str, str]] = {
     },
 }
 
-
+#: One line per retrieval or computation tool, so the wait names the work
+#: instead of freezing on the agent's own line for fifteen seconds. Keys are
+#: the tool function names in src/agent/tools.py and src/tools_math/tools.py —
+#: read from there, never written to.
+#:
+#: `_writing` is not a tool: it is the specialist composing its findings once
+#: the tools are done, which is the longest single block of the turn.
+TOOL_COPY: dict[str, dict[str, str]] = {
+    "en": {
+        "vector_search": "Reading the manual…",
+        "search_seed_nodes": "Finding the related parts…",
+        "expand_subgraph": "Tracing the connections…",
+        "resolve_formula": "Finding the right formula…",
+        "get_constant": "Looking up the constants…",
+        "convert_units": "Converting the units…",
+        "lookup_product": "Looking up the product…",
+        "calculate": "Doing the math…",
+        "check_plausibility": "Sanity-checking the result…",
+        "pool_general_knowledge": "Looking it up…",
+        "_writing": "Putting the findings together…",
+        "_fallback": "Working on it…",
+    },
+    "es": {
+        "vector_search": "Leyendo el manual…",
+        "search_seed_nodes": "Buscando las partes relacionadas…",
+        "expand_subgraph": "Siguiendo las conexiones…",
+        "resolve_formula": "Buscando la fórmula…",
+        "get_constant": "Buscando las constantes…",
+        "convert_units": "Convirtiendo las unidades…",
+        "lookup_product": "Buscando el producto…",
+        "calculate": "Haciendo la cuenta…",
+        "check_plausibility": "Verificando el resultado…",
+        "pool_general_knowledge": "Buscando la respuesta…",
+        "_writing": "Reuniendo los hallazgos…",
+        "_fallback": "Trabajando en eso…",
+    },
+}
 #: The follow-up a thumbs-down opens: the prompt, the two field labels, the
 #: placeholder, the two controls, and the two acknowledgements.
 #:
@@ -349,6 +385,16 @@ def agent_line(language: str, agent: str) -> str:
     table = AGENT_COPY.get(language, AGENT_COPY["en"])
     return table.get(agent) or table["_fallback"]
 
+def tool_line(language: str, tool: str) -> str:
+    """
+    The status line for a tool call, by the tool's function name.
+
+    Same two fallbacks as `agent_line`: unknown language, then unknown tool.
+    A status line is never worth failing a turn over, and the backend's tool
+    list can grow without this file.
+    """
+    table = TOOL_COPY.get(language, TOOL_COPY["en"])
+    return table.get(tool) or table["_fallback"]
 
 def status_line(language: str, stage: str) -> str:
     """

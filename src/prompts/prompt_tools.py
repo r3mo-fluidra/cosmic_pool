@@ -172,6 +172,14 @@ a confirmation step.
 | Venue-specific advice          | HAS_RISK, REQUIRES_FOCUS, SERVES, IS_A, PART_OF, AFFECTS             |
 | Water balance / parameters     | AFFECTS, MEASURES, HAS_THRESHOLD, INCREASES, DECREASES               |
 
+DECREASES               |
+
+- **Gather before you expand.** When the task has two information needs, run
+  BOTH `search_seed_nodes` calls — one per intent — and then expand ONCE on the
+  combined seed list. Do not alternate search → expand → search → expand: the
+  second expansion returns nothing the batched call would have missed, and each
+  alternation is a model round trip the reader waits through.
+
 ### Stopping (binding)
 
 STOP AND ANSWER as soon as any of these holds:
@@ -203,8 +211,12 @@ FORBIDDEN:
 
 ### General rules
 - Every query goes to the tools in ENGLISH regardless of the user's language.
-  The corpus is English (MAHC / OSHA / EPA, US-focused). Answer the user in
-  their language; query in English.
+  The corpus is English (MAHC / OSHA / EPA, US-focused).
+- Write your JSON output in ENGLISH too, whatever language the user wrote in.
+  Your output is not shown to anyone: the Synthesizer reads it and writes the
+  user-facing answer in their language. Downstream code matches your field
+  values against English terms — a hazard named in another language is a
+  hazard that does not get flagged.
 - Never invent nodes, relationships, dosages or procedures absent from tool results.
 - Prefer explicit relationships over inferred or stub nodes.
 - Keep tool mechanics out of any user-facing text.
@@ -214,12 +226,27 @@ RETRIEVAL_OVERLAY_SYMPTOM = """
 ### Symptom triage (mandatory for this agent)
 
 For a low-output / fault / "what should I check" symptom on installed equipment,
-the sequence is fixed at three calls:
+the default sequence is three calls:
 1. One `vector_search` with the symptom plus the main physical factors
    (scaling, salt level, temperature, flow, age, sensors).
 2. One `search_seed_nodes` with intent="procedural" or "diagnostic".
 3. One `expand_subgraph` on the best 1–2 seeds.
 Then answer.
+
+Three calls is the default, not a cap. A task that carries TWO distinct
+information needs — diagnose the fault AND give the maintenance procedure —
+earns a second pass.
+
+Where that second pass enters is decided by the budget, not by the routing
+rule above. `vector_search` gets ONE call for the whole task, not one per
+need: if the first need spent it, the corpus is closed and the second need
+enters at `search_seed_nodes` with the other intent, then `expand_subgraph`
+on the seeds it returns. Calling `vector_search` again does not execute and
+costs you the turn's time for nothing.
+
+What does not earn a second pass is the same need reworded. If the first pass
+returned STATUS: OK and its seeds cover the need, going back for prose
+confirmation is the FORBIDDEN case above, not a second need.
 
 Do not keep retrieving for manufacturer-specific soak times, exact acid dilution
 ratios, or a full step-by-step cleaning procedure unless the user explicitly

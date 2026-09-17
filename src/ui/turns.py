@@ -33,8 +33,8 @@ StatusRow = tuple[str, bool]
 CLARIFYING_LENGTH = 320
 
 #: Agents whose output does not count as grounding an answer. `general` and
-#: `ooo` answer from the model, not from the manual or the graph.
-UNGROUNDED_AGENTS = frozenset({"ooo", "general"})
+#: `oos` answer from the model, not from the manual or the graph.
+UNGROUNDED_AGENTS = frozenset({"oos", "general"})
 
 
 def is_definitive_answer(
@@ -52,7 +52,7 @@ def is_definitive_answer(
 
       * a refusal (`oos`) is not an answer about the pool;
       * an answer nobody grounded — every step failed, or the only agents that
-        ran were `general`/`ooo` — is conversation, not a documented answer;
+        ran were `general`/`oos` — is conversation, not a documented answer;
       * a short reply ending in a question mark is the assistant asking back.
 
     `plan` is the planner's ExecutionStep list, `runs` the `(agent, error)`
@@ -129,6 +129,7 @@ class TurnProgress:
         #: Orchestrator invocations seen. The orchestrator runs exactly one
         #: planned step per invocation, so this is also the step cursor.
         self._steps_done = 0
+        self._live_base: str | None = None
 
     # -- reading -----------------------------------------------------------
 
@@ -148,17 +149,31 @@ class TurnProgress:
     # -- advancing ---------------------------------------------------------
 
     def advance(self, label: str) -> None:
-        """
-        Close every open row and start a new live one beneath them.
-
-        Idempotent: the same label arriving twice — a synthesizer event after
-        the last orchestrator step already announced generation — must not stack
-        a duplicate row, and must not repaint.
-        """
         if self._rows and self._rows[-1] == (label, True):
             return
+        if self._live_base is not None and self._rows:
+            self._rows[-1] = (self._live_base, self._rows[-1][1])
+            self._live_base = None
         self._rows = [(text, False) for text, _ in self._rows]
         self._rows.append((label, True))
+        self._paint()
+
+    def detail(self, label: str) -> None:
+        """
+        Replace the live row's text without opening a new one.
+
+        Tool calls happen *inside* a stage, not beside it: a specialist with a
+        six-call budget would stack seven rows on a phone screen. So they
+        overwrite the live row instead, and `advance` puts the stage's own
+        label back before dimming it.
+
+        Idempotent like `advance`, and a no-op when no row is open yet.
+        """
+        if not self._rows or self._rows[-1] == (label, True):
+            return
+        if self._live_base is None:
+            self._live_base = self._rows[-1][0]
+        self._rows[-1] = (label, True)
         self._paint()
 
     def begin(self) -> None:

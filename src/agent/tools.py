@@ -574,14 +574,12 @@ def _graph_unavailable(
     if arg_repr is not None:
         _refund(tool_name, arg_repr)
     _warn(f"{tool_name} graph_unavailable: {type(e).__name__}: {e}")
-
-    _warn(f"{tool_name} graph_unavailable: {type(e).__name__}: {e}")
     return (
         "STATUS: GRAPH_UNAVAILABLE\n"
-        "El grafo de conocimiento no está disponible para esta consulta. "
-        "No reintentes esta herramienta ni reformules la búsqueda.\n"
-        "Continúa con los resultados de vector_search que ya tengas. "
-        "Si no tienes ninguno, reporta insufficient_evidence."
+        "The knowledge graph is not available for this query. Do NOT retry "
+        "this tool and do NOT rephrase the search.\n"
+        "Continue with whatever vector_search results you already hold. If "
+        "you have none, report insufficient_evidence."
     )
 
 
@@ -825,7 +823,9 @@ def search_seed_nodes(
     limit, requirement or code provision — otherwise an Equipment or Concept
     node may outrank the Requirement node that holds the actual answer.
 
-    CALL THIS AT MOST ONCE PER TASK. A second call is refused by the system.
+    AT MOST TWO CALLS PER TASK: one per information need. A diagnostic
+    question and a procedural one are two needs; rephrasing the same need is
+    not. A third call is refused by the system.
 
     The first line of the result is a machine-readable STATUS:
       OK                 usable seeds found; related nodes listed
@@ -853,8 +853,8 @@ def search_seed_nodes(
     if not terms:
         return (
             "STATUS: NO_GRAPH_COVERAGE\n"
-            "La consulta no contiene términos buscables. No hay seeds.\n"
-            "No inventes ids de nodo. Reporta insufficient_evidence y detente."
+            "The query contains no searchable terms. There are no seeds.\n"
+            "Do NOT invent node ids. Report insufficient_evidence and stop."
         )
 
     intent_labels = INTENT_LABELS.get(intent, INTENT_LABELS["any"])
@@ -911,9 +911,9 @@ def search_seed_nodes(
     if not rows:
         return (
             "STATUS: NO_GRAPH_COVERAGE\n"
-            f"Ningún nodo del grafo cubre esta consulta. Términos: {', '.join(terms)}\n"
-            "No inventes ids de nodo ni llames a expand_subgraph.\n"
-            "No reformules esta búsqueda. Reporta insufficient_evidence y detente."
+            f"No graph node covers this query. Terms: {', '.join(terms)}\n"
+            "Do NOT invent node ids and do NOT call expand_subgraph.\n"
+            "Do NOT rephrase this search. Report insufficient_evidence and stop."
         )
 
     # Re-rank por intención ANTES del gate relativo. Sin esto el gate se ancla
@@ -949,14 +949,19 @@ def search_seed_nodes(
 
     parts: list[str] = [
         f"STATUS: {status}",
-        f"=== {len(kept)} seed(s) | intent: {intent} | términos: {', '.join(terms)} "
-        f"| modo: {'fulltext' if use_ft else 'scan'} ===\n",
+        f"=== {len(kept)} seed(s) | intent: {intent} | terms: {', '.join(terms)} "
+        f"| mode: {'fulltext' if use_ft else 'scan'} ===\n",
     ]
     if status == "WEAK":
+        reason = (
+            f"no seed carries a label able to answer a '{intent}' question"
+            if sin_etiqueta_util
+            else f"the best seed scored below the reliability floor "
+                 f"({top_adj:.3f} < {ABSOLUTE_FLOOR})"
+        )
         parts.append(
-            f"AVISO: ningún seed con etiqueta capaz de responder una pregunta "
-            f"'{intent}'. El grafo probablemente no modela esto. Una búsqueda "
-            f"más como máximo, después reporta insufficient_evidence.\n"
+            f"WARNING: {reason}. The graph probably does not model this. "
+            f"One more search at most, then report insufficient_evidence.\n"
         )
 
     seed_ids: list[str] = []
@@ -965,7 +970,7 @@ def search_seed_nodes(
         seed_ids.append(node_id)
         aliases = _as_list(node.get("aliases"))
         keywords = _as_list(node.get("keywords"))
-        flag = "" if on_intent else "  [off-intent: contexto, no respuesta]"
+        flag = "" if on_intent else "  [off-intent: context, not an answer]"
         parts.append(
             f"--- Seed {i} (score: {adj:.3f}{'' if adj == raw else f' / raw {raw:.3f}'}){flag} ---\n"
             f"ID: {node_id}\n"

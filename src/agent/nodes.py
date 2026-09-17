@@ -124,6 +124,26 @@ def _route_from_plan(execution_plan: list[ExecutionStep]) -> str:
         return "general"
     return "orchestrator"
 
+def _collapse_same_agent_steps(steps: list[ExecutionStep]) -> list[ExecutionStep]:
+    """Merge a plan whose steps all target one agent into a single step."""
+    if len(steps) < 2 or any(bool(s.oos) for s in steps):
+        return steps
+
+    if len({_normalize_agent(s.assigned_agent) for s in steps}) != 1:
+        return steps
+
+    merged = ExecutionStep(
+        step=1,
+        task=" ".join(s.task.strip() for s in steps if s.task),
+        assigned_agent=steps[0].assigned_agent,
+        oos=False,
+        depends_on=[],
+        explanatory=any(getattr(s, "explanatory", False) for s in steps),
+    )
+    logger.info(
+        "plan collapsed: %d steps -> 1 (agent=%s)", len(steps), merged.assigned_agent
+    )
+    return [merged]
 
 def _last_human_text(state: PoolAgentState) -> str:
     for msg in reversed(state.get("messages", [])):
@@ -553,6 +573,17 @@ def _pending_calculations(agent_results: dict) -> list[dict]:
     found.sort(key=lambda p: p[0])
     return [req for _, req in found]
  
+def _skipped_result(step, reason: str):
+    from .state import AgentResult  # ajustá el import
+
+    return AgentResult(
+        agent=step.assigned_agent,
+        step=step.step,
+        output="",
+        sources=[],
+        error=reason,
+        status="skipped",
+    )
 
 def _remaining_budget(state) -> float:
     started = state.get("turn_started_at")
@@ -706,20 +737,31 @@ def _readings_from_results(agent_results: dict) -> list[dict]:
 #: Campos del payload del especialista de los que el validador deriva el tier
 #: visible. Listas se concatenan en orden de ejecución; escalares se quedan con
 #: el primer valor no nulo — el primer step es el que el planner puso primero.
-_SPECIALIST_LISTS = ("recommendations", "chemical_actions", "test_interpretation")
+_SPECIALIST_LISTS = (
+    "recommendations",
+    "chemical_actions",
+    "test_interpretation",
+    # `equipment` y `recovery` ponen acá el trabajo con producto químico —
+    # un lavado ácido de filtro vive en este campo, no en `chemical_actions`.
+    # Sin fusionarlo, `render_safety` no lo ve nunca.
+    "maintenance_actions",
+    "calculations",
+)
 _SPECIALIST_SCALARS = (
     "likely_cause",
     "constraint_conflict",
     "remediation_target",
-    # Solo MATH los emite. Sin ellos, el número calculado llega al validador
-    # únicamente diluido dentro de `recommendations`, al final de la fila por
-    # orden de step, y `normalize_actions` lo recorta hacia `details`: en el
-    # trace dd928251 los 18.5 gal de hipoclorito quedaron dentro de un
-    # acordeón cerrado después de 58s de cálculo correcto.
-    "result",
-    "formula_name",
+    # Sin estos dos, `mandatory_actions` no puede distinguir un turno que
+    # pide derivar a un profesional de uno que no.
+    "escalation_required",
+    "escalation_target",
 )
 
+def _dedupe_key(item) -> str:
+    """Normalized identity for merge dedupe: case and whitespace insensitive."""
+    if isinstance(item, dict):
+        return json.dumps(item, sort_keys=True, ensure_ascii=False).lower()
+    return " ".join(str(item).split()).lower()
 
 def _specialist_payload(agent_results: dict) -> dict:
     """
@@ -731,12 +773,18 @@ def _specialist_payload(agent_results: dict) -> dict:
     primero manda en los campos escalares.
     """
     fusion: dict = {k: [] for k in _SPECIALIST_LISTS}
+    seen: dict[str, set[str]] = {k: set() for k in _SPECIALIST_LISTS}
 
     for datos in _specialist_payloads(agent_results):
         for k in _SPECIALIST_LISTS:
             v = datos.get(k)
             if isinstance(v, list):
-                fusion[k].extend(v)
+                for item in v:
+                    key = _dedupe_key(item)
+                    if key in seen[k]:
+                        continue
+                    seen[k].add(key)
+                    fusion[k].append(item)
             elif v and k == "recommendations":
                 # `recommendations` a veces llega como string numerado; el
                 # validador lo normaliza, pero no puede si lo pisa una lista.
@@ -1169,15 +1217,16 @@ def planner(state: PoolAgentState, config: RunnableConfig):
         )
 
     detected_language = plan.detected_language or fallback_language
+    execution_plan = _collapse_same_agent_steps(plan.execution_plan)
 
     return Command(
         update={
             "detected_language": detected_language,
-            "execution_plan": plan.execution_plan,
+            "execution_plan": execution_plan,
             "current_step": 0,
             "agent_results": None,
         },
-        goto=_route_from_plan(plan.execution_plan),
+        goto=_route_from_plan(execution_plan),
     )
 
 # ================================================================

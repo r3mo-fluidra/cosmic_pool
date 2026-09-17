@@ -239,7 +239,18 @@ ARCHETYPE_CONTRACTS = {
             "what produced the state. When the raw content carries a likely "
             "cause, name it — correcting the values without naming what "
             "produced them means the same state returns.\n"
-            "Then the corrective actions, then the first verification."
+            "Then the corrective actions, then the first verification.\n"
+            "When the user gave no readings at all, there is no verdict to "
+            "lead with: open by naming the two or three candidate causes "
+            "instead, in one sentence, so the reader knows what they are "
+            "choosing between. Never open with the hazard — `safety` already "
+            "carries it, and repeating it costs the only lines the reader "
+            "sees first. Never open by saying you cannot proceed: the actions "
+            "panel already tells them what to measure, and a reader who is "
+            "told twice that you need data has been told nothing.\n"
+            "Ask for the fewest inputs that separate the candidates, not "
+            "every input you would eventually want. Three is usually enough "
+            "to pick a branch; the rest follows once they answer."
         ),
         "budget": 900,
         "details": [
@@ -275,21 +286,22 @@ ARCHETYPE_CONTRACTS = {
     },
 
     "procedure": {
-        "shape": "3-5 numbered steps in execution order.",
+        "shape": (
+            "Lead with what is wrong and what the procedure will resolve, in "
+            "one or two sentences. That is what `answer` is for: the verdict "
+            "and why these steps, not the steps themselves.\n"
+            "Then 3-5 numbered actions in execution order.\n"
+            "Do NOT open by requesting data. An input you were not given "
+            "belongs in `missing_information`, and it reaches the reader only "
+            "when it blocks a step they are about to take — name it inside "
+            "that step, not before the verdict. A turn that already has a "
+            "confident diagnosis does not lead with a questionnaire."
+        ),
         "budget": 1000,
         "details": [
             "Required tools",
             "Common mistakes",
-            "Recommended frequency"
-        ],
-        "safety_required": False,
-    },
-    "reference": {
-        "shape": "List of fields or elements. No narrative between items.",
-        "budget": 900,
-        "details": [
-            "Retention and format",
-            "Requirement that originates it"
+            "Recommended frequency",
         ],
         "safety_required": False,
     },
@@ -474,59 +486,11 @@ def agents_from_results(agent_results: Any) -> list:
 
 
 
-def fallback_payload(content: str, output_cls: type = SynthesizerOutput) -> SynthesizerOutput:
-    """
-    Create fallback payload from unstructured content.
-    """
-    return output_cls(
-        archetype="conversational",
-        answer=content,
-        actions=[],
-        safety=None,
-        details=[],
-    )
-
-
 # =====================================================================
 # 6. FUNCIONES ADICIONALES PARA EL SYNTHESIZER
 # =====================================================================
 
-def resolve_archetype_from_plan(
-    execution_plan: list,
-    agent_results: Any,
-    extra_results: dict | None = None,
-    error: str | None = None,
-    force_archetype: str | None = None,
-) -> str:
-    """
-    Resolve archetype from execution plan and results.
-    
-    Args:
-        execution_plan: List of ExecutionStep
-        agent_results: Dict or List of AgentResult
-        extra_results: Additional results
-        error: Error message
-        force_archetype: Force a specific archetype
-    
-    Returns:
-        Archetype string
-    """
-    if force_archetype:
-        return force_archetype
-    
-    # Obtener agentes usables
-    agents = agents_from_results(agent_results)
-    
-    # Verificar si hay OOS
-    is_oos = False
-    if execution_plan:
-        for step in execution_plan:
-            if hasattr(step, 'oos') and step.oos:
-                is_oos = True
-                break
-    
-    # Resolver archetype
-    return resolve_archetype(agents, is_oos)
+
 
 class VesselDeclaration(BaseModel):
     """

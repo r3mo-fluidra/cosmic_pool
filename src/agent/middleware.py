@@ -26,23 +26,23 @@ class ToolBudgetMiddleware(AgentMiddleware):
     name = "tool_budget"
 
     def wrap_model_call(self, request, handler):
+        """Log budget state without touching `request.tools`.
+
+        Overriding the tool list changed the prompt prefix on every call, and
+        Gemini caches by exact prefix: measured across eight traces, the
+        specialist got input_cache_read=0 on almost every call while the
+        planner — same model, no tools — cached 7052 tokens. Enforcement still
+        happens in wrap_tool_call, which blocks execution and returns
+        BUDGET_EXHAUSTED; dropping the declaration was belt-and-braces that
+        cost the whole system prompt's cache.
+        """
         used = _calls_so_far(request.messages)
-
-        allowed = [
-            t for t in request.tools
-            if used.get(getattr(t, "name", None), 0) < _TOOL_BUDGETS.get(getattr(t, "name", None), 10**6)
+        exhausted = [
+            name for name, n in used.items()
+            if n >= _TOOL_BUDGETS.get(name, 10**6)
         ]
-
-        if len(allowed) != len(request.tools):
-            dropped = [
-                getattr(t, "name", "?") for t in request.tools if t not in allowed
-            ]
-            logger.info(
-                "tool_budget: fuera de scope %s (usadas=%s) — quedan %d tools",
-                dropped, used, len(allowed),
-            )
-            request = request.override(tools=allowed)
-
+        if exhausted:
+            logger.info("tool_budget: agotadas %s (usadas=%s)", exhausted, used)
         return handler(request)
 
     def wrap_tool_call(self, request, handler):

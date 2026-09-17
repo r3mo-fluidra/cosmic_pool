@@ -120,6 +120,7 @@ class ValidationReport:
     #: Measured only: the fix belongs in the specialist, not here.
     actions_vs_panel: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    out_of_domain: list[str] = field(default_factory=list)
 
     @property
     def needs_retry(self) -> bool:
@@ -136,6 +137,23 @@ class ValidationReport:
 # --------------------------------------------------------------------------
 # Phrasing tables — the model writes none of this
 # --------------------------------------------------------------------------
+
+_MANDATORY_ACTION_RE = re.compile(
+    r"\b(?:close|closed|closure|shut\s+down|shutdown|cease|evacuate|"
+    r"do\s+not\s+(?:open|reopen|operate|use)|cannot\s+open|may\s+not\s+open|"
+    r"remain\s+closed|isolate|lock\s+out|escalate|"
+    r"call\s+(?:911|emergency)|contact\s+(?:emergency|a\s+qualified|a\s+licensed))\b",
+    re.IGNORECASE,
+)
+
+
+def mandatory_actions(specialist: dict, actions: list[str]) -> list[str]:
+    """Actions no archetype may withhold: closures, stops, escalations."""
+    keep = [a for a in actions if _MANDATORY_ACTION_RE.search(a)]
+    if keep or not specialist.get("escalation_required"):
+        return keep
+    return actions
+
 
 
 _STATUS_PHRASING = {
@@ -778,9 +796,38 @@ _STABILIZED = ("trichlor", "dichlor", "stabilized chlorine",
 
 #: Commonly handled acids. Searched in `chemical_actions`: what matters is that
 #: the operator will handle one.
-_ACIDS = ("muriatic", "hydrochloric", "sodium bisulfate", "dry acid",
-          "muriático", "muriatico", "clorhídrico", "clorhidrico",
-          "bisulfato", "ácido seco", "acido seco")
+_ACID_PRODUCTS = ("muriatic", "hydrochloric", "sodium bisulfate", "bisulphate")
+_CYA_ACID_RE = re.compile(
+    r"\b(?:iso)?cyanuric\s+acid\b"
+    r"|\bacid\s+demand(?:\s+test)?\b",   # a titration, not a product to pour
+    re.I,
+)
+_ACID_RE = re.compile(r"\bacid(?:ic|s|ify|ified)?\b", re.I)
+
+_DOMAIN_COMPONENTS = {
+    "equipment": (
+        "torn grid", "de grid", "broken lateral", "cracked lateral",
+        "split cartridge", "multiport gasket", "spider gasket", "standpipe",
+        "underdrain", "impeller", "shaft seal", "mechanical seal",
+        "pressure switch", "flow switch",
+    ),
+    "hydraulics": (
+        "pump curve", "operating point", "total dynamic head", "head loss",
+        "suction lift", "net positive suction head", "npsh",
+    ),
+}
+
+_DOMAIN_COMPONENT_RE = {
+    domain: re.compile("|".join(re.escape(t) for t in terms), re.I)
+    for domain, terms in _DOMAIN_COMPONENTS.items()
+}
+
+
+def _handles_acid(text: str) -> bool:
+    """Does this text tell the operator to handle an acid?"""
+    if any(p in text for p in _ACID_PRODUCTS):
+        return True
+    return bool(_ACID_RE.search(_CYA_ACID_RE.sub("", text)))
 
 #: The safety line, by template. The `stabilized_at_ceiling` variant is only
 #: chosen when a reading backs it: asserting an unsupported limit does not stop
@@ -799,6 +846,10 @@ _SAFETY_PHRASING = {
             "Never mix acid and chlorine products — add each separately "
             "with the pump running."
         ),
+        "escalation": (
+            "This work requires a qualified professional — do not attempt it "
+            "yourself."
+        ),
     },
     "es": {
         "stabilized_at_ceiling": (
@@ -813,6 +864,10 @@ _SAFETY_PHRASING = {
             "Nunca mezcles ácido con productos clorados: agregá cada uno "
             "por separado y con la bomba en marcha."
         ),
+        "escalation": (
+            "Este trabajo requiere un profesional calificado: no lo hagas "
+            "por tu cuenta."
+        ),
     },
 }
 
@@ -825,7 +880,11 @@ _CLOSURE = {
     "en": {
         "pool": "Close the pool to bathers immediately",
         "spa":  "Close the spa to bathers immediately",
-    }
+    },
+    "es": {
+        "pool": "Cerrá la pileta a los bañistas de inmediato",
+        "spa":  "Cerrá el spa a los bañistas de inmediato",
+    },
 }
 
 _VESSEL_NOUNS = frozenset({"pool", "spa", "pilet", "vesse", "tub"})
@@ -877,6 +936,20 @@ _NON_CLOSURE_VERB_RE = re.compile(
 #: "7.4-7.6" because it requires the space and the capital.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-ZÁÉÍÓÚÑ])")
 
+
+def out_of_domain_components(payload, specialist: dict) -> list[str]:
+    """Components of an escalated-to domain named in the visible tier."""
+    target = str((specialist or {}).get("escalation_target") or "").strip().lower()
+    pattern = _DOMAIN_COMPONENT_RE.get(target)
+    if pattern is None:
+        return []
+
+    surface = " ".join([
+        getattr(payload, "answer", "") or "",
+        *(getattr(payload, "actions", None) or []),
+        getattr(payload, "safety", "") or "",
+    ])
+    return sorted({m.group(0).lower() for m in pattern.finditer(surface)})
 
 def _as_list(value) -> list[str]:
     """
@@ -946,6 +1019,20 @@ def _cya_at_ceiling(specialist: dict) -> bool:
     return False
 
 
+def _chemical_text(specialist: dict) -> str:
+    """Every field where a specialist names a product the operator will handle.
+    `recommendations` is included because it becomes the visible action panel:
+    an acid the user is told to pour must carry its warning even when no other
+    field mentions it."""
+    parts = [
+        f"{a.get('chemical', '')} {a.get('action', '')}"
+        for a in specialist.get("chemical_actions") or []
+        if isinstance(a, dict)
+    ]
+    parts += [str(a) for a in specialist.get("maintenance_actions") or []]
+    parts += [str(a) for a in _as_list(specialist.get("recommendations"))]
+    return " ".join(parts).lower()
+
 def render_safety(specialist: dict, language: str = "es") -> str | None:
     """The safety line by template, or None when the payload supports no
     specific warning."""
@@ -956,13 +1043,11 @@ def render_safety(specialist: dict, language: str = "es") -> str | None:
         key = "stabilized_at_ceiling" if _cya_at_ceiling(specialist) else "stabilized"
         return phrases[key]
 
-    chems = " ".join(
-        f"{a.get('chemical', '')} {a.get('action', '')}"
-        for a in specialist.get("chemical_actions") or []
-        if isinstance(a, dict)
-    ).lower()
-    if any(k in chems for k in _ACIDS):
+    if _handles_acid(_chemical_text(specialist)):
         return phrases["acid"]
+
+    if specialist.get("escalation_required"):
+        return phrases["escalation"]
 
     return None
 
@@ -1070,15 +1155,13 @@ def enforce_remediation_target(payload, specialist: dict, language: str,
     `details`. Un turno crítico no puede decirle al operador que
     hipercloriné sin decirle a cuánto.
     """
-    logger.warning(
-        "REMED: llamada | tipo=%s | valor=%r | acciones=%d",
-        type(specialist.get("remediation_target")).__name__,
-        specialist.get("remediation_target"),
-        len(payload.actions or []),
-    )
+    
     line = render_remediation_target(specialist, language)
     if not line:
         return
+    
+    logger.debug("remediation target resolved (%d actions present)",
+                 len(payload.actions or []))
 
     target = specialist.get("remediation_target") or {}
     conc = _fmt_target_value(target.get("concentration"))
@@ -1141,10 +1224,19 @@ def enforce_visible_tier(payload, specialist: dict, language: str,
         suppressed = actions_optional and not payload.actions
 
         if actions and suppressed:
-            report.notes.append(
-                f"actions_optional archetype and the model emitted none: "
-                f"{len(actions)} specialist recommendation(s) withheld"
-            )
+            mandatory = mandatory_actions(specialist, actions)
+            if mandatory:
+                report.actions_rendered = True
+                payload.actions = mandatory
+                report.notes.append(
+                    f"actions_optional archetype: {len(mandatory)} mandatory "
+                    f"action(s) kept, {len(actions) - len(mandatory)} withheld"
+                )
+            else:
+                report.notes.append(
+                    f"actions_optional archetype and the model emitted none: "
+                    f"{len(actions)} specialist recommendation(s) withheld"
+                )
         elif actions:
             report.actions_rendered = True
             dropped = [a for a in (payload.actions or []) if a not in actions]
@@ -1158,6 +1250,7 @@ def enforce_visible_tier(payload, specialist: dict, language: str,
     if line:
         report.safety_rendered = True
         payload.safety = line
+
 
 
 # --------------------------------------------------------------------------
@@ -1298,6 +1391,135 @@ def _get_detail(payload, label: str):
         if d.label == label:
             return d
     return None
+
+CALCULATIONS_LABEL = {
+    "en": "How the numbers were derived",
+    "es": "Cómo se derivaron los números",
+}
+
+
+def _substitute_inputs(expression: str, inputs: list) -> str:
+    """Replace input names with their values so the arithmetic can be checked."""
+    named = [
+        (str(i.get("name") or ""), i.get("value"))
+        for i in inputs or [] if isinstance(i, dict)
+    ]
+    # Longest name first: "Baseline Pressure" must not be eaten by "Pressure".
+    for name, value in sorted(named, key=lambda p: len(p[0]), reverse=True):
+        if name and value is not None:
+            expression = expression.replace(name, _format_number(value))
+    return expression
+
+def _calculation_line(calc: dict) -> str | None:
+    """One audit line: quantity, expression, result, source."""
+    if not isinstance(calc, dict):
+        return None
+
+    result = calc.get("result")
+    if isinstance(result, dict):
+        value, unit = result.get("value"), result.get("unit") or ""
+    else:
+        value, unit = result, ""
+    if value is None:
+        return None
+
+    quantity = str(calc.get("quantity") or "").strip()
+    expression = str(calc.get("expression") or "").strip()
+    if expression:
+        expression = _substitute_inputs(expression, calc.get("inputs"))
+    source = str(calc.get("source_id") or "").strip()
+
+    line = f"- {quantity}: " if quantity else "- "
+    if expression:
+        line += f"{expression} = "
+    line += f"{_format_number(value)} {unit}".rstrip()
+    if source and source != "user_input":
+        line += f"  ({source})"
+    return line
+
+
+def enforce_visible_calculations(payload, specialist: dict, language: str,
+                                 detail_cls, report: ValidationReport) -> None:
+    """Put the specialist's arithmetic where it can be checked.
+
+    The contract demands one entry per derived number so the reader can audit
+    it. Until this existed nothing rendered the field: trace 8d6331ac produced
+    1016 characters of `calculations` and the operator saw none of it.
+    """
+    lines = [
+        line for line in
+        (_calculation_line(c) for c in specialist.get("calculations") or [])
+        if line
+    ]
+    if not lines:
+        return
+
+    _append_detail(payload, _lang_table(CALCULATIONS_LABEL, language),
+                   "\n".join(lines), detail_cls)
+    report.notes.append(f"{len(lines)} calculation(s) rendered")
+
+PROCEDURE_LABEL = {
+    "en": "Step-by-step",
+    "es": "Paso a paso",
+}
+
+#: Below this, a folded section costs more attention than the two bullets
+#: inside it are worth.
+MIN_PROCEDURE_STEPS = 3
+
+def _procedure_step(item) -> str:
+    """One step as text, whatever shape the specialist used.
+
+    `maintenance_actions` arrives as plain strings in some runs and as
+    {step, action, description} dicts in others. Trace 0afc6784 rendered the
+    Python repr of those dicts straight into the user's screen.
+    """
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return ""
+
+    head = str(item.get("action") or item.get("title") or "").strip()
+    body = str(item.get("description") or item.get("detail") or "").strip()
+    if head and body:
+        return f"{head} — {body}"
+    return head or body
+
+def enforce_visible_procedure(payload, specialist: dict, language: str,
+                              detail_cls, report: ValidationReport) -> None:
+    """Render the specialist's ordered procedure, minus what the panel says.
+
+    `maintenance_actions` reached the validator in step 3 but only ever fed
+    acid detection. Trace 96468780 wrote a nine-step media replacement — the
+    answer to the question that was asked — and rendered none of it.
+    """
+    steps = [
+        s for s in (_procedure_step(a) for a in specialist.get("maintenance_actions") or [])
+        if s
+    ]
+    if len(steps) < MIN_PROCEDURE_STEPS:
+        return
+
+    panel = [_content_tokens(a) for a in payload.actions or []]
+    kept = []
+    for step in steps:
+        tokens = _content_tokens(step) - _VESSEL_NOUNS
+        dup = tokens and any(
+            len(tokens & p) / len(tokens) >= _DUPLICATE_THRESHOLD for p in panel
+        )
+        if not dup:
+            kept.append(step)
+
+    if len(kept) < MIN_PROCEDURE_STEPS:
+        return
+
+    body = "\n".join(f"{i}. {s}" for i, s in enumerate(kept, 1))
+    _append_detail(payload, _lang_table(PROCEDURE_LABEL, language),
+                   body, detail_cls)
+    report.notes.append(
+        f"{len(kept)} procedure step(s) rendered"
+        + (f", {len(steps) - len(kept)} already in the panel" if len(kept) != len(steps) else "")
+    )
 
 
 def _append_detail(payload, label: str, body: str, detail_cls) -> None:
@@ -1493,7 +1715,12 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
             payload, readings, language, report,
             conflict=(specialist or {}).get("constraint_conflict"),
         )
-
+    if specialist:
+        enforce_visible_calculations(payload, specialist, language,
+                                     detail_cls, report)
+    if specialist:
+        enforce_visible_procedure(payload, specialist, language,
+                                  detail_cls, report)
     # 4. Budget.
     overflow_to_details(payload, report.budget, detail_cls, report)
 
@@ -1505,12 +1732,17 @@ def enforce_contract(payload, contract: dict, agents: list[str] | None = None,
     if report.safety_duplicates_action:
         report.notes.append("safety repeats an action instead of adding something new")
 
+    if specialist:
+        report.out_of_domain = out_of_domain_components(payload, specialist)
+        if report.out_of_domain:
+            report.notes.append(
+                f"diagnosed past its own escalation to "
+                f"{specialist.get('escalation_target')}: "
+                f"{', '.join(report.out_of_domain)}"
+            )
+
     if readings:
         report.actions_vs_panel = actions_contradict_panel(payload, readings)
-        if report.actions_vs_panel:
-            report.notes.append(
-                f"actions arguing with the panel: {report.actions_vs_panel}"
-            )
 
     # 7. Unbacked quantities. Last, over the final text, so nothing the
     #    validator itself added escapes the check.
