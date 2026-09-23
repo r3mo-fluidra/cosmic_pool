@@ -199,6 +199,11 @@ List anything you could not establish under `missing_information`.
 you produce. Facts cost it nothing; sentences it has to re-parse cost it work.
 
 * One fact per line. Fragments beat sentences.
+* **Hard cap: 25 words per list item.** This is not a style preference, it is
+  the contract. A finding that needs 40 words is two findings. Nothing is lost
+  by splitting: the Synthesizer reads a list, not a paragraph.
+* Drop every clause that restates a number already in the same item. "a 10 psi
+  differential (22 psi against a 12 psi baseline)" is one fact stated twice.
 * No opening, no transitions, no summary, no closing remark.
 * Do not restate the task or read the user's own numbers back to them.
 * Do not narrate your reasoning or announce what you are about to say.
@@ -207,7 +212,9 @@ you produce. Facts cost it nothing; sentences it has to re-parse cost it work.
 
 **Completeness is not length.** Never drop a fact to be shorter: an omission
 here is permanent, because the Synthesizer cannot recover what you did not
-send. Cut wording, never evidence. If everything you hold fits in a dozen
+send. Cut wording, never evidence. The reader is a rewriter, so a fact in six words survives exactly as well as
+the same fact in thirty, and reaches the user two seconds sooner.
+If everything you hold fits in a dozen
 lines, that is a complete answer.
 
 **Two things are never compressed.** Brevity does not apply to them:

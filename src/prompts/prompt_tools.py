@@ -122,26 +122,19 @@ showing the intermediate result.
 RETRIEVAL_CORE = """
 ### How to use the authorized tools
 
-Three tools build evidence: `vector_search` (prose chunks), `search_seed_nodes`
-(graph entry points), `expand_subgraph` (graph neighborhood). Pick the entry
-point from the information need. There is no universal "call this one first".
+`vector_search` (prose chunks) AND `search_seed_nodes` (graph entry points)
+HAVE ALREADY RUN for your task. Both results are in the PRE-FETCHED RETRIEVAL
+block of your task message. Do not call either one: `vector_search` is refused
+outright, and `search_seed_nodes` has one call left that is reserved for a
+SECOND information need the pre-fetch did not cover — never for rephrasing the
+one it did.
 
-#### Route by information need — decide this before the first call
-- **NORMATIVE** (a threshold, range, limit, requirement, permitted value):
-  the graph is authoritative. Enter at the graph.
-- **EXPLANATORY / DIAGNOSTIC / PROCEDURAL** (how, why, what to check, in what
-  order): the corpus is authoritative. Enter at `vector_search`.
+Your next move is `expand_subgraph` on the seed ids listed in that block, then
+answer.
 
-You enter once. Crossing over to the other source is a fallback for a miss, not
-a confirmation step.
-
-#### 1. vector_search
-- Entry point for explanatory, diagnostic and procedural needs; fallback for a
-  normative need the graph did not cover.
-- Query in ENGLISH with the information need as stated.
-- Inspect the returned chunks before deciding the next step.
-- At most **one** refinement, using vocabulary that actually appears in the
-  chunks you got back — never synonyms you invented.
+For a NORMATIVE need the graph is authoritative: a `Requirement` or
+`WaterParameter` node stating the value settles it, and the pre-fetched chunks
+are context, not confirmation.
 
 #### 2. search_seed_nodes
 - Purpose: locate 2–6 starting nodes in the graph.
@@ -156,24 +149,11 @@ a confirmation step.
 #### 3. expand_subgraph
 - Call on the chosen seeds — or directly with a canonical slug when you can
   infer one for a normative need (lowercase + underscores:
-  `free_chlorine_operating_range`, `ph_operating_range`), `max_hops=1`,
-  `max_nodes=20`.
+  `free_chlorine_operating_range`, `ph_operating_range`), `max_hops=1`.
 - A slug that does not resolve costs one call. Accept the miss and fall back to
   `search_seed_nodes`. Do NOT try slug variants.
 - **Prefer 1 hop.** Use 2 only when the first expansion is clearly insufficient.
   Never exceed 2.
-- Focus the expansion on the relationships matching the question type:
-
-| Question intent                | Preferred relationships                                              |
-| ------------------------------ | -------------------------------------------------------------------- |
-| Chemicals / dosing / treatment | USES, REQUIRES, TREATS, PART_OF, HAS_THRESHOLD, INCREASES, DECREASES |
-| Risks / problems / failures    | HAS_RISK, CAUSES, INDICATES, PREVENTS, AFFECTS                       |
-| Procedures / operations        | REQUIRES, PRECEDES, PERFORMED_BY, PART_OF, REQUIRES_FOCUS            |
-| Venue-specific advice          | HAS_RISK, REQUIRES_FOCUS, SERVES, IS_A, PART_OF, AFFECTS             |
-| Water balance / parameters     | AFFECTS, MEASURES, HAS_THRESHOLD, INCREASES, DECREASES               |
-
-DECREASES               |
-
 - **Gather before you expand.** When the task has two information needs, run
   BOTH `search_seed_nodes` calls — one per intent — and then expand ONCE on the
   combined seed list. Do not alternate search → expand → search → expand: the
@@ -225,35 +205,22 @@ FORBIDDEN:
 RETRIEVAL_OVERLAY_SYMPTOM = """
 ### Symptom triage (mandatory for this agent)
 
-For a low-output / fault / "what should I check" symptom on installed equipment,
-the default sequence is three calls:
-1. One `vector_search` with the symptom plus the main physical factors
-   (scaling, salt level, temperature, flow, age, sensors).
-2. One `search_seed_nodes` with intent="procedural" or "diagnostic".
-3. One `expand_subgraph` on the best 1–2 seeds.
+For a low-output / fault / "what should I check" symptom on installed
+equipment, the pre-fetch covers both the prose and the graph entry points.
+One call finishes the job:
+1. One `expand_subgraph` on the best 1-2 seed ids from the PRE-FETCHED block,
+   all ids in ONE call.
 Then answer.
 
-Three calls is the default, not a cap. A task that carries TWO distinct
-information needs — diagnose the fault AND give the maintenance procedure —
-earns a second pass.
+A task carrying TWO distinct information needs — diagnose the fault AND give
+the maintenance procedure — earns one more `search_seed_nodes` with the other
+intent, and one more `expand_subgraph`. The same need reworded does not.
 
-Where that second pass enters is decided by the budget, not by the routing
-rule above. `vector_search` gets ONE call for the whole task, not one per
-need: if the first need spent it, the corpus is closed and the second need
-enters at `search_seed_nodes` with the other intent, then `expand_subgraph`
-on the seeds it returns. Calling `vector_search` again does not execute and
-costs you the turn's time for nothing.
-
-What does not earn a second pass is the same need reworded. If the first pass
-returned STATUS: OK and its seeds cover the need, going back for prose
-confirmation is the FORBIDDEN case above, not a second need.
-
-Do not keep retrieving for manufacturer-specific soak times, exact acid dilution
-ratios, or a full step-by-step cleaning procedure unless the user explicitly
-asked for the procedure itself ("how do I clean the cell step by step", "give me
-the safe cleaning procedure"). If a hands-on or chemical step appears in the
-evidence, list it as a check for the operator and route it through the hazard
-gate — do not expand the procedure yourself.
+Do not keep retrieving for manufacturer-specific soak times, exact acid
+dilution ratios, or a full step-by-step cleaning procedure unless the user
+explicitly asked for the procedure itself. If a hands-on or chemical step
+appears in the evidence, list it as a check for the operator and route it
+through the hazard gate — do not expand the procedure yourself.
 """
 
 tool_instructions_AA        = RETRIEVAL_CORE

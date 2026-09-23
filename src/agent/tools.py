@@ -227,7 +227,7 @@ INTENT_LABELS: dict[str, tuple[str, ...]] = {
 # puede seguir siendo útil como contexto, pero no debe encabezar la lista.
 OFF_INTENT_PENALTY = 0.45
 ABSOLUTE_FLOOR = 0.35          # por debajo de esto, ningún seed es fiable
-NEIGHBOR_LIMIT = 8
+NEIGHBOR_LIMIT = 5
 
 # Relaciones genéricas: se permiten a 1 hop pero explotan por hubs a 2+.
 # Se bloquean en expansión multi-hop, no en la lista de preferidas.
@@ -263,8 +263,8 @@ CANDIDATE_LIMIT = 50      # recall del fulltext antes del re-ranking
 
 # --- Límites de truncado ---------------------------------------------------
 # Estaban declarados dos veces con valores distintos; ganaban estos.
-MAX_DESC_CHARS = 380
-MAX_NODE_DESC = 280
+MAX_DESC_CHARS = 220
+MAX_NODE_DESC = 140
 MAX_VECTOR_CTX = 900
 MAX_CHUNK_CHARS = 1200
 DEFAULT_K = 4
@@ -976,8 +976,8 @@ def search_seed_nodes(
             f"ID: {node_id}\n"
             f"Name: {node.get('name') or node_id}\n"
             f"Label(s): {', '.join(node.labels)}\n"
-            f"Aliases: {', '.join(aliases[:12]) if aliases else '—'}\n"
-            f"Keywords: {', '.join(keywords[:15]) if keywords else '—'}\n"
+            f"Aliases: {', '.join(aliases[:6]) if aliases else '—'}\n"
+            f"Keywords: {', '.join(keywords[:8]) if keywords else '—'}\n"
             f"Description: "
             f"{_truncate(node.get('description') or node.get('summary') or '', MAX_DESC_CHARS) or '—'}\n"
         )
@@ -1103,8 +1103,8 @@ def expand_subgraph(
     seed_node_ids: str,
     query: str = "",
     max_hops: int = 2,
-    max_nodes: int = 25,
-    max_edges: int = 40,
+    max_nodes: int = 10,
+    max_edges: int = 20,
 ) -> str:
     """
     Expand the Neo4j graph from one or more seed node ids (1-2 hops).
@@ -1136,8 +1136,8 @@ def expand_subgraph(
 
     # clamp ANTES de interpolar en el Cypher
     hops = max(1, min(int(max_hops), 3))
-    max_nodes = max(1, min(int(max_nodes), 60))
-    max_edges = max(1, min(int(max_edges), 120))
+    max_nodes = max(1, min(int(max_nodes), 20))
+    max_edges = max(1, min(int(max_edges), 40))
 
     boosts = _detect_intent_boosts(query)
     preferred = boosts + [r for r in DEFAULT_PREFERRED_RELS if r not in boosts]

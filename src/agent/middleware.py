@@ -85,3 +85,4 @@ class ToolBudgetMiddleware(AgentMiddleware):
 
         executed[name] = used + 1
         return handler(request)
+

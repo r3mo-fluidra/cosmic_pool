@@ -140,7 +140,7 @@ def create_suggester_llm():
         model="gemini-3.1-flash-lite",       # ⚠️ decidir: distinto de flash-lite
         google_api_key=_get_secret("GEMINI_API_KEY"),
         temperature=0.3,
-        timeout=_FAST_TIMEOUT,        # se corta solo, no hace falta wrapper externo
+        timeout=10,        
         max_retries=_MAX_RETRIES      # sin retry en 429 — degradamos a [] nosotros
     )
 
@@ -149,7 +149,7 @@ def create_fallback_llm():
         model="gemini-2.5-flash",       
         google_api_key=_get_secret("GEMINI_API_KEY"),
         temperature=0.3,
-        timeout=_STANDARD_TIMEOUT,        # se corta solo, no hace falta wrapper externo
+        timeout=_STANDARD_TIMEOUT,        
         max_retries=_MAX_RETRIES      # sin retry en 429 — degradamos a [] nosotros
     )
 
@@ -182,24 +182,32 @@ def create_synthesis_llm():
         max_tokens=1200,
     )
 
-def create_specialist_llm():
-    """
-    Modelo de los especialistas de retrieval, separado de
-    create_synthesizer_llm() para poder acotarles el thinking sin tocar
-    a `math`, que comparte esa factory.
 
-    thinking_budget existe porque tres traces de la MISMA consulta dieron
-    1802, 2591 y 3414 tokens de reasoning en la llamada final del
-    especialista, con latencias de 12.9s, 18.8s y 19.9s. Con thinking
-    dinámico el modelo elige cuánto razonar por llamada, y esa elección es
-    la mayor fuente de varianza del turno. 1024 es un valor experimental:
-    por debajo del mejor caso observado, para ver si la latencia responde.
+def create_specialist_llm(cached_content: str | None = None):
     """
+    Modelo de los especialistas de retrieval.
+
+    thinking_budget=0, no 1024.
+
+    `cached_content` lo pasa PromptCacheMiddleware con el nombre de una
+    CachedContent que ya contiene el system prompt Y las tool declarations.
+    Gemini responde 400 INVALID_ARGUMENT si llegan cached_content y
+    system_instruction/tools/tool_config en el mismo request, así que el
+    middleware vacía los tres del ModelRequest.
+
+    None = camino sin caché, idéntico al de siempre. Todo el diseño degrada
+    hacia acá: si la caché no se crea o la llamada con caché falla, el agente
+    corre como corría.
+    """
+    kwargs = {}
+    if cached_content:
+        kwargs["cached_content"] = cached_content
     return ChatGoogleGenerativeAI(
         model="gemini-3.5-flash",
         google_api_key=_get_secret("GEMINI_API_KEY"),
         timeout=_STANDARD_TIMEOUT,
-        temperature=0.4,
+        temperature=0.3,
         max_retries=_MAX_RETRIES,
-        thinking_budget=1024,
+        thinking_budget=0,
+        **kwargs,
     )

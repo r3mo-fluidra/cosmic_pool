@@ -25,11 +25,11 @@ RETRIEVAL_TOOL_BUDGETS: dict[str, int] = {
     # ni resolver un STATUS: CANDIDATES. Dimensionado sobre el trace
     # 3562130029, donde murió contra el recursion_limit a los 13 calls.
     "resolve_formula":    3,
-    "calculate":          2,
+    "calculate":          3,
     "get_constant":       3,
-    "convert_units":      2,
+    "convert_units":      8,
     "lookup_product":     1,
-    "check_plausibility": 2,
+    "check_plausibility": 3,
 }
 
 #: Solo las tools de retrieval. `RETRIEVAL_TOTAL` sumaba el dict entero y

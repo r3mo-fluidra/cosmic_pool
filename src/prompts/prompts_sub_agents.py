@@ -71,7 +71,7 @@ _ESCALATION_TARGETS = (
 )
 
 BASE_OUTPUT_CONTRACT = (
-    "Return a JSON object with: status, evidence_status, findings, evidence, "
+    "Return a JSON object with: status, evidence_status, findings, "
     "assumptions, missing_information, recommendations, escalation_required, "
     "escalation_target.\n"
     "`escalation_target` is null unless `escalation_required` is true. When it "
@@ -482,7 +482,7 @@ MATH_AGENT_CONFIG = AgentConfig(
         "plausibility_check",
     ),
     archetype="calculation",
-    tool_budget= 10 
+    tool_budget= 16
 )
 
 

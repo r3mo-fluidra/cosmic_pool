@@ -73,7 +73,45 @@ class ExecutionStep(BaseModel):
             "target or the product type — the specialist assumes standard values "
             "for those.)"
         ),
+    ),
+    retrieval_query: str = Field(
+        default="",
+        description=(
+            "Keyword query for the semantic search the assigned agent will run "
+            "first. Six to twelve content words in English, space separated: "
+            "the equipment, symptom, process, chemical or procedure named in "
+            "the task. No sentence, no question, no articles, prepositions or "
+            "verbs like 'analyze', 'determine' or 'provide' — those describe "
+            "what the agent does, not what is in the manual. "
+            "Example task: 'Analyze the pressure differential and the "
+            "ineffective backwash to diagnose the filter issue.' "
+            "Example query: 'sand filter pressure differential backwash "
+            "channeling media calcification replacement'. "
+            "Leave empty only for steps assigned to 'general', 'oos' or 'math', "
+            "which do not search the manual."
+        ),
     )
+    retrieval_intent: Literal["normative", "procedural", "diagnostic", "descriptive", "any"] = Field(
+        default="any",
+        description=(
+            "Which kind of graph node can answer this step, so the right node "
+            "labels rank first in the knowledge-graph search. Pick exactly one:\n"
+            "- 'normative': the step asks for a threshold, range, limit, "
+            "required value, or code provision.\n"
+            "- 'diagnostic': the step asks why something is failing, what is "
+            "wrong, or what a symptom or reading means.\n"
+            "- 'procedural': the step asks how to perform, service, clean, "
+            "install or correct something.\n"
+            "- 'descriptive': the step asks what something is or how it works, "
+            "with nothing failing and nothing to do.\n"
+            "- 'any': only when none of the four fits, or for steps assigned to "
+            "'general', 'oos' or 'math'.\n"
+            "When a step carries two of these, pick the one its FIRST clause "
+            "asks for: a step that diagnoses a fault and then gives the repair "
+            "procedure is 'diagnostic'."
+        ),
+    )
+
 
     assigned_agent: AgentName = Field(
         description=(

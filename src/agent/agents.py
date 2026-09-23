@@ -47,6 +47,7 @@ from .tools import (
 )
 from .middleware import ToolBudgetMiddleware
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -174,7 +175,7 @@ def _initialize():
             tools=RETRIEVAL_TOOLS,
             name=node_name,
             system_prompt=build_agent_prompt(AGENT_REGISTRY[registry_key], node_name),
-            middleware=[ToolBudgetMiddleware()],
+            middleware=[ToolBudgetMiddleware(),],
         )
         for node_name, registry_key in SPECIALIST_SPECS
     }

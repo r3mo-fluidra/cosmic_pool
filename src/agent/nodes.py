@@ -60,7 +60,7 @@ from ..graph_context.suggestions import (
 )
 from ..graph_context.turn_cache import reset_turn
 from ..graph_context.turn_cache import get_touched
-from .tools import begin_tool_scope
+from .tools import begin_tool_scope, vector_search, search_seed_nodes
 from ..tool_budgets import RETRIEVAL_TOOL_BUDGETS
 # ================================================================
 # CONFIGURATION
@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 TOKEN_LIMIT = 25000
 MESSAGES_TO_KEEP = 6
 
-_SUGGESTER_DEADLINE_S = 6
+_SUGGESTER_DEADLINE_S = 2.5
 _MAX_MISROUTE_RETRIES = 2
 
 STEP_DEADLINE_S = 75.0    # techo por sub-agente
@@ -89,7 +89,7 @@ _MATH_DELEGATED_AGENTS = frozenset(
     if AGENT_REGISTRY[registry_key].delegates_arithmetic
 )
 
-
+_PREFETCH_AGENTS = frozenset(slug for slug, _ in SPECIALIST_SPECS)
 GENERAL_AGENT = "general"
 OOS_AGENT = "oos"
 # Roster válido para recuperar un MISROUTE. Sin whitelist, un nombre
@@ -99,6 +99,7 @@ _MISROUTE_AGENTS = frozenset({
 })
 
 _MISROUTE_RE = re.compile(r"^\s*MISROUTE:\s*([A-Za-z_]+)\s*(.*)", re.DOTALL)
+
 
 def _normalize_agent(agent) -> str:
     """AgentName puede ser str, Enum o None."""
@@ -134,6 +135,14 @@ def _collapse_same_agent_steps(steps: list[ExecutionStep]) -> list[ExecutionStep
 
     merged = ExecutionStep(
         step=1,
+        retrieval_query=" ".join(
+        s.retrieval_query.strip() for s in steps if s.retrieval_query
+        ),
+        retrieval_intent=next(
+            (s.retrieval_intent for s in steps
+             if getattr(s, "retrieval_intent", "any") != "any"),
+            "any",
+        ),
         task=" ".join(s.task.strip() for s in steps if s.task),
         assigned_agent=steps[0].assigned_agent,
         oos=False,
@@ -1476,6 +1485,83 @@ def _run_with_deadline(fn, deadline_s: float, *args):
         future.cancel()  # no mata el thread en curso; ver nota sobre timeout del cliente
         raise
 
+def _prefetch_retrieval(step: ExecutionStep) -> str:
+    """
+    Corre el retrieval del step antes de invocar al agente.
+
+    Extiende el prefetch de `vector_search` a `search_seed_nodes`. En los
+    traces el especialista gastaba una llamada al modelo por cada decisión de
+    tool, produciendo 34 y 46 tokens de routing por $0.0046 y $0.0067. Esas
+    decisiones son deterministas: el planner ya emite `retrieval_query` y
+    `retrieval_intent`, que es todo lo que las dos tools necesitan.
+
+    `vector_chunks` es un extra que el modelo nunca pasó en ninguna corrida:
+    `_tokenize` lo usa para enriquecer los términos de la búsqueda fulltext,
+    así que los seeds deberían salir MEJORES que los de hoy, no solo más
+    baratos.
+
+    Tiene que correr DESPUÉS de begin_tool_scope(): `_gate` cuenta estas
+    llamadas contra el presupuesto del step, que es lo que queremos. A
+    `search_seed_nodes` le queda una segunda llamada disponible por si el
+    agente encuentra un segundo frente que el planner no anticipó.
+
+    Fail-open por tool: si una falla, se omite su bloque y el agente la llama
+    él. Un prefetch roto no puede costar el step.
+    """
+    if _normalize_agent(step.assigned_agent) not in _PREFETCH_AGENTS:
+        return ""
+
+    query = (step.retrieval_query or "").strip() or step.task.strip()
+    if not query:
+        return ""
+
+    intent = getattr(step, "retrieval_intent", "any") or "any"
+    bloques: list[str] = []
+
+    chunks = ""
+    try:
+        chunks = vector_search.invoke({"query": query})
+        bloques.append(
+            f"--- vector_search (query: {query}) ---\n{chunks}"
+        )
+    except Exception as exc:
+        logger.warning(
+            "prefetch vector_search falló (%s: %s) — el agente la llamará él",
+            type(exc).__name__, exc,
+        )
+
+    try:
+        seeds = search_seed_nodes.invoke({
+            "query": query,
+            "intent": intent,
+            "vector_chunks": chunks,
+        })
+        bloques.append(
+            f"--- search_seed_nodes (intent: {intent}) ---\n{seeds}"
+        )
+    except Exception as exc:
+        logger.warning(
+            "prefetch search_seed_nodes falló (%s: %s) — el agente la llamará él",
+            type(exc).__name__, exc,
+        )
+
+    if not bloques:
+        return ""
+
+    hechas = []
+    if len(bloques) >= 1:
+        hechas.append("`vector_search`")
+    if len(bloques) >= 2:
+        hechas.append("`search_seed_nodes`")
+
+    return (
+        "\n\n=== PRE-FETCHED RETRIEVAL ===\n"
+        f"{' and '.join(hechas)} ALREADY RAN for this task. Their budget is "
+        "spent and a repeat call is refused by the system. Read the material "
+        "below and continue from it: call `expand_subgraph` on the seed ids "
+        "you see, then answer.\n\n"
+        + "\n\n".join(bloques)
+    )
  
 @observe(as_type="agent", name="Run Step Node")
 def run_step_node(payload: dict, config: RunnableConfig) -> Command:
@@ -1510,7 +1596,14 @@ def run_step_node(payload: dict, config: RunnableConfig) -> Command:
  
     # ✅ CONSTRUIR CONTEXTO ENRIQUECIDO
     agent_context = _build_agent_context(state, step, user_message)
-    
+
+    # begin_tool_scope ANTES del prefetch: la búsqueda precargada tiene que
+    # consumir presupuesto como cualquier otra, para que _gate rechace un
+    # segundo intento del agente. No lanza, solo setea tres contextvars, así
+    # que sale del try sin perder nada.
+    begin_tool_scope(config.get("configurable", {}).get("thread_id", ""))
+    agent_context += _prefetch_retrieval(step)
+
     # ✅ CREAR EL INPUT DEL AGENTE CON CONTEXTO COMPARTIDO
     agent_input = {
         "messages": [
@@ -1519,19 +1612,19 @@ def run_step_node(payload: dict, config: RunnableConfig) -> Command:
             )
         ]
     }
-    
-    # Log para debugging (opcional)
-    logger.info(f"run_step: step_{step.step} ({step.assigned_agent}) - Contexto construido con {len(agent_context)} caracteres")
- 
+
+    logger.info(
+        f"run_step: step_{step.step} ({step.assigned_agent}) - "
+        f"Contexto construido con {len(agent_context)} caracteres"
+    )
+
     started = time.monotonic()
     try:
-        # ✅ PASAR EL INPUT ENRIQUECIDO EN LUGAR DE SOLO step Y user_message
-        begin_tool_scope(config.get("configurable", {}).get("thread_id", ""))
         agent_result = _run_with_deadline(
-            _run_step_enriched,  # Nueva función que acepta agent_input
-            deadline_s, 
-            step, 
-            agent_input,            
+            _run_step_enriched,
+            deadline_s,
+            step,
+            agent_input,
         )
  
     except FuturesTimeout:
@@ -1715,15 +1808,59 @@ def _get_result_error(result) -> str:
 def _run_step_enriched(step: ExecutionStep, agent_input: dict) -> AgentResult:
     """
     Versión enriquecida de _run_step que acepta agent_input pre-construido.
+
+    Usa stream() en vez de invoke() para no perder el trabajo cuando se agota
+    el recursion_limit. GraphRecursionError no lleva el estado adentro y con
+    invoke() `result` nunca se asigna, así que un turno que ya tenía la
+    respuesta calculada se devolvía vacío: en el trace 45ce050a el math agent
+    resolvió 32445.4 galones, lo validó con check_plausibility y lo convirtió
+    a litros, y el usuario recibió un error porque faltó la llamada al modelo
+    que lo escribía.
+
+    stream_mode="values" emite el estado completo en cada superstep, así que
+    el último chunk visto es lo más lejos que llegó el agente.
     """
     agent = get_agent_by_name(step.assigned_agent)
-    result = agent.invoke(
-        agent_input,
-        config={"recursion_limit": _recursion_limit_for(step.assigned_agent)},
-    )
+
+    ultimo: dict = {}
+    try:
+        for chunk in agent.stream(
+            agent_input,
+            config={"recursion_limit": _recursion_limit_for(step.assigned_agent)},
+            stream_mode="values",
+        ):
+            ultimo = chunk
+    except GraphRecursionError:
+        mensajes = ultimo.get("messages", [])
+        rescatado = ""
+        for msg in reversed(mensajes):
+            texto = _extract_text(getattr(msg, "content", "")) or ""
+            if texto.strip():
+                rescatado = texto
+                break
+
+        if not rescatado:
+            raise
+
+        logger.warning(
+            "%s agotó recursion_limit; se rescatan %d mensajes y el último "
+            "resultado útil (%d chars)",
+            step.assigned_agent, len(mensajes), len(rescatado),
+        )
+        return AgentResult(
+            agent=step.assigned_agent,
+            step=step.step,
+            output=(
+                "PARTIAL_RESULT — the agent ran out of processing steps before "
+                "writing its final structured answer. The work below was "
+                "completed and validated by its tools; report it as the answer "
+                "and note that the reasoning was cut short.\n\n"
+                + rescatado
+            ),
+        )
 
     output_text = ""
-    for msg in reversed(result.get("messages", [])):
+    for msg in reversed(ultimo.get("messages", [])):
         if isinstance(msg, AIMessage) and msg.content:
             output_text = _extract_text(msg.content)
             break
