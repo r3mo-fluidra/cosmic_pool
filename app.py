@@ -95,6 +95,8 @@ TRACE_NAME = "pool-turn"
 # `{label: stored value}` mapping the picker needs, so a label can never be
 # paired with the wrong value.
 
+SYNTHETIC_USERS = {"dev": "0001", "admin": "0002", "user": "0003"}
+DEFAULT_USER = "user"
 
 @st.cache_resource
 def get_langfuse():
@@ -302,6 +304,37 @@ if "turn_counter" not in st.session_state:
 if "db_online" not in st.session_state:
     st.session_state.db_online, st.session_state.db_message = check_and_handle_neo4j()
 
+if "user_role" not in st.session_state:
+    st.session_state.user_role = DEFAULT_USER
+if "user_id" not in st.session_state:
+    st.session_state.user_id = SYNTHETIC_USERS[DEFAULT_USER]
+
+
+
+
+def _on_user_change() -> None:
+    """
+    Cambiar de usuario abre una conversación nueva: el historial en pantalla,
+    el thread_id del checkpointer y los ratings pertenecen al usuario anterior.
+    Sin este reinicio, los turnos siguientes quedarían guardados bajo el
+    user_id nuevo pero con el contexto del anterior.
+    """
+    st.session_state.user_id = SYNTHETIC_USERS[st.session_state.user_role]
+    st.session_state.thread_id = str(uuid.uuid4())
+    st.session_state.messages = initial_messages()
+    st.session_state.turn_counter = 0
+    st.session_state.feedback = {}
+    st.session_state.sources_open = {}
+
+
+with st.sidebar:
+    st.selectbox(
+        "Usuario",
+        options=list(SYNTHETIC_USERS),
+        format_func=lambda role: f"{role} ({SYNTHETIC_USERS[role]})",
+        key="user_role",
+        on_change=_on_user_change,
+    )
 # The diagnostics that used to occupy the sidebar (session id, interaction and
 # score counts, graph status) are intentionally not displayed: they are control
 # and tracking data for us, not for the user. Nothing is lost — thread_id ships
@@ -1070,16 +1103,14 @@ if prompt:
             name=TRACE_NAME,
             trace_context={"trace_id": current_trace_id},
             input={"prompt": prompt},
-        ) as span:
-
-            propagate_attributes(
-                user_id=st.session_state.thread_id,
-                session_id=st.session_state.thread_id,
-                tags=["streamlit", "pool-assistant"],
-                metadata={
-                    "turn_index": turn_index,
-                },
-            )
+        ) as span, propagate_attributes(
+            # Context manager: llamado suelto no aplica nada (el trace
+            # 41354a9f tenía userId, sessionId y tags vacíos).
+            user_id=st.session_state.user_id,
+            session_id=st.session_state.thread_id,
+            tags=["streamlit", "pool-assistant"],
+            metadata={"turn_index": str(turn_index)},
+        ):
 
             try:
                 final_response, definitive, debug_lines, suggestions, details = run_turn(
