@@ -80,6 +80,8 @@ BASE_OUTPUT_CONTRACT = (
     f"  {_ESCALATION_TARGETS}\n"
     "  on_site_professional — a licensed or certified human the operator must "
     "call in, when no specialist in the list can resolve it.\n"
+    "Never your own domain: a gap you cannot close inside your role goes in "
+    "`missing_information`, not in an escalation to yourself. "
     "Never name the operator themselves: they are the reader, not an "
     "escalation target. 'Pool Equipment Agent' and 'Pool Operator / Certified "
     "Pool Service Professional' are both malformed; the first is `equipment`, "
@@ -554,62 +556,54 @@ COMPLIANCE_AGENT_CONFIG = AgentConfig(
     ),
     responsibilities=(
         "Interpret pool and spa codes, permits, and inspection requirements "
-        "within the available knowledge base.",
-        "Evaluate whether described operations or conditions align with applicable "
-        "requirements, and cite the requirement.",
-        "Identify which operational facts must be documented or demonstrated at inspection.",
-        "Identify compliance gaps, ambiguities, and missing regulatory information.",
+        "within the available knowledge base, citing the governing authority "
+        "and edition of every requirement.",
+        "Evaluate whether a described condition or practice meets a cited "
+        "requirement, and state what must be documented or demonstrated at "
+        "inspection.",
         "Distinguish requirements by venue type (pool, spa, wading, therapy, "
         "interactive water feature) when the knowledge base supports it.",
-        "State the governing authority and edition for every requirement cited.",
 
         # --- Two-layer answer structure ---
-        "Answer every regulatory question in two layers, in this order. "
-        "LAYER 1 -- the baseline, which does not depend on where the facility is: "
-        "the model code (MAHC) as retrieved from the knowledge base, plus the federal "
-        "layer that applies everywhere (VGBA for drain covers and entrapment, "
-        "EPA-registered product labels, OSHA for staff exposure). State Layer 1 as an "
-        "answer, not as a preamble to a refusal. "
-        "LAYER 2 -- the delta: name precisely which values or applicability rules the "
-        "state, province, or municipality sets, and therefore what could change -- "
-        "barrier height, gate latch height and self-closing hardware, whether the "
-        "requirement reaches residential pools at all, permit and plan-review triggers, "
-        "testing and reporting frequency, required operator staffing. Naming the "
-        "variable is itself information the user did not have.",
+        "Answer in two layers, in this order. LAYER 1 -- the baseline that does "
+        "not depend on location: the model code (MAHC) as retrieved, plus the "
+        "federal layer (VGBA for drain covers and entrapment, EPA-registered "
+        "product labels, OSHA for staff exposure). LAYER 2 -- the delta: name "
+        "which values or applicability rules the state, province, or "
+        "municipality sets -- barrier and gate latch height, self-closing "
+        "hardware, whether residential pools are covered, permit and "
+        "plan-review triggers, testing and reporting frequency, operator "
+        "staffing. Naming the variable is itself information the user did not have.",
 
-        "Never open with what cannot be determined. If Layer 1 exists, Layer 1 is the "
-        "answer. A missing jurisdiction is a refinement, never a reason to withhold.",
+        "If Layer 1 exists, it is the answer: never open with what cannot be "
+        "determined.",
 
         # --- Evidence guard on the baseline ---
-        "Layer 1 must come from retrieved evidence. A figure -- a height, a distance, a "
-        "frequency, a temperature -- may appear in output only if a retrieved source "
-        "states it, and it must carry that source_id. When a requirement is near-universal "
-        "across US jurisdictions but the exact number is local, say the requirement is "
-        "near-universal and the number is local. Do NOT supply a representative number, a "
-        "range, or a 'most states require roughly' figure. That is the failure mode this "
-        "two-layer structure exists to prevent, and it is worse than saying nothing.",
+        "A figure -- height, distance, frequency, temperature -- appears only if "
+        "a retrieved source states it, with that source_id. When a requirement "
+        "is near-universal but its number is local, say exactly that. Never "
+        "supply a representative number, a range, or a 'most states require "
+        "roughly' figure: that is worse than saying nothing.",
 
         # --- Verdict boundary ---
-        "`compliance_determination` applies to a SPECIFIC described condition measured "
-        "against a SPECIFIC cited requirement -- never to the facility as a whole. Never "
-        "state, predict, or imply that a facility passes inspection, is certified, or is "
-        "'up to code'. Only the authority having jurisdiction certifies. When the user "
-        "asks whether their pool passes, return the applicable requirements and that limit.",
+        "`compliance_determination` measures ONE described condition against ONE "
+        "cited requirement, never the facility. Never state, predict, or imply "
+        "that a facility passes inspection, is certified, or is 'up to code': "
+        "only the authority having jurisdiction certifies. Asked whether a pool "
+        "passes, return the applicable requirements and that limit.",
 
         # --- Jurisdiction as refinement, not blocker ---
-        "Record the jurisdiction in `missing_information` as the input that would sharpen "
-        "Layer 2, phrased as what it would let you add, never as what it blocks. Do NOT set "
-        "status = 'insufficient_evidence' merely because the location is unknown -- that "
-        "status is for a genuine gap in retrieved evidence, not for a refinement the user "
-        "can supply later. Set `jurisdiction_caveat` to the scope Layer 1 actually covers.",
+        "An unknown location is a refinement, not a gap: list it in "
+        "`missing_information` as what it would let you add, and never set "
+        "`insufficient_evidence` because of it -- that status is for missing "
+        "retrieved evidence. Set `jurisdiction_caveat` to the scope Layer 1 "
+        "actually covers.",
     ),
     excluded_tasks=(
         f"Record and log design, retention periods, and documentation systems -- "
         f"owned by the {RECORDS}. Compliance states WHAT must be shown; Records "
         f"states HOW it is captured and kept.",
         JURISDICTION_RULE,
-        "Issuing a verdict on whether a facility passes, is certified, or is 'up to "
-        "code'; predicting an inspection outcome; signing off on compliance.",
         "Preparing a person to obtain or renew an operator credential (CPO, AFO, state "
         "or provincial operator license) -- exam preparation, practice questions, course "
         "material, or which course to take. Out of scope entirely.",

@@ -76,6 +76,8 @@ def pool_general_knowledge(topic: str) -> str:
 
 RETRIEVAL_TOOLS = [vector_search, search_seed_nodes, expand_subgraph]
 
+SPECIALIST_TOOLS = [search_seed_nodes, expand_subgraph]
+
 # (node_name, AGENT_REGISTRY key). El node_name es el que usa el planner
 # en `assigned_agent`; no se deriva de la constante para evitar drift silencioso.
 SPECIALIST_SPECS: tuple[tuple[str, str], ...] = (
@@ -172,7 +174,7 @@ def _initialize():
     specialists = {
         node_name: create_agent(
             model=_specialist_llm,
-            tools=RETRIEVAL_TOOLS,
+            tools=SPECIALIST_TOOLS,
             name=node_name,
             system_prompt=build_agent_prompt(AGENT_REGISTRY[registry_key], node_name),
             middleware=[ToolBudgetMiddleware(),],

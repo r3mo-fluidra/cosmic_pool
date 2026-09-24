@@ -122,99 +122,80 @@ showing the intermediate result.
 RETRIEVAL_CORE = """
 ### How to use the authorized tools
 
-`vector_search` (prose chunks) AND `search_seed_nodes` (graph entry points)
-HAVE ALREADY RUN for your task. Both results are in the PRE-FETCHED RETRIEVAL
-block of your task message. Do not call either one: `vector_search` is refused
-outright, and `search_seed_nodes` has one call left that is reserved for a
-SECOND information need the pre-fetch did not cover — never for rephrasing the
-one it did.
+`vector_search`, `search_seed_nodes` and `expand_subgraph` HAVE ALREADY RUN
+for your task. Their results are in the PRE-FETCHED RETRIEVAL block of your
+task message.
 
-Your next move is `expand_subgraph` on the seed ids listed in that block, then
-answer.
+**Expected path: answer directly from the pre-fetched material, with no tool call.**
 
-For a NORMATIVE need the graph is authoritative: a `Requirement` or
-`WaterParameter` node stating the value settles it, and the pre-fetched chunks
-are context, not confirmation.
+If the block has no expanded subgraph (the seeds were WEAK, or the expansion
+failed), run ONE `expand_subgraph` on the relevant seed ids, then answer. If it
+has no usable seeds at all (NO_GRAPH_COVERAGE, SEEDS_NOT_FOUND), answer from
+the pre-fetched chunks or declare insufficient.
 
-#### 2. search_seed_nodes
-- Purpose: locate 2–6 starting nodes in the graph.
-- Pass the information need plus any entity names you already hold (from the
-  question, or from vector chunks if you started there).
-- Discard seeds whose label does not match the need: an `Equipment` node does
-  not answer a threshold question; a `Requirement` node does not answer "what
-  should I check first".
-- Prefer non-stub nodes central to the question intent (Venue, Chemical,
-  Procedure, Hazard, WaterParameter, Requirement, Equipment, OperationalFocus).
+#### Second information need (1 `search_seed_nodes` + 1 `expand_subgraph` left)
+Only when the task carries a SECOND need the pre-fetch did not cover — a
+different intent, such as a diagnosis AND a procedure: one `search_seed_nodes`
+with that intent, then one `expand_subgraph` on its seeds, all ids in ONE call,
+`max_hops=1`. Use only ids that appear in tool results; never build ids of your
+own. Never spend these calls rephrasing the need the pre-fetch already covered.
 
-#### 3. expand_subgraph
-- Call on the chosen seeds — or directly with a canonical slug when you can
-  infer one for a normative need (lowercase + underscores:
-  `free_chlorine_operating_range`, `ph_operating_range`), `max_hops=1`.
-- A slug that does not resolve costs one call. Accept the miss and fall back to
-  `search_seed_nodes`. Do NOT try slug variants.
-- **Prefer 1 hop.** Use 2 only when the first expansion is clearly insufficient.
-  Never exceed 2.
-- **Gather before you expand.** When the task has two information needs, run
-  BOTH `search_seed_nodes` calls — one per intent — and then expand ONCE on the
-  combined seed list. Do not alternate search → expand → search → expand: the
-  second expansion returns nothing the batched call would have missed, and each
-  alternation is a model round trip the reader waits through.
+When weighing nodes, discard those whose label does not match the need: an
+`Equipment` node does not answer a threshold question; a `Requirement` node
+does not answer "what should I check first". For a NORMATIVE need the graph is
+authoritative: a `Requirement` or `WaterParameter` node stating the value
+settles it; the pre-fetched chunks are context, not confirmation.
 
 ### Stopping (binding)
 
 STOP AND ANSWER as soon as any of these holds:
-- A node labelled `Requirement`, `WaterParameter`, `Procedure`, `Hazard` or
-  `Equipment` states the value, range, condition or main cause asked for. The
-  graph stating a fact is sufficient. Do not seek prose confirmation of it.
-- You have called `expand_subgraph` on relevant seeds and the returned nodes
-  cover the subject of the assigned task.
-- Two consecutive calls returned material you have already seen.
-- You have expressed the same information need three different ways.
+- A `Requirement`, `WaterParameter`, `Procedure`, `Hazard` or `Equipment` node
+  states the value, range, condition or main cause asked for. Do not seek
+  prose confirmation of it.
+- The expanded nodes cover the subject of the task.
+- A call returned only material you had already seen.
 
-STOP AND DECLARE INSUFFICIENT when:
-- Every chunk scores below 0.60 and none contains the specific value or clause
-  required.
-- The graph returns no node of a relevant label for the requested parameter or
-  symptom.
-Return your output contract with `evidence_status = "insufficient_evidence"` and
-name the gap precisely. This is a CORRECT and COMPLETE answer, not a failure.
+STOP AND DECLARE INSUFFICIENT when, in the pre-fetched material or your own
+expansion:
+- The nodes name the parameter or requirement but do NOT state the value
+  asked for — "the code maximum" with no number. The value is not in the
+  knowledge base, and another search will not find it.
+- Neither the chunks nor the graph contain the specific value or clause
+  required, or no node of a relevant label came back.
+Return your output contract with `evidence_status = "insufficient_evidence"`
+and name the gap precisely. This is a CORRECT and COMPLETE answer, not a
+failure.
 
 FORBIDDEN:
-- A further `vector_search` after an `expand_subgraph` that already covers the
-  subject. This is the single most common cause of a timed-out turn.
-- Rephrasing a failed query with synonyms, quoted phrases, or candidate numeric
-  values ("1.0 ppm 2.0 ppm 3.0 ppm") hoping for a lexical match. The index is
-  semantic; this never works.
+- Rephrasing an information need with synonyms, quoted phrases, or candidate
+  numeric values ("10 ppm", "1.0 ppm 2.0 ppm") hoping for a lexical match. The
+  index is semantic; this never works.
 - Re-querying a topic already marked NO_NEW_EVIDENCE.
 - Retrieving anything outside the task you were assigned. Adjacent detail owned
   by another agent is not yours to gather — flag it, do not fetch it.
 
-### General rules
-- Every query goes to the tools in ENGLISH regardless of the user's language.
-  The corpus is English (MAHC / OSHA / EPA, US-focused).
-- Write your JSON output in ENGLISH too, whatever language the user wrote in.
-  Your output is not shown to anyone: the Synthesizer reads it and writes the
-  user-facing answer in their language. Downstream code matches your field
-  values against English terms — a hazard named in another language is a
-  hazard that does not get flagged.
-- Never invent nodes, relationships, dosages or procedures absent from tool results.
-- Prefer explicit relationships over inferred or stub nodes.
-- Keep tool mechanics out of any user-facing text.
+### Language and evidence
+- Every tool query in ENGLISH, whatever the user's language. The corpus is
+  English (MAHC / OSHA / EPA, US-focused).
+- Your JSON output in ENGLISH too. The Synthesizer writes the user-facing
+  answer in the user's language, and downstream code matches your field
+  values against English terms — a hazard named in another language does not
+  get flagged.
+- Never invent nodes, relationships, dosages or procedures absent from tool
+  results. Prefer explicit relationships over inferred or stub nodes.
 """
 
 RETRIEVAL_OVERLAY_SYMPTOM = """
 ### Symptom triage (mandatory for this agent)
 
 For a low-output / fault / "what should I check" symptom on installed
-equipment, the pre-fetch covers both the prose and the graph entry points.
-One call finishes the job:
-1. One `expand_subgraph` on the best 1-2 seed ids from the PRE-FETCHED block,
-   all ids in ONE call.
-Then answer.
+equipment, the pre-fetch already covers the prose, the graph entry points and
+their expansion. Answer from it.
 
 A task carrying TWO distinct information needs — diagnose the fault AND give
-the maintenance procedure — earns one more `search_seed_nodes` with the other
-intent, and one more `expand_subgraph`. The same need reworded does not.
+the maintenance procedure — earns the second-need calls above: one
+`search_seed_nodes` with the other intent, then one `expand_subgraph`. The
+same need reworded does not.
 
 Do not keep retrieving for manufacturer-specific soak times, exact acid
 dilution ratios, or a full step-by-step cleaning procedure unless the user

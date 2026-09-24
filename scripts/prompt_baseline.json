@@ -1,0 +1,18 @@
+{
+  "planner": 23856,
+  "general": 2413,
+  "oos": 5409,
+  "agent:chemistry": 27755,
+  "agent:equipment": 20177,
+  "agent:hydraulics": 21196,
+  "agent:math": 20153,
+  "agent:operations": 19294,
+  "agent:compliance": 20886,
+  "agent:contamination": 19657,
+  "agent:facility_design": 20492,
+  "agent:safety": 19436,
+  "agent:records": 17403,
+  "agent:recovery": 18233,
+  "synthesizer": 12628,
+  "suggester": 3018
+}

@@ -49,8 +49,10 @@ from ..graph_context.response_contracts import (
     SynthesizerOutput, get_contract, resolve_archetype,
     usable_results, DetailSection, agents_from_results
 )
-from ..graph_context.response_validator import enforce_contract, fallback_payload
-from ..prompts.prompt_archetype import build_synthesizer_archetype_section, build_test_readings_section
+from ..graph_context.response_validator import enforce_contract, fallback_payload, OVERFLOW_LABEL
+from ..prompts.prompt_archetype import (
+    build_synthesizer_archetype_section, build_test_readings_section, MAX_DETAILS,
+)
 from ..graph_context.suggestions import (
     SUPERNODES,
     Suggestion,
@@ -60,7 +62,7 @@ from ..graph_context.suggestions import (
 )
 from ..graph_context.turn_cache import reset_turn
 from ..graph_context.turn_cache import get_touched
-from .tools import begin_tool_scope, vector_search, search_seed_nodes
+from .tools import begin_tool_scope, vector_search, search_seed_nodes, expand_subgraph
 from ..tool_budgets import RETRIEVAL_TOOL_BUDGETS
 # ================================================================
 # CONFIGURATION
@@ -697,6 +699,22 @@ def _attach_sources(payload: SynthesizerOutput, results: list) -> None:
             DetailSection(label="Fuentes", body="\n".join(f"- {s}" for s in srcs))
         )
 
+def _cap_details(details: list, limit: int) -> tuple[list, int]:
+    """
+    Recorta las secciones desplegables a `limit`, conservando el orden (el
+    prompt pide "most useful first"). La sección de overflow del validador se
+    conserva: son acciones reales que no entraron en el tier visible. Sin
+    este tope, el synthesizer llegó a 22 secciones (trace 10dd4a69).
+    Devuelve (secciones, cuántas se descartaron).
+    """
+    details = list(details or [])
+    if len(details) <= limit:
+        return details, 0
+    overflow = [d for d in details if getattr(d, "label", "") == OVERFLOW_LABEL][:1]
+    rest = [d for d in details if getattr(d, "label", "") != OVERFLOW_LABEL]
+    kept = rest[: max(limit - len(overflow), 0)] + overflow
+    return kept, len(details) - len(kept)
+
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -875,7 +893,6 @@ _OOS_INSTRUCTION_INACTIVE = (
 def _is_oos(execution_plan: list[ExecutionStep]) -> bool:
     return len(execution_plan) == 1 and execution_plan[0].oos
 
-
 def _build_raw_content(agent_results) -> str:
     """
     Build raw content from agent results.
@@ -919,7 +936,6 @@ def _build_raw_content(agent_results) -> str:
 
     return "\n\n".join(sections)
 
-
 def estimated_tokens(messages: List[BaseMessage]) -> int:
     total = 0
     for msg in messages:
@@ -957,7 +973,6 @@ def _suggest_block_reason(state: PoolAgentState) -> str | None:
     
 
     return None
-
 
 def should_suggest(state: PoolAgentState) -> bool:
     """Lógica pura, cero llamadas al LLM. Corre antes de cualquier gasto de cuota."""
@@ -1000,6 +1015,33 @@ def _suggester_material(state: PoolAgentState) -> str:
     results = _normalize_agent_results(state.get("agent_results") or {})
     return "\n\n".join(r.output for r in usable_results(results) if r.output)
 
+def _suggester_prompt_summary(state: PoolAgentState, answer_text: str) -> str:
+    """
+    Versión compacta de lo ya respondido, SOLO para el prompt del suggester.
+
+    Los gates (_unconsumed_entities, apply_gates_with_report) siguen midiendo
+    contra `answer_text` completo: recortarlo les quitaría señal y dejaría
+    pasar chips redundantes. Al LLM le alcanza con los `findings` de cada
+    especialista — assumptions, requirements, gaps y caveats no cambian qué
+    chip conviene sugerir (trace e7591df6: ~520 tokens de JSON completo).
+    """
+    if state.get("response") is not None:
+        return answer_text
+
+    results = _normalize_agent_results(state.get("agent_results") or {})
+    lines: list[str] = []
+    for r in usable_results(results):
+        raw = _strip_code_fences(r.output or "")
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            data = None
+        findings = data.get("findings") if isinstance(data, dict) else None
+        if isinstance(findings, list) and findings:
+            lines += [f"- {f}" for f in findings if isinstance(f, str)]
+        elif raw:
+            lines.append(raw[:1500])
+    return "\n".join(lines) or answer_text
 
 def _unconsumed_entities(state: PoolAgentState, thread_id: str) -> List:
     """
@@ -1066,7 +1108,6 @@ def _to_synthesizer(
         execution_plan, agent_results, extra_results, error, force_archetype
     )
     return Command(update=update, goto=["synthesizer", "suggester"])
-
  
 def _get_llm_suggester():
     """Lazy: no construir el cliente si el gate de supresión corta antes."""
@@ -1485,25 +1526,39 @@ def _run_with_deadline(fn, deadline_s: float, *args):
         future.cancel()  # no mata el thread en curso; ver nota sobre timeout del cliente
         raise
 
+
+# IDs que search_seed_nodes imprime: "ID: <id>" por seed y "(id: <id>)" por
+# vecino normativo. Mismo módulo de tools, formato estable.
+_SEED_ID_RE = re.compile(r"^ID: (\S+)$", re.M)
+_NEIGHBOR_ID_RE = re.compile(r"\(id: ([^)\s]+)\)")
+_PREFETCH_MAX_EXPAND_IDS = 8
+
+
+def _prefetch_expand_ids(seeds_text: str) -> list[str]:
+    """
+    IDs a expandir en el prefetch: seeds y vecinos normativos, sin repetir y
+    en el orden en que llegaron. Solo con STATUS: OK — con WEAK o sin
+    cobertura, expandir agrega ruido y la decisión queda en el agente.
+    """
+    if not (seeds_text or "").startswith("STATUS: OK"):
+        return []
+    ids = _SEED_ID_RE.findall(seeds_text) + _NEIGHBOR_ID_RE.findall(seeds_text)
+    return list(dict.fromkeys(ids))[:_PREFETCH_MAX_EXPAND_IDS]
+
+
 def _prefetch_retrieval(step: ExecutionStep) -> str:
     """
-    Corre el retrieval del step antes de invocar al agente.
+    Corre el retrieval del step antes de invocar al agente:
+    vector_search -> search_seed_nodes -> expand_subgraph.
 
-    Extiende el prefetch de `vector_search` a `search_seed_nodes`. En los
-    traces el especialista gastaba una llamada al modelo por cada decisión de
-    tool, produciendo 34 y 46 tokens de routing por $0.0046 y $0.0067. Esas
-    decisiones son deterministas: el planner ya emite `retrieval_query` y
-    `retrieval_intent`, que es todo lo que las dos tools necesitan.
+    El expand se suma porque en el trace e7591df6 el agente usó una llamada
+    completa al modelo (~6K tokens, ~2s) solo para decidir expandir todos los
+    seeds a 1 hop — una decisión determinista. Con el subgrafo precargado, el
+    agente responde en su primera llamada.
 
-    `vector_chunks` es un extra que el modelo nunca pasó en ninguna corrida:
-    `_tokenize` lo usa para enriquecer los términos de la búsqueda fulltext,
-    así que los seeds deberían salir MEJORES que los de hoy, no solo más
-    baratos.
-
-    Tiene que correr DESPUÉS de begin_tool_scope(): `_gate` cuenta estas
-    llamadas contra el presupuesto del step, que es lo que queremos. A
-    `search_seed_nodes` le queda una segunda llamada disponible por si el
-    agente encuentra un segundo frente que el planner no anticipó.
+    Tiene que correr DESPUÉS de begin_tool_scope(): _gate descuenta estas
+    llamadas del presupuesto del step. Al agente le quedan 1 search_seed_nodes
+    y 1 expand_subgraph para una segunda necesidad de información.
 
     Fail-open por tool: si una falla, se omite su bloque y el agente la llama
     él. Un prefetch roto no puede costar el step.
@@ -1517,49 +1572,68 @@ def _prefetch_retrieval(step: ExecutionStep) -> str:
 
     intent = getattr(step, "retrieval_intent", "any") or "any"
     bloques: list[str] = []
+    hechas: list[str] = []
 
     chunks = ""
     try:
         chunks = vector_search.invoke({"query": query})
-        bloques.append(
-            f"--- vector_search (query: {query}) ---\n{chunks}"
-        )
+        bloques.append(f"--- vector_search (query: {query}) ---\n{chunks}")
+        hechas.append("`vector_search`")
     except Exception as exc:
         logger.warning(
             "prefetch vector_search falló (%s: %s) — el agente la llamará él",
             type(exc).__name__, exc,
         )
 
+    seeds = ""
     try:
         seeds = search_seed_nodes.invoke({
             "query": query,
             "intent": intent,
             "vector_chunks": chunks,
         })
-        bloques.append(
-            f"--- search_seed_nodes (intent: {intent}) ---\n{seeds}"
-        )
+        bloques.append(f"--- search_seed_nodes (intent: {intent}) ---\n{seeds}")
+        hechas.append("`search_seed_nodes`")
     except Exception as exc:
         logger.warning(
             "prefetch search_seed_nodes falló (%s: %s) — el agente la llamará él",
             type(exc).__name__, exc,
         )
 
+    expanded = False
+    ids = _prefetch_expand_ids(seeds)
+    if ids:
+        try:
+            subgraph = expand_subgraph.invoke({
+                "seed_node_ids": ", ".join(ids),
+                "query": query,
+                "max_hops": 1,
+            })
+            bloques.append(
+                f"--- expand_subgraph (1 hop from {len(ids)} ids) ---\n{subgraph}"
+            )
+            hechas.append("`expand_subgraph`")
+            expanded = True
+        except Exception as exc:
+            logger.warning(
+                "prefetch expand_subgraph falló (%s: %s) — el agente la llamará él",
+                type(exc).__name__, exc,
+            )
+
     if not bloques:
         return ""
 
-    hechas = []
-    if len(bloques) >= 1:
-        hechas.append("`vector_search`")
-    if len(bloques) >= 2:
-        hechas.append("`search_seed_nodes`")
+    if expanded:
+        next_move = (
+            "Answer from this material. Call a tool only for a SECOND "
+            "information need it does not cover."
+        )
+    else:
+        next_move = "Call `expand_subgraph` on the seed ids you see, then answer."
 
     return (
         "\n\n=== PRE-FETCHED RETRIEVAL ===\n"
-        f"{' and '.join(hechas)} ALREADY RAN for this task. Their budget is "
-        "spent and a repeat call is refused by the system. Read the material "
-        "below and continue from it: call `expand_subgraph` on the seed ids "
-        "you see, then answer.\n\n"
+        f"{', '.join(hechas)} ALREADY RAN for this task. {next_move}\n\n"
         + "\n\n".join(bloques)
     )
  
@@ -1803,6 +1877,34 @@ def _get_result_error(result) -> str:
         return result.get('error', "")
     return ""
 
+def _drop_self_escalation(output_text: str, agent) -> str:
+    """
+    Anula una escalación del agente hacia sí mismo (red de seguridad de P2).
+
+    El prompt ya no le ofrece su propio slug como destino, pero si igual lo
+    devuelve, el synthesizer le diría al usuario que el caso necesita un
+    profesional del mismo dominio que acaba de responder (trace e7591df6:
+    escalation_target = "compliance" desde compliance). Una brecha dentro del
+    propio rol va a missing_information, no a una escalación.
+
+    Fail-open: si el output no es JSON, se devuelve intacto.
+    """
+    raw = _strip_code_fences(output_text or "")
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return output_text
+    if not isinstance(data, dict):
+        return output_text
+
+    slug = _normalize_agent(agent)
+    if str(data.get("escalation_target") or "").strip().lower() != slug:
+        return output_text
+
+    logger.info("%s se escaló a sí mismo; se anula la escalación", slug)
+    data["escalation_required"] = False
+    data["escalation_target"] = None
+    return json.dumps(data, ensure_ascii=False)
 
 # ✅ NUEVA FUNCIÓN _run_step_enriched (reemplaza a _run_step)
 def _run_step_enriched(step: ExecutionStep, agent_input: dict) -> AgentResult:
@@ -1868,7 +1970,7 @@ def _run_step_enriched(step: ExecutionStep, agent_input: dict) -> AgentResult:
     return AgentResult(
         agent=step.assigned_agent,
         step=step.step,
-        output=output_text,
+        output=_drop_self_escalation(output_text, step.assigned_agent),
     )
 # ================================================================
 # SYNTHESIZER NODE
@@ -2058,17 +2160,6 @@ def synthesizer(state: PoolAgentState) -> dict:
     try:
         payload, report = _aplicar_contrato(payload)
 
-        # El único reintento del nodo. Cubre lo que el validador no puede
-        # arreglar solo.
-        #
-        # `safety` ya NO entra acá. Era el disparador real —siete rondas
-        # seguidas sobre la misma consulta— y cada una costaba una llamada
-        # completa, 2–3.5 s por turno, para pedir una línea que ahora sale por
-        # plantilla del payload del especialista (`render_safety`). Cuando esa
-        # plantilla no aplica es porque el dato no sostiene ninguna advertencia
-        # específica, y repreguntar solo produce una genérica: ruido en la
-        # línea más leída del tier visible. Queda como telemetría en
-        # `report.safety_missing`.
         if report.needs_retry:
             faltan = []
             if report.answer_exceeds_budget:
@@ -2108,6 +2199,14 @@ def synthesizer(state: PoolAgentState) -> dict:
     if payload.safety:
         payload.safety = _strip_code_fences(payload.safety)
 
+     # Tope de desplegables (D2). "Fuentes" la agrega _attach_sources y cuenta
+    # dentro del total: si hay fuentes, quedan MAX_DETAILS - 1 de contenido.
+    has_sources = any(r.sources for r in usable)
+    payload.details, dropped = _cap_details(
+        payload.details, MAX_DETAILS - (1 if has_sources else 0)
+    )
+    if dropped:
+        validation = {**validation, "details_dropped": dropped}
     _attach_sources(payload, usable)
 
     return {
@@ -2170,13 +2269,13 @@ def suggester(state: PoolAgentState, config: RunnableConfig) -> dict:
     system_content = SUGGESTER_PROMPT.format(
         language=language,
         roster=roster_text(),
-        answered_summary=answer_text,
+        answered_summary=_suggester_prompt_summary(state, answer_text),
         unconsumed_entities=_format_entities(unconsumed),
     )
 
     messages = [
         SystemMessage(content=system_content),
-        HumanMessage(content="Generá las sugerencias ahora, o ninguna."),
+        HumanMessage(content="Generate the suggestions now."),
     ]
 
     try:

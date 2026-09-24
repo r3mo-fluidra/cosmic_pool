@@ -26,11 +26,21 @@ from ..graph_context.response_validator import (
     HAZARD_AGENTS,
     OVERFLOW_LABEL,
 )
-from .prompts import BASE_POOL_AGENT_PROMPT 
+from .prompts import BASE_POOL_AGENT_PROMPT, AGENT_SLUGS
+from .prompts_sub_agents import _ESCALATION_TARGETS
 
 # =====================================================================
 # Bloques condicionales
 # =====================================================================
+# Llamadas que el pre-fetch de run_step consume del cap de cada tool ANTES de
+# que el agente arranque: vector_search y search_seed_nodes siempre, y
+# expand_subgraph cuando los seeds vienen con STATUS: OK (C1a). Si el
+# pre-fetch no expande, el agente tiene 1 expand más del anunciado: error en
+# la dirección segura, el gate nunca rechaza por eso. Si cambia el pre-fetch
+# en nodes.py, esta tabla tiene que cambiar con él.
+PREFETCH_SPENT = {"vector_search": 1, "search_seed_nodes": 1, "expand_subgraph": 1}
+MAX_DETAILS = 4
+MAX_DETAIL_WORDS = 60
 
 def _details_lines(details: list[str]) -> str:
     return "\n".join(f"- {d}" for d in details) if details else "- (none)"
@@ -73,7 +83,8 @@ def _budget_block(budget: int) -> str:
 This counts `answer` + `actions` + `safety` only — the text the user sees
 before tapping anything. Words inside `details` and `readings` are NOT counted.
 
-* Never delete content to fit. Move it into `details` instead.
+* Never delete content to fit. Merge it into the closest `details` section
+  instead — at most {MAX_DETAILS} sections in total.
 * `actions`: at most {MAX_ACTIONS} items, each ≤ {MAX_ACTION_WORDS} words.
   Order them so the most important is first — anything over budget is dropped
   from the end into a `details` section, not discarded.
@@ -110,13 +121,16 @@ def _details_block(details: list[str]) -> str:
 This archetype folds nothing. Leave `details` empty — do not manufacture
 sections to fill it."""
     return f"""### Details (tier 2, collapsible)
-Populate a section for each category below that the evidence supports. Omit the
-rest; do not invent one. If a category is genuinely unresolved, say so in one
-line rather than fabricating content.
+**At most {MAX_DETAILS} sections in total — never more.** Populate one for each
+category below that the evidence supports, most useful first. Omit the rest; do
+not invent one. Anything else worth keeping is merged into the closest of these
+sections, never given a section of its own. If a category is genuinely
+unresolved, say so in one line rather than fabricating content.
 
 {_details_lines(details)}
 
 * `label`: ≤ 5 words, in the user's language.
+* `body`: ≤ {MAX_DETAIL_WORDS} words of prose.
 * Do not use a label containing "safety", "warning", "hazard", or "risk" for
   anything that is not a safety warning — such a section is auto-promoted into
   tier 1 and its first sentence becomes the visible warning.
@@ -184,9 +198,8 @@ missing input that blocks a dose does not block stating the target.
 
 _SUBAGENT_TEMPLATE = """## 10. DOWNSTREAM RESPONSE SHAPE
 
-Your JSON output is not shown to the user. A Synthesizer node consumes it and
-renders the final answer. Your job is to supply the material that shape needs,
-already sorted, so the Synthesizer never has to guess or infer.
+Your JSON is not shown to the user. A Synthesizer rewrites it into the final
+answer, so supply the material that answer needs, already sorted.
 
 **Target shape of the final answer:** {shape}
 
@@ -195,38 +208,25 @@ already sorted, so the Synthesizer never has to guess or infer.
 Cover each item you have evidence for, in the fields of your output contract.
 List anything you could not establish under `missing_information`.
 
-**Write notes, not prose.** Your reader is a machine that rewrites everything
-you produce. Facts cost it nothing; sentences it has to re-parse cost it work.
+**Write notes, not prose.**
+* One fact per list item. Fragments beat sentences.
+* **Hard cap: 25 words per list item.** A finding that needs 40 words is two
+  findings.
+* No opening, transitions, summary or closing. Do not restate the task, the
+  user's own numbers, or a number already stated in the same item.
+* Numbers, thresholds, chapter references and node ids go verbatim.
 
-* One fact per line. Fragments beat sentences.
-* **Hard cap: 25 words per list item.** This is not a style preference, it is
-  the contract. A finding that needs 40 words is two findings. Nothing is lost
-  by splitting: the Synthesizer reads a list, not a paragraph.
-* Drop every clause that restates a number already in the same item. "a 10 psi
-  differential (22 psi against a 12 psi baseline)" is one fact stated twice.
-* No opening, no transitions, no summary, no closing remark.
-* Do not restate the task or read the user's own numbers back to them.
-* Do not narrate your reasoning or announce what you are about to say.
-* Numbers, thresholds, chapter references and node ids go verbatim — those
-  are the parts the Synthesizer cannot reconstruct.
+**Cut wording, never evidence.** An omitted fact is lost for good: the
+Synthesizer cannot recover what you did not send. If everything you hold fits
+in a dozen lines, that is a complete answer.
 
-**Completeness is not length.** Never drop a fact to be shorter: an omission
-here is permanent, because the Synthesizer cannot recover what you did not
-send. Cut wording, never evidence. The reader is a rewriter, so a fact in six words survives exactly as well as
-the same fact in thirty, and reaches the user two seconds sooner.
-If everything you hold fits in a dozen
-lines, that is a complete answer.
-
-**Two things are never compressed.** Brevity does not apply to them:
-
-* **Handling hazards for anything you tell the user to add.** If your output
-  recommends dosing a product, the hazard of handling that product is
-  evidence, not wording — incompatibility between products, gas release on
-  contact, order of addition, required PPE. A recommendation to add acid and
-  chlorine that omits the mixing hazard is incomplete, not concise.
-* **`missing_information`.** If you recommend a dose, a volume, or any value
-  that depends on inputs you were not given, name every missing input.
-  Leaving it empty asserts that you established everything.
+**Never compressed:**
+* Handling hazards for anything you recommend adding — incompatibility, gas
+  release on contact, order of addition, required PPE. A dose without its
+  mixing hazard is incomplete, not concise.
+* `missing_information`: name every input you were not given that a
+  recommended dose, volume or value depends on. An empty list asserts you
+  established everything.
 
 {safety}"""
 
@@ -265,18 +265,10 @@ _SYNTH_TEMPLATE = """## 9. OUTPUT ARCHETYPE
 **Archetype:** `{archetype}`
 **Required shape:** {shape}
 
-`readings` is not yours to write: leave it as an empty array. The system
-renders the panel from the specialist payload, and it does not repeat what you
-put there. Do not restate measured figures in `answer` beyond the one that
-carries the verdict.
-
-Where `actions` apply, keep the order the specialist gave them, most important
-first. When the raw content carries an `order_rationale`, the sequence it
-describes IS the order — do not resequence it.
-
 Follow that shape exactly; do not substitute a preferred format. Numbered steps
 means numbered steps. A list means no narrative between items. A one-sentence
-verdict means the verdict comes first, before any qualification.
+verdict means the verdict comes first, before any qualification. Where
+`actions` apply, keep the specialist's order, most important first.
 
 {budget}
 
@@ -327,12 +319,11 @@ def build_synthesizer_archetype_section(archetype: str,
 # =====================================================================
 def _render_tool_budget(config) -> str:
     """
-    Declara al agente el presupuesto REAL que _gate va a aplicar.
+    Declara al agente el presupuesto que le QUEDA, no el cap nominal.
 
-    Para los agentes de retrieval el límite no es un pozo común: son caps por
-    tool. Anunciar un total intercambiable hace que el agente reintente la
-    misma tool creyendo que le queda saldo, y cada rechazo cuesta un round
-    trip de LLM sin devolver evidencia.
+    Anunciar el cap completo cuando el pre-fetch ya gastó parte hace que el
+    agente vea saldo que no existe: en el trace 3ae21882 llamó a vector_search
+    creyendo tener 1 disponible, recibió BUDGET_EXHAUSTED y siguió buscando.
     """
     caps = {t: RETRIEVAL_TOOL_BUDGETS[t] for t in config.tools
             if t in RETRIEVAL_TOOL_BUDGETS}
@@ -343,14 +334,26 @@ def _render_tool_budget(config) -> str:
             "Count every call to any authorized tool."
         )
 
-    lineas = "\n".join(f"  {t:<20} {n}" for t, n in caps.items())
-    return (
-        f"Hard limit: **{sum(caps.values())} tool calls** this turn, allocated "
-        f"per tool. They are NOT interchangeable:\n\n{lineas}\n\n"
-        "Spending the vector_search call does not free a second "
-        "search_seed_nodes. A call beyond a tool's own cap is refused by the "
-        "system and returns nothing — it does not fail over to another tool."
+    left = {t: max(n - PREFETCH_SPENT.get(t, 0), 0) for t, n in caps.items()}
+    prefetched = any(PREFETCH_SPENT.get(t) for t in caps)
+    available = "\n".join(f"  {t:<20} {n}" for t, n in left.items() if n > 0)
+    exhausted = ", ".join(f"`{t}`" for t, n in left.items() if n == 0)
+
+    header = (
+        "The pre-fetch already spent part of your budget. Calls LEFT this turn"
+        if prefetched else
+        "Calls available this turn"
     )
+    block = (
+        f"{header}, per tool — **{sum(left.values())} in total**, NOT "
+        f"interchangeable:\n\n{available}\n"
+    )
+    if exhausted:
+        block += (
+            f"\n{exhausted}: 0 left. A call is refused by the system and "
+            "returns nothing.\n"
+        )
+    return block
 
 def build_agent_prompt(config, agent_key: str | None = None) -> str:
     """
@@ -367,9 +370,25 @@ def build_agent_prompt(config, agent_key: str | None = None) -> str:
         excluded_tasks="\n".join(f"- {i}" for i in config.excluded_tasks),
         tools=", ".join(config.tools),
         tool_instructions=config.tool_instructions,
-        output_contract=config.output_contract,
+        output_contract=_contract_for(config, agent_key),
         archetype_section=build_subagent_archetype_section(
             config.archetype, agent_key
         ),
         tool_budget_block=_render_tool_budget(config),
+    )
+
+def _contract_for(config, agent_key: str | None = None) -> str:
+    """
+    Devuelve el output_contract sin el slug del propio agente en la lista de
+    escalation_target. La regla escrita ("Never your own domain") no alcanzó:
+    en el trace e7591df6 compliance volvió a devolver escalation_target =
+    "compliance". Si el valor no está en la lista, no se puede elegir.
+    """
+    slug = agent_key or {v: k for k, v in AGENT_SLUGS.items()}.get(config.agent_name)
+    targets = [t.strip() for t in _ESCALATION_TARGETS.split(",")]
+    if slug not in targets:
+        return config.output_contract
+    own_free = ", ".join(t for t in targets if t != slug)
+    return config.output_contract.replace(
+        f"  {_ESCALATION_TARGETS}\n", f"  {own_free}\n", 1
     )

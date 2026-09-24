@@ -56,15 +56,10 @@ _TURN_THREAD_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "retrieval_turn_thread_id", default=""
 )
 
-# Cuántas veces puede llamarse cada tool dentro de UN step: lo dice
-# tool_budgets.py, importado arriba como _TOOL_BUDGETS.
-#
-# Acá había una copia literal de esos valores que PISABA el import. Los dos
-# coincidían, así que no cambiaba el comportamiento — hasta que se tocó el
-# módulo canónico y el cambio no surtió efecto. El propósito declarado de
-# tool_budgets.py ("fuente única de verdad") era falso mientras esto existió,
-# y middleware.py importa _TOOL_BUDGETS DESDE ACÁ, así que consumía la copia.
 
+# Familias de tools para el mensaje de BUDGET_EXHAUSTED: un especialista de
+# retrieval no tiene las tools de math, y math no tiene las de retrieval.
+_RETRIEVAL_FAMILY = frozenset({"vector_search", "search_seed_nodes", "expand_subgraph"})
 
 def begin_tool_scope(thread_id: str = "") -> None:
     """
@@ -112,31 +107,23 @@ def _gate(tool_name: str, arg_repr: str) -> str | None:
 
     if len(previous) >= budget:
         used = "; ".join(repr(p) for p in previous)
+                # Solo tools de la MISMA familia. Listar todo _TOOL_BUDGETS le ofrecía
+        # a compliance resolve_formula, calculate, lookup_product... (trace
+        # 3ae21882): llamadas imposibles y una invitación a seguir buscando.
+        family = (
+            _RETRIEVAL_FAMILY if tool_name in _RETRIEVAL_FAMILY
+            else frozenset(_TOOL_BUDGETS) - _RETRIEVAL_FAMILY
+        )
         remaining = [
             t for t, b in _TOOL_BUDGETS.items()
-            if t != tool_name and len(calls.get(t, [])) < b
+            if t in family and t != tool_name and len(calls.get(t, [])) < b
         ]
         if remaining:
             guidance = (
-                "Use the evidence you already have, answer with "
-                'evidence_status = "insufficient_evidence" naming the gap, or '
-                "query one of the tools that still has budget: "
-                + ", ".join(f"`{t}`" for t in remaining) + "."
-            )
-        else:
-            # Observed in trace 32e037ad and in the spa variant: the agent
-            # tried all three retrieval tools one after another, each already
-            # exhausted, spending a full model call per attempt. The previous
-            # message said "switch to another tool" without knowing whether
-            # any were left, and the agent did exactly that.
-            guidance = (
-                "NO RETRIEVAL LEFT: every query tool has exhausted its budget "
-                "for this task. Trying another one returns this same message. "
-                "There is nothing further to consult: answer NOW with the "
-                "evidence you gathered, or with "
-                'evidence_status = "insufficient_evidence" naming the gap '
-                "precisely. That last one is a CORRECT and COMPLETE answer, "
-                "not a failure."
+                "Answer NOW with the evidence you already have, or with "
+                'evidence_status = "insufficient_evidence" naming the gap. Only '
+                "for a SECOND information need that evidence does not cover, "
+                + ", ".join(f"`{t}`" for t in remaining) + " still has budget."
             )
         return (
             f"BUDGET_EXHAUSTED — `{tool_name}` has been used "
@@ -684,25 +671,12 @@ WITH n, 0.0 AS lucene
 @tool
 def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False) -> str:
     """
-    Search the pool manual for the most relevant text chunks about aquatic
-    facilities, water chemistry, equipment, procedures, risks and safety.
+    Search the pool manual (CDC MAHC, OSHA and EPA public-domain sources, US
+    practice) for the most relevant text chunks. Query in English. It does NOT
+    contain the national regulations of other countries.
 
-    The corpus is built from CDC MAHC, OSHA and EPA public-domain sources.
-    It covers US practice and general operations. It does NOT contain the
-    national regulations of other countries.
-
-    CALL THIS AT MOST ONCE PER TASK. A second call is refused by the system.
-
-    Args:
-        query: Search terms in English.
-        k: Number of chunks to return (default 4).
-        regulatory_only: If True, return only chunks flagged as regulatory.
-            Use for compliance questions. If this returns nothing, the corpus
-            has no regulatory basis for the question — say so instead of
-            answering from general knowledge.
-
-    Returns the top matching chunks with chapter, section path and a
-    REGULATORY flag where applicable.
+    regulatory_only=True returns only chunks flagged as regulatory; an empty
+    result means the corpus has no regulatory basis for the question.
     """
     blocked = _gate("vector_search", query)
     if blocked:
@@ -757,34 +731,23 @@ def vector_search(query: str, k: int = DEFAULT_K, regulatory_only: bool = False)
     for i, (doc, _score) in enumerate(results, 1):
         m = doc.metadata or {}
         flag = " | REGULATORY" if m.get("is_regulatory") else ""
-        # El score NO se expone al modelo. El store corre en modo HYBRID
-        # (denso + sparse vía RRF), así que ese número es una fusión de
-        # rangos, no una similitud: da fracciones exactas (1/2, 1/3, 5/6),
-        # empata chunks distintos en 0.5000, y una query sin sentido
-        # ("purple monkey dishwasher") saca el mismo 0.5000 que una query
-        # legítima. Medido contra el store, no correlaciona con relevancia.
-        #
-        # Mostrarlo era falsa precisión: el modelo recibía tres chunks
-        # empatados y sin señal para jerarquizarlos, y gastaba el
-        # razonamiento en re-buscar en vez de responder. El rango sí es
-        # información honesta — la lista ya viene ordenada.
+        
+        content = doc.page_content or ""
+        if content.startswith("Section:"):
+            content = content.split("\n", 1)[1].lstrip() if "\n" in content else ""
         partes.append(
             f"--- Chunk {i} of {len(results)}{flag} ---\n"
             f"Chapter: {m.get('chapter', '?')} | "
-            f"Path: {m.get('hierarchy_path', 'unknown')}\n"
-            f"Type: {m.get('fragment_type', '?')} | ID: {m.get('chunk_id', '')}\n"
-            f"Content:\n{_truncate(doc.page_content, MAX_CHUNK_CHARS)}\n"
+            f"Path: {m.get('hierarchy_path', 'unknown')} | "
+            f"ID: {m.get('chunk_id', '')}\n"
+            f"{_truncate(content, MAX_CHUNK_CHARS)}\n"
         )
 
     n_reg = sum(bool((d.metadata or {}).get("is_regulatory")) for d, _ in results)
     encabezado = (
-        f"[{len(results)} chunks, {n_reg} regulatory | "
-        f"corpus: MAHC/OSHA/EPA, US-focused]\n"
-        "This is the complete result of the semantic search for this "
-        "task. Do not call this tool again.\n"
-        "The chunks are ordered by relevance: 1 is the most "
-        "relevant. A chunk that does not apply to the task is discarded, it is not "
-        "cited.\n\n"
+        f"[{len(results)} chunks, {n_reg} regulatory | corpus: MAHC/OSHA/EPA, "
+        f"US-focused | ordered by relevance, 1 = most relevant]\n"
+        "Discard, do not cite, any chunk that does not apply to the task.\n\n"
     )
     return encabezado + "\n".join(partes)
 
@@ -815,28 +778,17 @@ def search_seed_nodes(
     top_k: int = 5,
 ) -> str:
     """
-    Find the most relevant seed nodes in the Neo4j graph for a question, plus
+    Find entry-point nodes in the Neo4j graph for ONE information need, plus
     the normative/procedural nodes one hop away from them.
 
-    Pass `intent` so that node labels capable of answering the question are
-    ranked first. Use "normative" for any question about a threshold, range,
-    limit, requirement or code provision — otherwise an Equipment or Concept
-    node may outrank the Requirement node that holds the actual answer.
+    intent: use "normative" for any threshold, range, limit, requirement or
+    code provision — otherwise an Equipment or Concept node may outrank the
+    Requirement node that holds the answer.
 
-    AT MOST TWO CALLS PER TASK: one per information need. A diagnostic
-    question and a procedural one are two needs; rephrasing the same need is
-    not. A third call is refused by the system.
-
-    The first line of the result is a machine-readable STATUS:
-      OK                 usable seeds found; related nodes listed
-      WEAK               seeds found but confidence is low; treat as unconfirmed
-      NO_GRAPH_COVERAGE  nothing relevant. STOP retrieving on this topic.
-      GRAPH_UNAVAILABLE  the graph could not be queried. Do NOT retry this tool.
-                         Answer from vector_search results only.
-
-    When related nodes are returned they are already answer candidates: if one
-    of them states the value asked for, call expand_subgraph on it once, or
-    answer directly. Do not run further vector searches to confirm it.
+    The first line of the result is a STATUS: OK (usable seeds), WEAK (low
+    confidence, treat as unconfirmed), NO_GRAPH_COVERAGE (stop retrieving on
+    this topic) or GRAPH_UNAVAILABLE (do not retry). Your remaining calls are
+    listed in the Tool budget section of your instructions.
     """
     blocked = _gate("search_seed_nodes", f"{query} [intent={intent}]")
     if blocked:
@@ -947,10 +899,11 @@ def search_seed_nodes(
     if top_adj < ABSOLUTE_FLOOR or sin_etiqueta_util:
         status = "WEAK"
 
+    logger.debug("search_seed_nodes terms=%s mode=%s", terms,
+                 "fulltext" if use_ft else "scan")
     parts: list[str] = [
         f"STATUS: {status}",
-        f"=== {len(kept)} seed(s) | intent: {intent} | terms: {', '.join(terms)} "
-        f"| mode: {'fulltext' if use_ft else 'scan'} ===\n",
+        f"=== {len(kept)} seed(s) | intent: {intent} ===\n",
     ]
     if status == "WEAK":
         reason = (
@@ -968,16 +921,12 @@ def search_seed_nodes(
     for i, (adj, raw, node, on_intent) in enumerate(kept, 1):
         node_id = node.get("id") or node.element_id
         seed_ids.append(node_id)
-        aliases = _as_list(node.get("aliases"))
-        keywords = _as_list(node.get("keywords"))
         flag = "" if on_intent else "  [off-intent: context, not an answer]"
         parts.append(
             f"--- Seed {i} (score: {adj:.3f}{'' if adj == raw else f' / raw {raw:.3f}'}){flag} ---\n"
             f"ID: {node_id}\n"
             f"Name: {node.get('name') or node_id}\n"
             f"Label(s): {', '.join(node.labels)}\n"
-            f"Aliases: {', '.join(aliases[:6]) if aliases else '—'}\n"
-            f"Keywords: {', '.join(keywords[:8]) if keywords else '—'}\n"
             f"Description: "
             f"{_truncate(node.get('description') or node.get('summary') or '', MAX_DESC_CHARS) or '—'}\n"
         )
@@ -999,18 +948,13 @@ def search_seed_nodes(
         neighbors = []
 
     if neighbors:
-        parts.append(f"\n=== {len(neighbors)} nodo(s) {intent} a 1 salto ===\n")
+        parts.append(f"\n=== {len(neighbors)} {intent} node(s) one hop away ===\n")
         for n in neighbors:
             parts.append(
                 f"  [{'/'.join(n['labels'])}] {n['name'] or n['id']} (id: {n['id']}) "
-                f"vía {n['rel']}\n"
+                f"via {n['rel']}\n"
                 f"    {_truncate(n['description'], MAX_DESC_CHARS)}\n"
             )
-        parts.append(
-            "\nEstos nodos son candidatos a respuesta. Si uno de ellos contiene "
-            "el valor pedido, ya tienes la respuesta: cítalo y detente. No "
-            "busques confirmación en prosa.\n"
-        )
 
     parts.append(
         "Usa EXACTAMENTE los IDs de arriba en expand_subgraph. "
@@ -1107,19 +1051,12 @@ def expand_subgraph(
     max_edges: int = 20,
 ) -> str:
     """
-    Expand the Neo4j graph from one or more seed node ids (1-2 hops).
+    Expand the Neo4j graph 1-2 hops from node ids, comma-separated and exactly
+    as returned by search_seed_nodes. Pass ALL relevant ids in ONE call. Ids
+    that do not exist are reported back, not silently ignored.
 
-    seed_node_ids: comma-separated node ids, exactly as returned by
-    search_seed_nodes. Ids that do not exist in the graph are reported back
-    explicitly rather than silently ignored.
-
-    AT MOST TWO CALLS PER TASK: one speculative attempt with a canonical slug,
-    and one on the seeds returned by search_seed_nodes. A third is refused.
-    Pass ALL relevant seed ids in a single call rather than one per call.
-
-    Returns an induced subgraph: nodes ranked by distance to the seeds and by
-    how many preferred relationship types were traversed, plus only those
-    relationships whose endpoints are both present in the returned node set.
+    Returns the induced subgraph: nodes ranked by distance to the seeds, plus
+    only the relationships whose two endpoints are both in the returned set.
     """
     blocked = _gate("expand_subgraph", seed_node_ids)
     if blocked:
@@ -1148,12 +1085,7 @@ def expand_subgraph(
 
             if not resolved:
                 # Señal de alucinación: distinta de "existe pero no expandió"
-                return (
-                    "SEEDS_NOT_FOUND: ninguno de estos ids existe en el grafo: "
-                    f"{', '.join(seed_ids)}.\n"
-                    "Llama primero a search_seed_nodes y usa los IDs que devuelva "
-                    "tal cual. No construyas ids."
-                )
+                return f"SEEDS_NOT_FOUND: none of these ids exists in the graph: {seed_ids}. Use ids exactly as search_seed_nodes returned them; never build ids."
 
             seed_eids = [r["eid"] for r in resolved]
             found_ids = {r["sid"] for r in resolved} | {r["name"] for r in resolved}
@@ -1180,7 +1112,7 @@ def expand_subgraph(
         return _graph_unavailable("expand_subgraph", e)
 
     if not record or not record["nodes"]:
-        return f"SEEDS_ISOLATED: los seeds existen pero no tienen expansión a {hops} hop(s)."
+        return f"SEEDS_ISOLATED: the seeds exist but have no expansion at {hops} hop(s)."
 
     nodes = record["nodes"]
     relationships = record["relationships"]
@@ -1190,11 +1122,11 @@ def expand_subgraph(
     relationships.sort(key=lambda r: rank.get(r["type"], len(rank)))
     relationships = relationships[:max_edges]
 
-    header = f"=== Subgrafo desde seeds: {', '.join(r['sid'] for r in resolved)} ==="
+    header = f"=== Subgraph from seeds: {', '.join(r['sid'] for r in resolved)} ==="
     if missing:
-        header += f"\n[AVISO] ids inexistentes ignorados: {', '.join(missing)}"
+        header += f"\n[NOTE] unknown ids ignored: {', '.join(missing)}"
 
-    parts: list[str] = [header, f"\nNodos ({len(nodes)}):"]
+    parts: list[str] = [header, f"\nNodes ({len(nodes)}):"]
     for i, n in enumerate(nodes, 1):
         marker = " *seed*" if i <= len(seed_eids) else ""
         parts.append(
@@ -1202,7 +1134,7 @@ def expand_subgraph(
             f"     {_truncate(n.get('description') or '', MAX_NODE_DESC)}"
         )
 
-    parts.append(f"\nRelaciones ({len(relationships)}):")
+    parts.append(f"\nRelationships ({len(relationships)}):")
     for r in relationships:
         props = {
             k: v for k, v in (r.get("properties") or {}).items()
