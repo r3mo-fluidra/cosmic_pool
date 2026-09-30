@@ -736,7 +736,7 @@ with st.container(key="pa-phone"):
 
                 # Outside the card: the action row is *about* the answer, not
                 # part of it, and the reference design puts it under the message.
-                if msg["role"] == "assistant" and msg.get("can_rate"):
+                if msg["role"] == "assistant":
                     render_answer_actions(msg)
 
                 # Openers again, under the action row on the newest answer.
