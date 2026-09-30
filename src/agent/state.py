@@ -73,7 +73,7 @@ class ExecutionStep(BaseModel):
             "target or the product type — the specialist assumes standard values "
             "for those.)"
         ),
-    ),
+    )
     retrieval_query: str = Field(
         default="",
         description=(
