@@ -1257,7 +1257,7 @@ def planner(state: PoolAgentState, config: RunnableConfig):
 
     context_for_planner = "\n\n".join(parts)
 
-    fallback_language = state.get("detected_language") or "es"
+    fallback_language = state.get("detected_language") or "en"
 
     try:
         # Un dict con la variable del template, NO una lista de mensajes.
