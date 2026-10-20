@@ -1125,7 +1125,7 @@ if prompt:
                     output={"response": final_response}
                 )
 
-                span.set_trace_io(
+                span.update_trace(
                     input={"prompt": prompt},
                     output={"response": final_response},
                 )
@@ -1133,13 +1133,12 @@ if prompt:
             except Exception as e:
                 turn_error = e
 
-                span.update(
-                    level="ERROR",
-                    status_message=str(e),
-                    output={"error": str(e)},
+                span.update_trace(
+                    input={"prompt": prompt},
+                    output={"response": final_response},
                 )
 
-                span.set_trace_io(
+                span.update_trace(
                     input={"prompt": prompt},
                     output={"error": str(e)},
                 )
